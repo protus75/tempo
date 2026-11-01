@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "tempo": {
+      "type": "stdio",
+      "command": "tempo",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}

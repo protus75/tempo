@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "tempo": {
+      "command": "tempo",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}

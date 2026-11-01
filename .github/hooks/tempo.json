@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "tempo hook copilot preToolUse",
+        "powershell": "tempo hook copilot preToolUse",
+        "timeoutSec": 30
+      }
+    ],
+    "subagentStop": [
+      {
+        "type": "command",
+        "bash": "tempo hook copilot subagentStop",
+        "powershell": "tempo hook copilot subagentStop",
+        "timeoutSec": 30
+      }
+    ]
+  }
+}

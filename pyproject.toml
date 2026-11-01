@@ -1,0 +1,66 @@
+[project]
+name = "tempo-agents"
+dynamic = ["version"]
+description = "Agent orchestration with one level of subagents and verified file-only communication, governed identically on Claude Code, GitHub Copilot, and Codex."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "pydantic>=2.13.5",
+    "pyyaml>=6.0.3",
+]
+keywords = ["agents", "orchestration", "claude-code", "copilot", "codex"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Development Status :: 2 - Pre-Alpha",
+]
+
+[project.scripts]
+tempo = "tempo.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/protus75/tempo"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/tempo/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tempo"]
+
+# The rendered governing layout ships as wheel data files under <prefix>/share/tempo/rules/,
+# mirroring the host top level; `tempo init` places them in a host repo. Keep this table equal
+# to `tempo.render` output (tests/test_packaging.py enforces it).
+[tool.hatch.build.targets.wheel.shared-data]
+"CLAUDE.md" = "share/tempo/rules/CLAUDE.md"
+".claude/agents" = "share/tempo/rules/.claude/agents"
+".claude/settings.json" = "share/tempo/rules/.claude/settings.json"
+".mcp.json" = "share/tempo/rules/.mcp.json"
+".github/copilot-instructions.md" = "share/tempo/rules/.github/copilot-instructions.md"
+".github/agents" = "share/tempo/rules/.github/agents"
+".github/hooks" = "share/tempo/rules/.github/hooks"
+".vscode/mcp.json" = "share/tempo/rules/.vscode/mcp.json"
+"AGENTS.md" = "share/tempo/rules/AGENTS.md"
+".codex/agents" = "share/tempo/rules/.codex/agents"
+".codex/config.toml" = "share/tempo/rules/.codex/config.toml"
+".codex/hooks.json" = "share/tempo/rules/.codex/hooks.json"
+".codex/tempo-orchestrator.md" = "share/tempo/rules/.codex/tempo-orchestrator.md"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src", "tests", "README.md", "AGENT_PLAN.md", "TEMPO_PLAN.md",
+    "CLAUDE.md", "AGENTS.md", ".mcp.json", ".claude/agents", ".claude/settings.json",
+    ".github/copilot-instructions.md", ".github/agents", ".github/hooks", ".vscode/mcp.json",
+    ".codex/agents", ".codex/config.toml", ".codex/hooks.json", ".codex/tempo-orchestrator.md",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
