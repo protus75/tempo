@@ -16,18 +16,18 @@ from tempo.__main__ import build_control, main
 from dataclasses import replace
 from tempo.box import Box
 from tempo.caps import draws
-from tempo.drain import CEILING, HALT_SIGNAL
+from tempo.drain import CEILING, HALT_SIGNAL, PREMISE
 from tempo.git import Git
 from tempo.journal import EventType, Journal
 from tempo.lockfile import Lockfile, LockHeld
 from tempo.seams import LocalFileSystem, SubprocessExec
 from tempo.tickets import intake
-from tests.test_cli import CONFIG, ENV, PLAN, git_out, ticket, write, with_retro_driver
+from tests.test_cli import CONFIG, ENV, git_out, ticket, write, with_retro_driver
 from tests.test_terminal import repo as rework_repo
 from tests.test_merge import repo as admission_repo
 
 
-def test_bootstrap_never_supervised_holds(admission_repo, monkeypatch):
+def test_drain_keeps_inline_admission(admission_repo, monkeypatch):
     from tests.test_merge import test_bootstrap_pipeline_keeps_inline_admission
     test_bootstrap_pipeline_keeps_inline_admission(admission_repo, monkeypatch, "drain")
 
@@ -79,7 +79,6 @@ def make_root(tmp_path: Path, caps: str = "") -> Path:
     root = tmp_path / "repo"
     (root / "tempo").mkdir(parents=True)
     (root / "tempo" / "thing.py").write_text("")
-    (root / "TEMPO_PLAN.md").write_text(PLAN)
     (root / "config.yaml").write_text(CONFIG + caps)
     (root / ".gitignore").write_text(".tempo/\n")
     adopt_conduct(root)
@@ -130,6 +129,41 @@ def retry_draws(root: Path, stem: str) -> int:
 
 def tos(root: Path, stem: str) -> list[str]:
     return [e.body["to"] for e in journal(root).read() if e.type == EventType.STATE_TRANSITION and e.ticket == stem]
+
+
+# --- the premise park ----------------------------------------------------------------------------
+
+
+def test_a_premise_failed_stem_is_never_reoffered_in_its_own_invocation(root, capsys):
+    commit_ticket(root, "false-premise", confirmed())
+    script = Script({"false-premise": [PREMISE]})
+
+    assert drain(root, script) == 0
+    assert script.calls == ["false-premise"]  # budget left, yet no re-offer
+    assert retry_draws(root, "false-premise") == 0
+    out = capsys.readouterr().out
+    assert "false-premise: premise_failed at review; parked until its committed ticket.md changes" in out
+    assert "editing tickets/false-premise/ticket.md and committing it" in out
+
+
+def test_a_premise_park_holds_across_invocations_until_a_ticket_edit_lands(root):
+    commit_ticket(root, "false-premise", confirmed())
+    script = Script({"false-premise": [PREMISE]})
+    drain(root, script)
+
+    # The next invocation skips it: the ticket is unchanged.
+    assert drain(root, script) == 0
+    assert script.calls == ["false-premise"]
+
+    # The operator answers the premise in the working tree; the next drain's intake commits it.
+    path = root / "tickets" / "false-premise" / "ticket.md"
+    before = git_out(root, "rev-parse", "HEAD:tickets/false-premise/ticket.md")
+    path.write_text(path.read_text().replace("`thing()` returns ok.", "`thing()` returns ok, as answered."))
+    assert drain(root, script) == 0
+    assert git_out(root, "rev-parse", "HEAD:tickets/false-premise/ticket.md") != before
+    assert script.calls == ["false-premise", "false-premise"]
+    assert retry_draws(root, "false-premise") == 0
+    assert tos(root, "false-premise")[-1] == "merged"
 
 
 # --- ordering -----------------------------------------------------------------------------------
@@ -389,84 +423,11 @@ def test_drain_reconciles_on_entry(root):
     assert tos(root, "dead-run") == ["running", "abandoned"]
 
 
-# --- spec-gap hold (section 11.4) ---------------------------------------------------------------
-
-
-def test_a_spec_gap_hold_waits_for_its_hardening_ticket_then_re_runs_free(root):
-    commit_ticket(root, "held", confirmed())
-    calls: list[str] = []
-
-    def pipeline(checkout):
-        async def dispatch(t):
-            calls.append(t.stem)
-            if t.stem == "held" and calls.count("held") == 1:
-                commit_ticket(root, "harden-held-1", confirmed(priority="P3"))
-                round_record(checkout.journal, "harden-held-1")
-                checkout.journal.append(EventType.STATE_TRANSITION, {"to": "gate_failed", "stage": "check",
-                                                                     "dispatch": "spec_gap_hold", "round": 1,
-                                                                     "plan_units": {"19.P3.held": "absent"}}, ticket="held")
-                return "gate_failed"
-            checkout.journal.append(EventType.STATE_TRANSITION, {"to": "merged"}, ticket=t.stem)
-            return "merged"
-
-        return with_retro_driver(checkout, dispatch)
-
-    assert drain(root, pipeline) == 0
-    assert calls == ["held", "harden-held-1", "held"]  # held while the hardening ticket is unmerged
-    assert retry_draws(root, "held") == 0  # the release re-run draws no retry unit
-    assert tos(root, "held")[-1] == "merged"
-
-
-def test_a_spec_gap_hold_never_re_runs_while_its_hardening_ticket_is_unmerged(root, capsys):
-    commit_ticket(root, "held", confirmed())
-    calls: list[str] = []
-
-    def pipeline(checkout):
-        async def dispatch(t):
-            calls.append(t.stem)
-            draft = confirmed().replace("state: confirmed", "state: draft")  # never dispatched
-            commit_ticket(root, "harden-held-1", draft)
-            round_record(checkout.journal, "harden-held-1")
-            checkout.journal.append(EventType.STATE_TRANSITION, {"to": "gate_failed", "stage": "check",
-                                                                 "dispatch": "spec_gap_hold", "round": 1,
-                                                                     "plan_units": {"19.P3.held": "absent"}}, ticket="held")
-            return "gate_failed"
-
-        return dispatch
-
-    drain(root, pipeline)
-    assert calls == ["held"]
-    assert "spec gap held on round 1 (harden-held-1)" in capsys.readouterr().out
-
-
-def test_a_spec_gap_premise_releases_on_its_hardening_merge_without_a_ticket_edit(root):
-    commit_ticket(root, "held", confirmed())
-    calls: list[str] = []
-
-    def pipeline(checkout):
-        async def dispatch(t):
-            calls.append(t.stem)
-            if t.stem == "held" and calls.count("held") == 1:
-                commit_ticket(root, "harden-held-1", confirmed(priority="P3"))
-                round_record(checkout.journal, "harden-held-1")
-                checkout.journal.append(EventType.STATE_TRANSITION, {"to": "premise_failed", "stage": "implement",
-                                                                     "dispatch": "spec_gap_hold", "round": 1,
-                                                                     "plan_units": {"19.P3.held": "absent"}}, ticket="held")
-                return "premise_failed"
-            checkout.journal.append(EventType.STATE_TRANSITION, {"to": "merged"}, ticket=t.stem)
-            return "merged"
-
-        return with_retro_driver(checkout, dispatch)
-
-    assert drain(root, pipeline) == 0
-    assert calls == ["held", "harden-held-1", "held"]
-    assert tos(root, "held")[-1] == "merged"
-
 
 
 def mechanical_first(monkeypatch, stem, *, workspace=True):
     from tempo import runner, stages
-    from tempo.artifacts import Cost, Finding, StageResult
+    from tempo.artifacts import Finding, StageResult
     original = runner.run_stages
     called = []
     async def first(ctx, ticket):
@@ -475,7 +436,7 @@ def mechanical_first(monkeypatch, stem, *, workspace=True):
             if workspace:
                 await stages.prepare_worktree(ctx, ticket.stem)
             return stages.StagesRun(attempt=0, results={"implement": StageResult(
-                outcome="premise_failed", artifact=None, cost=Cost(), findings=[Finding(
+                outcome="premise_failed", artifact=None, findings=[Finding(
                     code="render_over_bound", message="too large", paved_road="shrink or split and rerun drain")])})
         return await original(ctx, ticket)
     monkeypatch.setattr(runner, "run_stages", first)
@@ -488,7 +449,6 @@ def test_rework_update_reenters_on_fresh_content(rework_repo, monkeypatch, mecha
     from tempo import runner
     from tempo.caps import consume
     from tempo.llm import FakeLLM
-    from tests.test_drain_reentry import NoChild
     from tests.test_rework import order, requisition
     from tests.test_stages import ENV, SNAG, STEM, agent, verdict
     from tests.test_terminal import author, clock
@@ -509,7 +469,7 @@ def test_rework_update_reenters_on_fresh_content(rework_repo, monkeypatch, mecha
                   json.dumps({"verdict": "split", "lessons": ["Narrow the work."]})]
     llm = FakeLLM([*script, update, requisition(), agent({"tempo/thing.py": "ok\n"}), verdict()])
     assert main(["drain"], cwd=repo, env=ENV, clock=clock,
-                pipeline=lambda c: runner.bind(c, llm), reexec=NoChild()) == 0
+                pipeline=lambda c: runner.bind(c, llm)) == 0
     events = Journal(repo / ".tempo/state", clock).read()
     history = [e for e in events if e.ticket == STEM]
     terminals = [e for e in history if e.type == EventType.STATE_TRANSITION and e.body.get("to") != "running"]
@@ -609,7 +569,7 @@ def test_rework_split_preserves_dispatch_terminal_invariant(rework_repo, monkeyp
         checkout.journal.append(EventType.STATE_TRANSITION, {"to": "rejected"}, ticket=ticket.stem)
         return "gate_failed"
     with pytest.raises(ValueError, match="but journaled 'rejected'"):
-        asyncio.run(_Drain(checkout, mismatch, frozenset())._run_one(candidate, False, "blob"))
+        asyncio.run(_Drain(checkout, mismatch)._run_one(candidate, False, "blob"))
 
 
 @pytest.mark.parametrize("action", ["split", "update", "escalate", "exhausted", "refusal", "publication", "missing"])
@@ -666,9 +626,8 @@ def test_render_over_bound_dispatches_rework_without_diagnosis(rework_repo, monk
             value = await writer(ticket)
             returned.append((ticket.stem, value))
             return value
-        return dispatch
-    from tests.test_drain_reentry import NoChild
-    assert main(["drain"], cwd=repo, env=ENV, clock=clock, pipeline=bind, reexec=NoChild()) == 0
+        return with_retro_driver(checkout, dispatch)
+    assert main(["drain"], cwd=repo, env=ENV, clock=clock, pipeline=bind) == 0
     events = Journal(repo / ".tempo/state", clock).read()
     original = [e for e in events if e.ticket == STEM]
     producing = next(e for e in original if e.body.get("to") == "premise_failed")
@@ -721,9 +680,8 @@ class Pause:
 
 async def paused_drain(root, script, checkpoint):
     from tempo.drain import drain as run_drain
-    from tests.test_drain_reentry import NoChild
     checkout = pause_checkout(root)
-    return await run_drain(checkout, script(checkout), reexec=NoChild(), before_dispatch=checkpoint)
+    return await run_drain(checkout, script(checkout), before_dispatch=checkpoint)
 
 
 def prior_failure(root, *, terminal="gate_failed", extra=None):
@@ -861,18 +819,10 @@ async def test_pause_checkpoint_failure_spends_no_retry(root, cancel):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["premise", "spec_gap", "spec_gap_premise"])
-async def test_pause_preserves_free_premise_and_spec_gap_reoffers(root, kind):
+async def test_pause_preserves_free_premise_reoffers(root):
     commit_ticket(root, "work", confirmed())
-    extra = {} if kind == "premise" else {"dispatch": "spec_gap_hold", "round": 1,
-                                               "plan_units": {"19.P3.held": "absent"}}
-    if kind != "premise":
-        round_record(journal(root), "hardening")
-    prior_failure(root, terminal="premise_failed" if kind != "spec_gap" else "gate_failed", extra=extra)
-    if kind == "premise":
-        commit_ticket(root, "work", confirmed().replace("`thing()` returns ok.", "`thing()` returns revised ok."))
-    else:
-        journal(root).append(EventType.STATE_TRANSITION, {"to": "merged"}, ticket="hardening")
+    prior_failure(root, terminal="premise_failed")
+    commit_ticket(root, "work", confirmed().replace("`thing()` returns ok.", "`thing()` returns revised ok."))
     before = offer_events(root)
     pause, script = Pause(), Script()
     task = asyncio.create_task(paused_drain(root, script, pause))
@@ -891,7 +841,6 @@ async def test_drain_uses_supplied_control(root, monkeypatch):
     from tempo import __main__ as cli
     from tempo.drain import drain as run_drain
     from tempo.runner import Refusal
-    from tests.test_drain_reentry import NoChild
     checkout = pause_checkout(root)
     consumer = checkout.control
     trace = []
@@ -922,31 +871,24 @@ async def test_drain_uses_supplied_control(root, monkeypatch):
                 _original()
                 trace.append(_name)
             monkeypatch.setattr(consumer, name, called)
-    assert (await run_drain(checkout, Script()(checkout), reexec=NoChild())).merged == []
+    assert (await run_drain(checkout, Script()(checkout))).merged == []
     assert trace[:2] == ["lock", "publish"] and "consume" in trace
     assert trace[-2:] == ["retire", "unlock"]
     assert (checkout.config.state_dir / "control/active.json").read_bytes() == b"null\n"
     trace.clear()
     with pytest.raises(Refusal, match="build_control.*Checkout.control"):
-        await run_drain(replace(checkout, control=None), Script()(checkout), reexec=NoChild())
+        await run_drain(replace(checkout, control=None), Script()(checkout))
     assert trace == []
-
-
-def round_record(j, hardener, units=None):
-    j.append(EventType.SIGNAL, {"signal": "hardening_round", "round": 1,
-             "units": units if units is not None else {"19.P3.held": "absent"}, "filed_by": "held",
-             "gaps": [{"unit": "19.P3.held", "message": "fact"}]}, ticket=hardener)
 
 
 def test_retro_hook_is_default_off(root):
     from tempo.drain import _Drain, drain as run_drain
-    from tests.test_drain_reentry import NoChild
     commit_ticket(root, "work", confirmed())
     checkout = pause_checkout(root)
     script = Script()
     dispatch = script(checkout)
-    assert _Drain(checkout, dispatch, frozenset()).retro is None
-    assert asyncio.run(run_drain(checkout, dispatch, reexec=NoChild())).merged == ["work"]
+    assert _Drain(checkout, dispatch).retro is None
+    assert asyncio.run(run_drain(checkout, dispatch)).merged == ["work"]
     assert not list((root / "tickets/retro").glob("*.md"))
     assert not any((e.key or "").startswith("llm/retro/") for e in checkout.journal.read())
 
@@ -959,7 +901,6 @@ async def test_selected_retro_remains_killable_through_existing_control(root):
     from tempo.llm import FakeLLM, HANG
     from tempo.retro import Retro
     from tests.test_daemon_admission import turn
-    from tests.test_drain_reentry import NoChild
     commit_ticket(root, "work", confirmed())
     ticks = asyncio.Queue()
     async def sleep(seconds):
@@ -978,7 +919,7 @@ async def test_selected_retro_remains_killable_through_existing_control(root):
     dispatch.abort_current = writer.abort_current
     dispatch._retro = Retro(checkout, dispatch)
     async with asyncio.timeout(5):
-        task = asyncio.create_task(run_drain(checkout, dispatch, reexec=NoChild()))
+        task = asyncio.create_task(run_drain(checkout, dispatch))
         while not llm.requests:
             await turn()
         assert llm.requests[0].surface == "retro"
@@ -991,11 +932,10 @@ async def test_selected_retro_remains_killable_through_existing_control(root):
     assert not any(e.body.get("kind") == "retro_failed" for e in checkout.journal.read())
 
 
-@pytest.mark.parametrize("scenario", ["quiescence", "pre-exit", "no-merge", "selected-failure", "due", "self-upgrade"])
+@pytest.mark.parametrize("scenario", ["quiescence", "no-merge", "failure", "due"])
 def test_drain_retro_due_quiescence_and_pre_exit(tmp_path, monkeypatch, scenario):
     from tempo import __main__ as cli, runner
     from tempo.retro import Retro
-    from tests.test_drain_reentry import NoChild
     from tests.test_providers import claude_ok
 
     root = make_root(tmp_path)
@@ -1004,9 +944,6 @@ def test_drain_retro_due_quiescence_and_pre_exit(tmp_path, monkeypatch, scenario
     git_out(root, "add", "config.yaml")
     git_out(root, "commit", "-m", "retro route")
     commit_ticket(root, "feature", confirmed(priority="P0"))
-    if scenario in {"pre-exit", "selected-failure"}:
-        commit_ticket(root, "phase5-exit", confirmed(depends="- feature"))
-        commit_ticket(root, "later", confirmed(depends="- phase5-exit", priority="P3"))
     clock = Clock()
     if scenario == "due":
         for n in range(25):
@@ -1035,7 +972,7 @@ def test_drain_retro_due_quiescence_and_pre_exit(tmp_path, monkeypatch, scenario
                 return 0, claude_ok("ok"), ""
             prompts.append((list(dispatches), prompt))
             assert "current retro window" in prompt
-            if scenario == "selected-failure":
+            if scenario == "failure":
                 return 1, "", "scripted retro outage"
             out = claude_ok('{"proposals": []}')
             if kwargs.get("on_spawn"):
@@ -1049,17 +986,11 @@ def test_drain_retro_due_quiescence_and_pre_exit(tmp_path, monkeypatch, scenario
     async def drive(ctx, ticket, **kwargs):
         dispatches.append(ticket.stem)
         contexts.append(ctx)
-        if ticket.stem == "phase5-exit":
-            history = ctx.driver.journal.read()
-            reports = [e for e in history if e.type == EventType.EFFECT_COMPLETION and (e.key or "").startswith("retro/")]
-            assert bool(reports) == (scenario != "selected-failure")
-            if reports:
-                assert reports[-1].body["result"]["commit"] == await ctx.git.rev_parse(root, "HEAD")
         if scenario == "no-merge":
             terminal = "already_satisfied"
             body = {"to": terminal}
         else:
-            path = "tempo/thing.py" if scenario == "self-upgrade" else f"work/{ticket.stem}.py"
+            path = f"work/{ticket.stem}.py"
             ctx.fs.write(root / path, b"ok\n")
             await ctx.git.add(root, [path])
             await ctx.git.commit(root, "admitted " + ticket.stem, only=[path])
@@ -1080,84 +1011,27 @@ def test_drain_retro_due_quiescence_and_pre_exit(tmp_path, monkeypatch, scenario
     run_driver = __import__('tempo.driver', fromlist=['Driver']).Driver.run
     async def recorded(self, stage, *args, **kwargs):
         if stage.surface == "retro":
-            assert self in owners and kwargs["ticket"] is None and kwargs["scope_fence"] == ()
+            assert self in owners and kwargs["ticket"] is None
             assert kwargs["workspace"] == root
             seen.append(self)
         return await run_driver(self, stage, *args, **kwargs)
     monkeypatch.setattr("tempo.driver.Driver.run", recorded)
-    class Child:
-        spawns = 0
-        async def run(self, argv, **kwargs):
-            self.spawns += 1
-            assert journal(root).read()[-1].body.get("signal") == "drain_handoff"
-            contender = Lockfile(root / ".tempo/state", instance_id="child", clock=clock)
-            contender.acquire()
-            contender.release()
-            code = await asyncio.to_thread(main, argv[5:], cwd=root, env=ENV, clock=clock,
-                                           pipeline=runner.pipeline, reexec=self)
-            return code, "", ""
-    child = Child()
-    assert main(["drain"], cwd=root, env=ENV, clock=clock, pipeline=runner.pipeline,
-                reexec=child if scenario == "self-upgrade" else NoChild()) == 0
-    assert child.spawns == (1 if scenario == "self-upgrade" else 0)
+    assert main(["drain"], cwd=root, env=ENV, clock=clock, pipeline=runner.pipeline) == 0
     assert invocations[0] == (False, [])
     if scenario == "no-merge":
         assert seen == prompts == []
-    elif scenario == "selected-failure":
-        assert dispatches == ["feature", "phase5-exit", "later"] and len(seen) == 2
-        assert [order for order, _ in prompts] == [
-            ["feature"], ["feature", "phase5-exit", "later"]]
+    elif scenario == "failure":
+        assert dispatches == ["feature"] and len(seen) == 1
+        assert [order for order, _ in prompts] == [["feature"]]
         failures = [e for e in journal(root).read() if e.body.get("kind") == "retro_failed"]
         assert len(failures) == len(seen)
-        history = journal(root).read()
-        indices = [i for i, e in enumerate(history) if e.body.get("kind") == "retro_failed"]
-        for earlier, later in zip(indices, indices[1:]):
-            assert any(e.type == EventType.STATE_TRANSITION and e.body.get("to") == "merged"
-                       for e in history[earlier + 1:later])
     else:
         assert seen and len(seen) == len(prompts)
-        if scenario == "pre-exit":
-            assert prompts[0][0] == ["feature"] and prompts[-1][0] == ["feature", "phase5-exit", "later"]
-        elif scenario == "due":
+        if scenario == "due":
             assert prompts[0][0] == [] and prompts[-1][0] == ["feature"]
         else:
             assert prompts[0][0] == ["feature"]
         assert list((root / "tickets/retro").glob("*.md"))
-
-
-def test_legacy_spec_gap_hold_without_round_is_released(root):
-    from tempo.drain import awaited_hardening
-    commit_ticket(root, "held", confirmed())
-    j = journal(root)
-    j.append(EventType.STATE_TRANSITION, {"to": "gate_failed", "dispatch": "spec_gap_hold"}, ticket="held")
-    assert awaited_hardening(j.read(), "held") == ()
-    script = Script()
-    assert drain(root, script) == 0
-    assert script.calls == ["held"] and retry_draws(root, "held") == 0
-
-
-def commit_plan(root, text):
-    (root / "TEMPO_PLAN.md").write_text(text)
-    g = Git(SubprocessExec(), env=ENV, timeout=30)
-    async def commit():
-        await g.add(root, ["TEMPO_PLAN.md"])
-        await g.commit(root, "fix bound unit", only=["TEMPO_PLAN.md"])
-    asyncio.run(commit())
-
-
-def bound_arrival(root, *, to="gate_failed", extra=None):
-    from tempo.specs import unit_sha
-    commit_ticket(root, "held", confirmed())
-    j = journal(root)
-    units = {"19.P3.held": unit_sha((root / "TEMPO_PLAN.md").read_text(), "19.P3.held")}
-    round_record(j, "hardener", units)
-    j.append(EventType.STATE_TRANSITION, {"to": "already_satisfied"}, ticket="hardener")
-    blob = git_out(root, "rev-parse", "HEAD:tickets/held/ticket.md").strip()
-    j.append(EventType.STATE_TRANSITION, {"to": "running", "ticket_sha": blob}, ticket="held")
-    j.append(EventType.STATE_TRANSITION, {"to": to, "stage": "check", "reason": "spec_gap_unresolved",
-        "dispatch": "reject_queue", "routed": "reject_queue", "plan_units": units,
-        **(extra or {})}, ticket="held")
-    return blob
 
 
 def machine_keeps(root, stem="held"):
@@ -1165,107 +1039,7 @@ def machine_keeps(root, stem="held"):
             and e.body == {"signal": "reject_verdict", "verdict": "keep", "actor": "machine"}]
 
 
-def test_plan_bound_arrival_is_never_auto_kept_and_releases_on_a_unit_change(root, capsys):
-    blob = bound_arrival(root)
-    before = journal(root).read()
-    script = Script()
-    assert drain(root, script) == 0
-    assert script.calls == [] and journal(root).read() == before
-    out = capsys.readouterr().out
-    assert "spec_gap_unresolved" in out and "19.P3.held" in out
-    assert "round 1" in out and "hardener: already_satisfied" in out
-    assert "fix 19.P3.held in TEMPO_PLAN.md, commit it, then uv run python -m tempo drain" in out
-    assert "confirm held" in out and "reject held" in out
-
-    # Neither unrelated committed bytes nor an uncommitted/staged unit fixes the judged input.
-    plan = (root / "TEMPO_PLAN.md").read_text()
-    commit_plan(root, plan + "\n### 19.P3.other Other\nUnrelated fact.\n")
-    fixed = (root / "TEMPO_PLAN.md").read_text() + "\n### 19.P3.held Held\nThe missing fact.\n"
-    (root / "TEMPO_PLAN.md").write_text(fixed)
-    assert drain(root, script) == 0 and script.calls == []
-    asyncio.run(Git(SubprocessExec(), env=ENV, timeout=30).add(root, ["TEMPO_PLAN.md"]))
-    # Intake refuses staged non-ticket paths; exercise the release scan itself for staged bytes.
-    from tempo.drain import _Drain
-    checkout = pause_checkout(root)
-    scan = asyncio.run(_Drain(checkout, script(checkout), frozenset())._scan())
-    assert scan.plan_changed == frozenset()
-    assert machine_keeps(root) == [] and retry_draws(root, "held") == 0
-    commit_plan(root, fixed)
-    assert drain(root, script) == 0 and script.calls == ["held"]
-    assert len(machine_keeps(root)) == retry_draws(root, "held") == 1
-    keep, draw, running, terminal = [e for e in journal(root).read()[len(before):] if e.ticket == "held"]
-    assert keep == machine_keeps(root)[0]
-    assert draw.body == {"cap": "retry", "ticket_sha": blob}
-    assert running.body == {"to": "running", "ticket_sha": blob} and terminal.body == {"to": "merged"}
-
-
-def test_plan_bound_premise_is_not_premise_parked(root):
-    from tempo.drain import premise_parked
-    blob = bound_arrival(root, to="premise_failed")
-    assert not premise_parked(journal(root).read(), "held", blob)
-    script = Script()
-    assert drain(root, script) == 0 and script.calls == []
-    commit_plan(root, (root / "TEMPO_PLAN.md").read_text() + "\n### 19.P3.held Held\nFixed fact.\n")
-    assert drain(root, script) == 0 and script.calls == ["held"]
-    assert git_out(root, "rev-parse", "HEAD:tickets/held/ticket.md").strip() == blob
-    assert len(machine_keeps(root)) == retry_draws(root, "held") == 1
-
-
-def test_existing_bound_unit_releases_only_on_its_committed_bytes_change(root):
-    plan = PLAN + "\n### 19.P3.held Held\nOriginal fact.\n\n### 19.P3.other Other\nOther fact.\n"
-    commit_plan(root, plan)
-    bound_arrival(root)
-    script = Script()
-    assert drain(root, script) == 0 and script.calls == []
-    unrelated = plan.replace("Other fact.", "Other corrected fact.")
-    commit_plan(root, unrelated)
-    assert drain(root, script) == 0 and script.calls == []
-    fixed = unrelated.replace("Original fact.", "Corrected fact.")
-    (root / "TEMPO_PLAN.md").write_text(fixed)
-    assert drain(root, script) == 0 and script.calls == []
-    commit_plan(root, fixed)
-    assert drain(root, script) == 0 and script.calls == ["held"]
-    assert len(machine_keeps(root)) == retry_draws(root, "held") == 1
-
-
-def test_retired_hardener_is_never_dispatched(root):
-    commit_ticket(root, "hardener", confirmed())
-    j = journal(root)
-    round_record(j, "hardener")
-    j.append(EventType.STATE_TRANSITION, {"to": "gate_failed", "routed": "reject_queue"}, ticket="hardener")
-    before = j.read()
-    script = Script()
-    assert drain(root, script) == 0 and script.calls == [] and j.read() == before
-    # A later operator keep and non-closing terminal cannot revive the hardener.
-    j.append(EventType.SIGNAL, {"signal": "reject_verdict", "verdict": "keep", "actor": "operator"},
-             ticket="hardener")
-    j.append(EventType.STATE_TRANSITION, {"to": "gate_failed"}, ticket="hardener")
-    assert drain(root, script) == 0 and script.calls == []
-    assert machine_keeps(root, "hardener") == [] and retry_draws(root, "hardener") == 0
-
-
-def test_plan_bound_legacy_hold_release_draws_retry_despite_spent_diagnosis(tmp_path):
-    root = make_root(tmp_path, "caps: {diagnosis: 1, retry: 1}\n")
-    bound_arrival(root, extra={"dispatch": "spec_gap_hold", "round": 1, "routed": None})
-    journal(root).append(EventType.CAP_CONSUMED, {"cap": "diagnosis"}, ticket="held")
-    script = Script()
-    assert drain(root, script) == 0 and script.calls == []
-    assert any(e.body.get("signal") == "reject_arrival" for e in journal(root).read())
-    commit_plan(root, (root / "TEMPO_PLAN.md").read_text() + "\n### 19.P3.held Held\nFixed fact.\n")
-    assert drain(root, script) == 0 and script.calls == ["held"]
-    assert len(machine_keeps(root)) == retry_draws(root, "held") == 1
-
-
-def test_plan_bound_change_does_not_release_a_spent_retry(tmp_path):
-    root = make_root(tmp_path, "caps: {retry: 1}\n")
-    bound_arrival(root)
-    journal(root).append(EventType.CAP_CONSUMED, {"cap": "retry"}, ticket="held")
-    commit_plan(root, (root / "TEMPO_PLAN.md").read_text() + "\n### 19.P3.held Held\nFixed fact.\n")
-    script = Script()
-    assert drain(root, script) == 0 and script.calls == [] and machine_keeps(root) == []
-
-
-def test_non_plan_bound_premise_reoffer_after_ticket_edit_draws_no_retry(root):
+def test_a_premise_reoffer_after_ticket_edit_draws_no_retry(root):
     commit_ticket(root, "work", confirmed())
     prior_failure(root, terminal="premise_failed", extra={"routed": "reject_queue"})
     commit_ticket(root, "work", confirmed().replace("returns ok.", "returns revised ok."))
@@ -1274,22 +1048,3 @@ def test_non_plan_bound_premise_reoffer_after_ticket_edit_draws_no_retry(root):
     assert len(machine_keeps(root, "work")) == 1 and retry_draws(root, "work") == 0
 
 
-@pytest.mark.parametrize("bound", [False, True])
-def test_plan_in_worktree_but_not_head_does_not_abort_drain(root, bound, monkeypatch):
-    if bound:
-        bound_arrival(root)
-    g = Git(SubprocessExec(), env=ENV, timeout=30)
-    async def untrack():
-        await g._run(root, "rm", "--cached", "TEMPO_PLAN.md")
-        await g.commit(root, "untrack plan")
-    asyncio.run(untrack())
-    (root / "TEMPO_PLAN.md").write_text(PLAN + "\n### 19.P3.held Held\nUncommitted fact.\n")
-    original = Git._run
-    async def observed(self, repo, *args):
-        if args == ("show", "HEAD:TEMPO_PLAN.md") and not bound:
-            pytest.fail("a drain without a plan-bound arrival read the committed plan")
-        return await original(self, repo, *args)
-    monkeypatch.setattr(Git, "_run", observed)
-    script = Script()
-    assert drain(root, script) == 0 and script.calls == []
-    assert machine_keeps(root) == []

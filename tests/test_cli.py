@@ -40,7 +40,6 @@ merge: {}
 engine_plane_safety_inventory: [config.yaml]
 """
 
-PLAN = "# Plan\n\n## 11. Failure spine\n\nSpine.\n"
 
 TICKET = """---
 priority: P2
@@ -128,7 +127,6 @@ def root(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
     (root / "tempo").mkdir(parents=True)
     (root / "tempo" / "thing.py").write_text("")
-    (root / "TEMPO_PLAN.md").write_text(PLAN)
     (root / "config.yaml").write_text(CONFIG)
     (root / ".gitignore").write_text(".tempo/\n")
     conduct = adopt_conduct(root)
@@ -136,7 +134,7 @@ def root(tmp_path: Path) -> Path:
 
     async def seed():
         await g.init(root, branch="main")
-        await g.add(root, ["tempo", "TEMPO_PLAN.md", "config.yaml", ".gitignore", *conduct])
+        await g.add(root, ["tempo", "config.yaml", ".gitignore", *conduct])
         await g.commit(root, "base")
 
     asyncio.run(seed())
@@ -196,9 +194,9 @@ def test_new_refuses_a_bad_stem(root, capsys):
 def test_status_on_an_empty_journal(root, capsys):
     assert cli(root, "status") == 0
     out = capsys.readouterr().out
-    for heading in ("merged", "in flight", "blocked", "intake", "spend"):
+    for heading in ("merged", "in flight", "blocked", "intake"):
         assert heading in out
-    assert "current-window scorecard:\n- boundary: initial\n- merged tickets: 0\n- spend: $0.00" in out
+    assert "current-window scorecard:\n- boundary: initial\n- merged tickets: 0\n" in out
     assert "window provenance:" in out and "## Surface scorecard" in out
     assert not (root / ".tempo").exists()  # write-free: no journal, no lockfile
 
@@ -210,8 +208,6 @@ def test_status_projects_the_journal(root, capsys):
     j.append(EventType.STATE_TRANSITION, {"to": "running"}, ticket="b")
     j.append(EventType.STATE_TRANSITION, {"to": "running"}, ticket="c")
     j.append(EventType.STATE_TRANSITION, {"to": "gate_failed"}, ticket="c")
-    j.append(EventType.EFFECT_COMPLETION, {"result": {}, "cost": {"usd": 0.25}}, ticket="b", key="llm/b/0/x/1/1")
-    j.append(EventType.EFFECT_COMPLETION, {"result": {}, "cost": {"usd": 0.5}}, ticket="c", key="llm/c/0/x/1/1")
     j.append(EventType.SIGNAL, {"signal": "ticket_intake", "source": "human", "state": "confirmed", "new": True,
                                 "commit": "abc123"}, ticket="d")
     before = sorted(p.read_bytes() for p in (root / ".tempo").rglob("*") if p.is_file())
@@ -223,9 +219,7 @@ def test_status_projects_the_journal(root, capsys):
     assert "b" in section["in flight:"]
     assert "c: gate_failed" in section["blocked:"]
     assert "d: source: human" in section["intake:"]
-    assert "$0.75" in section["spend:"]
     assert "merged tickets: 1" in section["current-window scorecard:"]
-    assert "spend: $0.75" in section["current-window scorecard:"]
     assert sorted(p.read_bytes() for p in (root / ".tempo").rglob("*") if p.is_file()) == before
 
 
@@ -391,24 +385,6 @@ def released(root):
     lock = Lockfile(root / ".tempo/state", instance_id="after", clock=Clock())
     lock.acquire()
     lock.release()
-
-
-def test_retro_doctor_entry_unit():
-    import re
-    from tempo.specs import required_units, entry_unit_gap, resolve_plan_contract
-    from tempo.tickets import parse_ticket
-    repo = Path(__file__).resolve().parents[1]
-    plan = (repo / "TEMPO_PLAN.md").read_text()
-    uid = "19.P5.retro-doctor-cli"
-    for stem in ("retro-doctor-cli", "phase5-continue-04", "phase5-continue-05"):
-        t = parse_ticket(stem, (repo / f"tickets/{stem}/ticket.md").read_text(), repo, plan=plan)
-        assert required_units(plan, stem, t.plan_contract) == (() if stem.endswith("05") else (uid,))
-        if not stem.endswith("05"):
-            assert resolve_plan_contract(plan, t.plan_contract).count(f"### {uid} ") == 1
-    assert entry_unit_gap(plan, uid) is None
-    for part in ("Owner", "Records", "Observable", "Tests"):
-        broken = re.sub(rf"^- \*\*{part}:\*\*.*$", "", plan, flags=re.M)
-        assert part in entry_unit_gap(broken, uid)
 
 
 @pytest.mark.parametrize("completed_report", [False, True])

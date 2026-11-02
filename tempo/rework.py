@@ -1,4 +1,4 @@
-"""Reviewed Rework orders and journal supersession (19.P3.rework-stage)."""
+"""Reviewed Rework orders and journal supersession."""
 
 import asyncio
 import json
@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from tempo.artifacts import Artifact, Cost, Finding, NonBlank, StageResult
+from tempo.artifacts import Artifact, Finding, NonBlank, StageResult
 from tempo.driver import LlmStage
 from tempo.gates import GateReport
 from tempo.git import GitError
@@ -73,7 +73,7 @@ async def rework(ctx: StageContext, ticket: Ticket, text: str, findings: list[Fi
                  stuck_budget: float, handoff: ConflictHandoff | None = None) -> StageResult:
     """Call only after admission unwinds; return proposals, never publish or retire tickets."""
     if handoff is not None and handoff.stem != ticket.stem:
-        return StageResult(outcome="gate_failed", artifact=None, cost=Cost(), findings=[_finding(
+        return StageResult(outcome="gate_failed", artifact=None, findings=[_finding(
             "conflict handoff names a different ticket", "supply this ticket's queue-owned handoff")])
     spec = load_spec((ctx.specs_dir / "rework.md").read_text())
     head = await ctx.git.rev_parse(workspace, "HEAD")
@@ -82,11 +82,7 @@ async def rework(ctx: StageContext, ticket: Ticket, text: str, findings: list[Fi
     identities = {e.ticket for e in ctx.driver.journal.read() if e.ticket is not None}
     review_seq = 0
 
-    retry_findings: list[Finding] = []
-
     def render_attempt(_: object, retry: list[Finding]) -> str:
-        nonlocal retry_findings
-        retry_findings = retry
         return render(spec, {"ticket": f"Original stem: {ticket.stem}\n\n{text}",
                              "findings": json.dumps([f.model_dump() for f in findings], sort_keys=True),
                              "conflict": handoff.model_dump_json() if handoff else "none",
@@ -132,16 +128,12 @@ async def rework(ctx: StageContext, ticket: Ticket, text: str, findings: list[Fi
             if errors:
                 return GateReport(code="ticket_schema", verdict="fail", findings=errors)
 
-            plan = (tree / "TEMPO_PLAN.md").read_text()
             for proposal in artifact.tickets:
                 review_seq += 1
                 verdict = await review_ticket(
-                    ctx.driver, repo=tree, plan=plan, stem=proposal.stem, text=proposal.ticket,
+                    ctx.driver, repo=tree, stem=proposal.stem, text=proposal.ticket,
                     specs_dir=ctx.specs_dir, tier=tier, stem_slot=ticket.stem, run_seq=attempt,
-                    attempt=attempt, call_seq=review_seq,
-                    prior=json.dumps({"action": artifact.action, "original_stem": ticket.stem, "original_ticket": text,
-                                      "snag_list": [f.model_dump() for f in findings],
-                                      "retry_findings": [f.model_dump() for f in retry_findings]}), expected_budget=ticket.expected_minutes * 60.0)
+                    attempt=attempt, call_seq=review_seq)
                 if verdict.verdict == "rma":
                     return GateReport(code="requisition_review", verdict="fail", findings=[
                         f.model_copy(update={"code": "requisition_rma"}) for f in verdict.findings])
@@ -162,9 +154,9 @@ async def rework(ctx: StageContext, ticket: Ticket, text: str, findings: list[Fi
             LlmStage(surface="rework", emits=ReworkReply, gates=[], render=render_attempt, review=review,
                      terminal_findings=frozenset({"requisition_rma"})), ticket,
             ticket=ticket.stem, attempt=attempt, workspace=workspace, tier=tier, effort=effort,
-            stuck_budget=stuck_budget, expected_budget=ticket.expected_minutes * 60.0, scope_fence=())
+            stuck_budget=stuck_budget)
     except RenderOverBound as exc:
-        return StageResult(outcome="premise_failed", artifact=None, findings=[exc.finding], cost=Cost())
+        return StageResult(outcome="premise_failed", artifact=None, findings=[exc.finding])
     if result.outcome != "ok":
         return result
     reply = result.artifact

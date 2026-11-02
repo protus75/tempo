@@ -5,7 +5,7 @@ emits: {approve: approved-invoice, snag: snag-list, rma: rma}
 tier: high
 effort: high
 gates: [correctness_review]
-version: "1.0"
+version: "1.1"
 ---
 ## Role
 
@@ -22,7 +22,7 @@ Read the ticket, then the diff. Decide one verdict:
   inside the ticket's scope.
 - `snag` -- the diff has at least one defect the implementer can fix within this ticket.
 - `rma` -- the ticket itself cannot be implemented as written (mutually unsatisfiable or
-  self-contradictory criteria); a human must change the ticket.
+  self-contradictory criteria); the orchestrator writes a successor ticket.
 
 Snag on any of these, each attached to a line the diff adds or changes:
 

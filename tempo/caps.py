@@ -8,13 +8,12 @@ from tempo.providers import ProviderSetupError, resolve
 from tempo.tickets import Ticket
 
 CAPS = ("diagnosis", "retry", "infra", "premise_bounce")
-DECLARED_CAPS = CAPS + ("hardening",)
 LEVELS = ("low", "medium", "high", "max")
 
 
 def _check(cap: str) -> None:
-    if cap not in DECLARED_CAPS:
-        raise ValueError(f"cap {cap!r} is not one of DECLARED_CAPS {DECLARED_CAPS}")
+    if cap not in CAPS:
+        raise ValueError(f"cap {cap!r} is not one of CAPS {CAPS}")
 
 
 def lineage(events: Iterable[Event], stem: str) -> tuple[Event, ...]:

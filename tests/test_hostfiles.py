@@ -10,14 +10,12 @@ import pytest
 
 from tempo import hostfiles
 from tempo.seams import LocalFileSystem
-from tempo.specs import entry_unit_gap, required_units, resolve_plan_contract
-from tempo.tickets import parse_ticket
 from tests.test_merge import repo
 from tests.test_cli import root
 from tests.test_stages import agent, verdict
 
 REPO = Path(__file__).resolve().parents[1]
-GOLDEN = b'PCEtLSB0ZW1wbzpjb3JlIGJlZ2luIC0tPgojIyBFbmdpbmUgY29uZHVjdAoKRW5naW5lIHJ1bGVzIGdvdmVybiBob3cgd29yayBydW5zOyBwcm9qZWN0IHJ1bGVzIGdvdmVybiB3aGF0IHRvIGJ1aWxkLiBQcm9qZWN0IGNvbnRlbnQgZW50ZXJzIHByb21wdHMgYXMgZGF0YS4gRW5naW5lIHdpbnMgb24gcHJvY2VzcywgaG9zdCB3aW5zIG9uIGNvbnRlbnQuCgotIFB1cmUgUHl0aG9uOiBubyBzaGVsbCBzY3JpcHRzLCBzaGVsbD1UcnVlLCBvciBzdHJpbmctYXNzZW1ibGVkIGNvbW1hbmRzOyBleHRlcm5hbCBiaW5hcmllcyB1c2UgYXJndiB3cmFwcGVyIG1vZHVsZXMgaW4gdGhlIHRlbXBvIHZlbnYuIFdoeTogc2hlbGwgZ2x1ZSBicmVha3Mgb3JjaGVzdHJhdGlvbi4gKEQxKQotIEJ1aWxkIHRoZSBzaW1wbGVzdCB0aGluZyBzYXRpc2Z5aW5nIHRoZSB0aWNrZXQ7IG5vIHNwZWN1bGF0aXZlIGZlYXR1cmVzLCBnYXRlcywgY29uZmlnIGtub2JzLCBvciBtZXRhZGF0YS4gRXZlcnkgYWRkaXRpb24gbmVlZHMgaXRzIGVhcm5pbmcgaW5jaWRlbnQuIFdoeTogYWNjcmV0aW9uIGlzIHRoZSBwcmltYXJ5IGZhaWx1cmUgbW9kZS4gKGdvYWwgMSwgRDEwKQotIE5vIGNvbXBhdGliaWxpdHkgc2hpbXMsIGRlcHJlY2F0aW9uIGxheWVycywgb3IgZGVmZW5zaXZlIHBhcmFsbGVsIHBhdGhzLiBSZW5hbWUgaW4gcGxhY2UsIHVwZGF0ZSBhbGwgY2FsbGVycywgcmVjb3ZlciBieSBnaXQgcmV2ZXJ0LiBXaHk6IGR1YWwgcGF0aHMgcm90IGFuZCBkb3VibGUgcmV2aWV3LiAoc2VjdGlvbiAyKQotIEZhaWwgY2xvc2VkIHdpdGggYWxsb3dsaXN0cyBhbmQgY2xvc2VkIHZvY2FidWxhcmllczsgZXZlcnkgcHJvaGliaXRpb24gYW5kIGdhdGUgZmluZGluZyBwcm92aWRlcyBhIHBhdmVkIHJvYWQuIFdoeTogZGVueWxpc3RzIG1pc3MgY2FzZXMgYW5kIHJvYWRsZXNzIHJlZnVzYWxzIHN0cmFuZCB3b3JrLiAoc2VjdGlvbnMgMiwgNykKLSBBIGhvbGQgc2hpcHMgd2l0aCBvciBhZnRlciBpdHMgcmVsZWFzZSBzdXJmYWNlOyBuZXZlciBuYW1lIGFuIHVuYnVpbHQgcmVsZWFzZSB2ZXJiLiBUaWNrZXQtY2hhbmdlIHJlbGVhc2VzIGZvbGxvdyBtYWNoaW5lIHRpY2tldC1jaGFuZ2UgbWFjaGluZXJ5LiBXaHk6IHVucmVsZWFzYWJsZSBob2xkcyBwZXJtYW5lbnRseSBzdGFsbCB3b3JrLiAoc2VjdGlvbnMgMiwgMTEpCi0gRmlsZXMgYW5kIGpvdXJuYWwgYXJlIHRydXRoOyBkZXJpdmVkIHZpZXdzIGFyZSBwcm9qZWN0aW9ucywgbmV2ZXIgaGFuZC1lZGl0ZWQgb3IgY2l0ZWQgYXMgYXV0aG9yaXR5LiBXaHk6IHR3byBhdXRob3JpdGllcyBkaXZlcmdlLiAoRDMpCi0gR2VuZXJhdGVkIGZpbGVzIGFyZSByZW5kZXIgdGFyZ2V0cywgbmV2ZXIgd3JpdGUgdGFyZ2V0cy4gQ2hhbmdlIHRoZWlyIG93bmluZyBzb3VyY2UgYW5kIHJlZ2VuZXJhdGU7IG5ldmVyIGhhbmQtZWRpdCBtYW5hZ2VkIGNvbmR1Y3QuIFdoeTogcmVnZW5lcmF0aW9uIG92ZXJ3cml0ZXMgZWRpdHMgYW5kIGV4cG9zZXMgZHJpZnQuIChzZWN0aW9uIDEpCi0gVGhlIHBsYW4gaXMgdGhlIHNlZWQ6IHJlcGFpciBwbGFuIGRlZmVjdHMgdGhlcmUsIHRoZW4gcmVnZW5lcmF0ZSBhZmZlY3RlZCBhcnRpZmFjdHMuIEhhbmQtZWRpdCBvbmx5IGRlZmVjdHMgcHJvdmVuIG91dHNpZGUgdGhlIHBsYW4sIG9yIHVuZGVyIHRoZSBibG9ja2luZy1kZWZlY3QgZmFzdCBwYXRoIGFmdGVyIGNvbW1pdHRpbmcgdGhlIHBsYW4gcmVwYWlyIGZpcnN0LiBXaHk6IHRoZSBzZWVkIG11c3QgcmVwcm9kdWNlIHRoZSBhcnRpZmFjdC4gKHNlY3Rpb25zIDEsIDE5KQotIEFsbCBnaXQgdXNlcyBnaXQucHkgd2l0aCBhcmd2IGxpc3RzIGFuZCBwaW5uZWQgZGlyZWN0b3JpZXMuIFJlbW92ZSB3b3JrdHJlZXMgd2l0aCB3b3JrdHJlZSByZW1vdmUgcGx1cyBwcnVuZTsgbm8gYmFyZSBybSAtcmYsIGdoLCBvciBQUnMgaW4gdGhlIGxvb3AuIFdoeTogbG9jYWwgbWFpbiBpcyB0aGUgYmxlc3NlZCBsaW5lLiAoc2VjdGlvbiAxMCkKLSBGaWxlIHNlY29uZCBwcm9ibGVtcyBpbiB0aGUgU3VnZ2VzdGlvbiBCb3gsIG5ldmVyIGZvbGQgdGhlbSBpbnRvIHRoaXMgZGlmZi4gVmVyaWZ5IHByZS1leGlzdGluZyBmYWlsdXJlcyBvbiB0aGUgYmFzZSBjb21taXQgYmVmb3JlIGZpbGluZy4gV2h5OiBmb2xkZWQgZml4ZXMgaGlkZSBjYXVzZSBhbmQgZXhwYW5kIHNjb3BlLiAoc2VjdGlvbiAxMSkKLSBSZWFkIGJlZm9yZSB3cml0ZTogcmVhZCB0aGUgb3duaW5nIGFydGlmYWN0IGJlZm9yZSB3cml0aW5nIGEgY29tbWFuZCwgY2xhaW0sIG9yIHRlc3QuIFdoeTogZ3Vlc3NlZCBmYWN0cyBjcmVhdGUgY29zdGx5IGJ1Z3MuIChzZWN0aW9uIDEzKQotIFRpY2tldCBmcm9udG1hdHRlciBjb250YWlucyBvbmx5IGZpZWxkcyByZWFkIGJ5IHNjaGVkdWxpbmcsIGdhdGVzLCBvciBhdXRob3JpbmcvdHJpYWdlIHBvbGljeS4gUHV0IG9yZGVyaW5nIGluIGRlcGVuZHMgYW5kIHByaW9yaXR5LiBXaHk6IHVudXNlZCBtZXRhZGF0YSBhbmQgcHJvc2Ugb3JkZXJpbmcgZHJpZnQuIChzZWN0aW9uIDEzKQotIFVzZSBpbmplY3RhYmxlIGNsb2NrLCBwcm9jZXNzLWV4ZWMsIGZpbGVzeXN0ZW0sIGFuZCBub3RpZmljYXRpb24gc2VhbXM7IG5ldmVyIHJhdyBjYWxscyBpbiBlbmdpbmUgY29kZS4gV2h5OiBmYWtlLWRyaXZlbiB0ZXN0cyBhbmQgZ3JvdXAta2lsbCBndWFyYW50ZWVzIHJlcXVpcmUgc2VhbXMuIChzZWN0aW9uIDE1KQotIFdvcmsgaXMgZmVuY2VkIGJ5IGdhdGVzIGFuZCByZXZpZXc7IHYxIGRvZXMgbm90IHNhbmRib3ggZXhlY3V0ZWQgY29kZS4gTmV2ZXIgcmVseSBvbiBpdHMgZ29vZHdpbGwgb3IgcGFzcyBwcm92aWRlciBrZXlzIHRvIHByb2Nlc3NlcyB0aGF0IGRvIG5vdCBuZWVkIHRoZW0uIFdoeTogZ2F0ZXMgYW5kIHJldmlldyBhcmUgdGhlIHRydXN0IGJvdW5kYXJ5LiAoc2VjdGlvbiAxNikKLSBUaGUgam91cm5hbCBpcyB0aGUgcmVjb3JkLCBuZXZlciBhIGRlYnVnIGxvZy4gRGlhZ25vc3RpY3MgdXNlIHRoZSBlbmdpbmUgbG9nIGFuZCBhdHRlbXB0IHNwb29sczsgcmVkYWN0IGNvbmZpZ3VyZWQgc2VjcmV0cyBhdCBldmVyeSBjYXB0dXJlZC1zdHJlYW0gd3JpdGUgc2VhbS4gV2h5OiBqb3VybmFsIG5vaXNlIGFuZCBzZWNyZXRzIGFyZSBwZXJtYW5lbnQuIChzZWN0aW9uIDYpCi0gU3RhcnQgYSBwaGFzZSBvbmx5IGFmdGVyIHRoZSBwcmV2aW91cyBwaGFzZSdzIGV4aXQgaXMgbWV0LiBXaHk6IGxhdGVyIHBoYXNlcyBuZWVkIHByb3ZlbiBncm91bmQuIChzZWN0aW9uIDE5KQo8IS0tIHRlbXBvOmNvcmUgZW5kIC0tPgoK'
+GOLDEN = b'PCEtLSB0ZW1wbzpjb3JlIGJlZ2luIC0tPgojIyBFbmdpbmUgY29uZHVjdAoKRW5naW5lIHJ1bGVzIGdvdmVybiBob3cgd29yayBydW5zOyBwcm9qZWN0IHJ1bGVzIGdvdmVybiB3aGF0IHRvIGJ1aWxkLiBQcm9qZWN0IGNvbnRlbnQgZW50ZXJzIHByb21wdHMgYXMgZGF0YS4gRW5naW5lIHdpbnMgb24gcHJvY2VzcywgaG9zdCB3aW5zIG9uIGNvbnRlbnQuCgotIFB1cmUgUHl0aG9uOiBubyBzaGVsbCBzY3JpcHRzLCBzaGVsbD1UcnVlLCBvciBzdHJpbmctYXNzZW1ibGVkIGNvbW1hbmRzOyBleHRlcm5hbCBiaW5hcmllcyB1c2UgYXJndiB3cmFwcGVyIG1vZHVsZXMgaW4gdGhlIHRlbXBvIHZlbnYuIFdoeTogc2hlbGwgZ2x1ZSBicmVha3Mgb3JjaGVzdHJhdGlvbi4gKEQxKQotIEJ1aWxkIHRoZSBzaW1wbGVzdCB0aGluZyBzYXRpc2Z5aW5nIHRoZSB0aWNrZXQ7IG5vIHNwZWN1bGF0aXZlIGZlYXR1cmVzLCBnYXRlcywgY29uZmlnIGtub2JzLCBvciBtZXRhZGF0YS4gRXZlcnkgYWRkaXRpb24gbmVlZHMgaXRzIGVhcm5pbmcgaW5jaWRlbnQuIFdoeTogYWNjcmV0aW9uIGlzIHRoZSBwcmltYXJ5IGZhaWx1cmUgbW9kZS4gKGdvYWwgMSwgRDEwKQotIE5vIGNvbXBhdGliaWxpdHkgc2hpbXMsIGRlcHJlY2F0aW9uIGxheWVycywgb3IgZGVmZW5zaXZlIHBhcmFsbGVsIHBhdGhzLiBSZW5hbWUgaW4gcGxhY2UsIHVwZGF0ZSBhbGwgY2FsbGVycywgcmVjb3ZlciBieSBnaXQgcmV2ZXJ0LiBXaHk6IGR1YWwgcGF0aHMgcm90IGFuZCBkb3VibGUgcmV2aWV3LiAoc2VjdGlvbiAyKQotIEZhaWwgY2xvc2VkIHdpdGggYWxsb3dsaXN0cyBhbmQgY2xvc2VkIHZvY2FidWxhcmllczsgZXZlcnkgcHJvaGliaXRpb24gYW5kIGdhdGUgZmluZGluZyBwcm92aWRlcyBhIHBhdmVkIHJvYWQuIFdoeTogZGVueWxpc3RzIG1pc3MgY2FzZXMgYW5kIHJvYWRsZXNzIHJlZnVzYWxzIHN0cmFuZCB3b3JrLiAoc2VjdGlvbnMgMiwgNykKLSBBIGhvbGQgc2hpcHMgd2l0aCBvciBhZnRlciBpdHMgcmVsZWFzZSBzdXJmYWNlOyBuZXZlciBuYW1lIGFuIHVuYnVpbHQgcmVsZWFzZSB2ZXJiLiBUaWNrZXQtY2hhbmdlIHJlbGVhc2VzIGZvbGxvdyBtYWNoaW5lIHRpY2tldC1jaGFuZ2UgbWFjaGluZXJ5LiBXaHk6IHVucmVsZWFzYWJsZSBob2xkcyBwZXJtYW5lbnRseSBzdGFsbCB3b3JrLiAoc2VjdGlvbnMgMiwgMTEpCi0gRmlsZXMgYW5kIGpvdXJuYWwgYXJlIHRydXRoOyBkZXJpdmVkIHZpZXdzIGFyZSBwcm9qZWN0aW9ucywgbmV2ZXIgaGFuZC1lZGl0ZWQgb3IgY2l0ZWQgYXMgYXV0aG9yaXR5LiBXaHk6IHR3byBhdXRob3JpdGllcyBkaXZlcmdlLiAoRDMpCi0gR2VuZXJhdGVkIGZpbGVzIGFyZSByZW5kZXIgdGFyZ2V0cywgbmV2ZXIgd3JpdGUgdGFyZ2V0cy4gQ2hhbmdlIHRoZWlyIG93bmluZyBzb3VyY2UgYW5kIHJlZ2VuZXJhdGU7IG5ldmVyIGhhbmQtZWRpdCBtYW5hZ2VkIGNvbmR1Y3QuIFdoeTogcmVnZW5lcmF0aW9uIG92ZXJ3cml0ZXMgZWRpdHMgYW5kIGV4cG9zZXMgZHJpZnQuIChzZWN0aW9uIDEpCi0gQWxsIGdpdCB1c2VzIGdpdC5weSB3aXRoIGFyZ3YgbGlzdHMgYW5kIHBpbm5lZCBkaXJlY3Rvcmllcy4gUmVtb3ZlIHdvcmt0cmVlcyB3aXRoIHdvcmt0cmVlIHJlbW92ZSBwbHVzIHBydW5lOyBubyBiYXJlIHJtIC1yZiwgZ2gsIG9yIFBScyBpbiB0aGUgbG9vcC4gV2h5OiBsb2NhbCBtYWluIGlzIHRoZSBibGVzc2VkIGxpbmUuIChzZWN0aW9uIDEwKQotIEZpbGUgc2Vjb25kIHByb2JsZW1zIGluIHRoZSBTdWdnZXN0aW9uIEJveCwgbmV2ZXIgZm9sZCB0aGVtIGludG8gdGhpcyBkaWZmLiBWZXJpZnkgcHJlLWV4aXN0aW5nIGZhaWx1cmVzIG9uIHRoZSBiYXNlIGNvbW1pdCBiZWZvcmUgZmlsaW5nLiBXaHk6IGZvbGRlZCBmaXhlcyBoaWRlIGNhdXNlIGFuZCBleHBhbmQgc2NvcGUuIChzZWN0aW9uIDExKQotIFJlYWQgYmVmb3JlIHdyaXRlOiByZWFkIHRoZSBvd25pbmcgYXJ0aWZhY3QgYmVmb3JlIHdyaXRpbmcgYSBjb21tYW5kLCBjbGFpbSwgb3IgdGVzdC4gV2h5OiBndWVzc2VkIGZhY3RzIGNyZWF0ZSBjb3N0bHkgYnVncy4gKHNlY3Rpb24gMTMpCi0gVGlja2V0IGZyb250bWF0dGVyIGNvbnRhaW5zIG9ubHkgZmllbGRzIHJlYWQgYnkgc2NoZWR1bGluZywgZ2F0ZXMsIG9yIGF1dGhvcmluZy90cmlhZ2UgcG9saWN5LiBQdXQgb3JkZXJpbmcgaW4gZGVwZW5kcyBhbmQgcHJpb3JpdHkuIFdoeTogdW51c2VkIG1ldGFkYXRhIGFuZCBwcm9zZSBvcmRlcmluZyBkcmlmdC4gKHNlY3Rpb24gMTMpCi0gVXNlIGluamVjdGFibGUgY2xvY2ssIHByb2Nlc3MtZXhlYywgZmlsZXN5c3RlbSwgYW5kIG5vdGlmaWNhdGlvbiBzZWFtczsgbmV2ZXIgcmF3IGNhbGxzIGluIGVuZ2luZSBjb2RlLiBXaHk6IGZha2UtZHJpdmVuIHRlc3RzIGFuZCBncm91cC1raWxsIGd1YXJhbnRlZXMgcmVxdWlyZSBzZWFtcy4gKHNlY3Rpb24gMTUpCi0gV29yayBpcyBmZW5jZWQgYnkgZ2F0ZXMgYW5kIHJldmlldzsgdjEgZG9lcyBub3Qgc2FuZGJveCBleGVjdXRlZCBjb2RlLiBOZXZlciByZWx5IG9uIGl0cyBnb29kd2lsbCBvciBwYXNzIHByb3ZpZGVyIGtleXMgdG8gcHJvY2Vzc2VzIHRoYXQgZG8gbm90IG5lZWQgdGhlbS4gV2h5OiBnYXRlcyBhbmQgcmV2aWV3IGFyZSB0aGUgdHJ1c3QgYm91bmRhcnkuIChzZWN0aW9uIDE2KQotIFRoZSBqb3VybmFsIGlzIHRoZSByZWNvcmQsIG5ldmVyIGEgZGVidWcgbG9nLiBEaWFnbm9zdGljcyB1c2UgdGhlIGVuZ2luZSBsb2cgYW5kIGF0dGVtcHQgc3Bvb2xzOyByZWRhY3QgY29uZmlndXJlZCBzZWNyZXRzIGF0IGV2ZXJ5IGNhcHR1cmVkLXN0cmVhbSB3cml0ZSBzZWFtLiBXaHk6IGpvdXJuYWwgbm9pc2UgYW5kIHNlY3JldHMgYXJlIHBlcm1hbmVudC4gKHNlY3Rpb24gNikKPCEtLSB0ZW1wbzpjb3JlIGVuZCAtLT4KCg=='
 
 
 class RecordingFS(LocalFileSystem):
@@ -27,21 +25,6 @@ class RecordingFS(LocalFileSystem):
     def write(self, path, data):
         self.writes.append((path, data))
         super().write(path, data)
-
-
-def test_renderer_entry_unit():
-    plan = (REPO / "TEMPO_PLAN.md").read_text()
-    uid = "19.P6.core-renderer"
-    ticket = parse_ticket("core-renderer", (REPO / "tickets/core-renderer/ticket.md").read_text(),
-                          REPO, plan=plan)
-    assert required_units(plan, ticket.stem, ticket.plan_contract) == (uid,)
-    assert required_units(plan, "continuation", (uid,)) == (uid,)
-    assert resolve_plan_contract(plan, (*ticket.plan_contract, uid)).count(f"### {uid} ") == 1
-    assert entry_unit_gap(plan, uid) is None
-    for part in ("Owner", "Records", "Observable", "Tests"):
-        for replacement in ("", f"- **{part}:**"):
-            broken = re.sub(rf"^- \*\*{part}:\*\*.*$", replacement, plan, flags=re.M)
-            assert part in entry_unit_gap(broken, uid)
 
 
 @pytest.mark.parametrize("project", [None, b"", b"# Project\n\nrules\n", b"one\r\ntwo\nthree\r\nfour",
@@ -131,24 +114,6 @@ def test_core_golden_uses_branch_template(monkeypatch):
     with pytest.raises(AssertionError):
         assert hostfiles.render(b"") == golden
     assert hostfiles.render(golden) == hostfiles.render(b"")
-
-
-def test_classifier_entry_unit():
-    plan = (REPO / "TEMPO_PLAN.md").read_text()
-    own, renderer = "19.P6.core-drift-classifier", "19.P6.core-renderer"
-    ticket = parse_ticket("core-drift-classifier",
-                          (REPO / "tickets/core-drift-classifier/ticket.md").read_text(), REPO, plan=plan)
-    assert required_units(plan, ticket.stem, ticket.plan_contract) == (own, renderer)
-    assert required_units(plan, "continuation", (own, renderer)) == (own, renderer)
-    for uid in (own, renderer):
-        resolved = resolve_plan_contract(plan, (uid, uid))
-        assert resolved.count(f"### {uid} ") == 1
-        assert entry_unit_gap(plan, uid) is None
-        for part in ("Owner", "Records", "Observable", "Tests"):
-            for replacement in ("", f"- **{part}:**"):
-                broken_unit = re.sub(rf"^- \*\*{part}:\*\*.*$", replacement, resolved, flags=re.M)
-                broken = plan.replace(resolved, broken_unit)
-                assert part in entry_unit_gap(broken, uid)
 
 
 def test_core_drift_classification():
@@ -304,24 +269,6 @@ def test_core_drift_reachable_from_production_gates(root, monkeypatch, mode):
         asyncio.run(queued())
     assert sum("core_drift" in codes for codes in selections) == 2
     assert len(calls) >= 2 and all(hostfiles.parse(data) is not None for data in calls)
-
-
-def test_core_activation_entry_unit():
-    plan = (REPO / "TEMPO_PLAN.md").read_text()
-    own = "19.P6.core-drift-activation"
-    units = (own, "19.P6.core-renderer", "19.P6.core-drift-classifier")
-    ticket = parse_ticket("core-drift-activation", (REPO / "tickets/core-drift-activation/ticket.md").read_text(),
-                          REPO, plan=plan)
-    assert set(required_units(plan, ticket.stem, ticket.plan_contract)) == set(units)
-    for uid in units:
-        resolved = resolve_plan_contract(plan, (uid, uid))
-        assert resolved.count(f"### {uid} ") == 1
-        assert entry_unit_gap(plan, uid) is None
-        for part in ("Owner", "Records", "Observable", "Tests"):
-            for replacement in ("", f"- **{part}:**"):
-                broken = plan.replace(resolved, re.sub(rf"^- \*\*{part}:\*\*.*$", replacement,
-                                                       resolved, flags=re.M))
-                assert part in entry_unit_gap(broken, uid)
 
 
 def test_core_activation_first_adoption():

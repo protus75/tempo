@@ -55,7 +55,7 @@ def test_each_invariant_reports_its_own_planted_violation():
         assert [v.invariant for v in audit([events])] == [name]
 
 
-def test_exempt_runs_and_null_settlement_are_green():
+def test_exempt_runs_and_settlement_are_green():
     events = (
         event(EventType.STATE_TRANSITION, ticket="failed", body={"to": "running"}),
         event(EventType.EFFECT_INTENT, ticket="failed", key="unpaired"),
@@ -65,7 +65,7 @@ def test_exempt_runs_and_null_settlement_are_green():
         event(EventType.STATE_TRANSITION, ticket="killed", body={"to": "gate_failed"}),
         event(EventType.STATE_TRANSITION, ticket="killed", body={"to": "rejected"}),
         event(EventType.STATE_TRANSITION, ticket="settled", body={"to": "running"}),
-        event(EventType.STATE_TRANSITION, ticket="settled", body={"to": "merged", "commit": None}),
+        event(EventType.STATE_TRANSITION, ticket="settled", body={"to": "merged", "commit": COMMIT}),
     )
 
     assert audit([events]) == []

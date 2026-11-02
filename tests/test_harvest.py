@@ -7,12 +7,11 @@ import pytest
 
 from tempo import runner
 from tempo.__main__ import main
-from tempo.artifacts import Cost, Harvest, StageResult
+from tempo.artifacts import Harvest, StageResult
 from tempo.journal import EventType, Journal
 from tempo.llm import FakeLLM
 from tempo.specs import data_close, data_open
 from tempo.stages import PRIOR_ATTEMPTS, StagesRun
-from tests.test_drain_reentry import NoChild
 from tests.test_stages import ENV, SNAG, STEM, agent, git, verdict
 from tests.test_terminal import author, clock, diagnosis_reply, repo  # noqa: F401 -- fixture
 
@@ -20,8 +19,7 @@ from tests.test_terminal import author, clock, diagnosis_reply, repo  # noqa: F4
 def run(repo: Path, script: list, verb: str = "run") -> tuple[int, FakeLLM]:
     llm = FakeLLM(script)
     argv = [verb, STEM] if verb == "run" else [verb]
-    code = main(argv, cwd=repo, env=ENV, clock=clock, pipeline=lambda c: runner.bind(c, llm),
-                reexec=NoChild())
+    code = main(argv, cwd=repo, env=ENV, clock=clock, pipeline=lambda c: runner.bind(c, llm))
     return code, llm
 
 
@@ -116,7 +114,7 @@ def test_missing_worktree_skips_harvest(repo, monkeypatch):
 
     async def no_workspace(ctx, ticket):
         return StagesRun(attempt=0, results={"implement": StageResult(
-            outcome="premise_failed", artifact=None, findings=[], cost=Cost())})
+            outcome="premise_failed", artifact=None, findings=[])})
 
     monkeypatch.setattr(runner, "run_stages", no_workspace)
     code, _ = run(repo, [])

@@ -35,20 +35,20 @@ def seed(state_dir, name: str, *lines: str) -> None:
 
 def test_append_round_trips_envelope(tmp_path):
     j = Journal(tmp_path, FakeClock(T0))
-    ev = j.append("signal", {"kind": "drain_handoff"}, ticket="t-1", key="k-1")
+    ev = j.append("signal", {"kind": "drain_halted"}, ticket="t-1", key="k-1")
     assert ev == Event(
         v=1,
         type="signal",
         ts="2026-08-04T12:00:00+00:00",
         ticket="t-1",
         key="k-1",
-        body={"kind": "drain_handoff"},
+        body={"kind": "drain_halted"},
     )
     assert j.read() == [ev]
 
 
 def test_first_append_creates_ordered_segment_under_state_dir(tmp_path):
-    Journal(tmp_path, FakeClock(T0)).append("signal", {"signal": "drain_handoff"})
+    Journal(tmp_path, FakeClock(T0)).append("signal", {"signal": "drain_halted"})
     assert [p.name for p in (tmp_path / "journal").iterdir()] == ["000001-20260804.jsonl"]
 
 
@@ -62,11 +62,11 @@ def test_on_disk_line_has_fixed_envelope_shape(tmp_path):
 def test_ts_is_pinned_aware_utc_isoformat_and_sorts_chronologically(tmp_path):
     clock = FakeClock(T0)
     j = Journal(tmp_path, clock)
-    j.append("signal", {"signal": "drain_handoff"})
+    j.append("signal", {"signal": "drain_halted"})
     clock.advance(0.5)
-    j.append("signal", {"signal": "drain_handoff"})
+    j.append("signal", {"signal": "drain_halted"})
     clock.advance(0.5)
-    j.append("signal", {"signal": "drain_handoff"})
+    j.append("signal", {"signal": "drain_halted"})
     stamps = [e.ts for e in j.read()]
     assert stamps == [
         "2026-08-04T12:00:00+00:00",
@@ -79,13 +79,13 @@ def test_ts_is_pinned_aware_utc_isoformat_and_sorts_chronologically(tmp_path):
 def test_non_utc_aware_clock_is_rendered_as_utc(tmp_path):
     plus2 = timezone(timedelta(hours=2))
     j = Journal(tmp_path, lambda: datetime(2026, 8, 4, 14, 0, tzinfo=plus2))
-    assert j.append("signal", {"signal": "drain_handoff"}).ts == "2026-08-04T12:00:00+00:00"
+    assert j.append("signal", {"signal": "drain_halted"}).ts == "2026-08-04T12:00:00+00:00"
 
 
 def test_naive_clock_is_refused(tmp_path):
     j = Journal(tmp_path, lambda: datetime(2026, 8, 4, 12, 0))
     with pytest.raises(ValueError, match="aware"):
-        j.append("signal", {"signal": "drain_handoff"})
+        j.append("signal", {"signal": "drain_halted"})
     assert not (tmp_path / "journal").exists()
 
 
@@ -104,7 +104,7 @@ def test_append_goes_to_newest_segment_without_rolling(tmp_path):
     seed(tmp_path, "000001-20260801.jsonl", line("signal", 1))
     seed(tmp_path, "000002-20260802.jsonl", line("signal", 2))
     j = Journal(tmp_path, FakeClock(T0))
-    j.append("signal", {"signal": "drain_handoff", "n": 3})
+    j.append("signal", {"signal": "drain_halted", "n": 3})
     names = sorted(p.name for p in (tmp_path / "journal").iterdir())
     assert names == ["000001-20260801.jsonl", "000002-20260802.jsonl"]
     assert [[e.body["n"] for e in seg] for seg in j.read_segments()] == [[1], [2, 3]]
@@ -119,7 +119,7 @@ def test_missing_journal_reads_empty(tmp_path):
 def test_torn_final_line_is_skipped_and_rest_still_reads(tmp_path):
     j = Journal(tmp_path, FakeClock(T0))
     for n in range(3):
-        j.append("signal", {"signal": "drain_handoff", "n": n})
+        j.append("signal", {"signal": "drain_halted", "n": n})
     seg = tmp_path / "journal" / "000001-20260804.jsonl"
     with seg.open("ab") as f:
         f.write(b'{"v": 1, "type": "sig')
@@ -139,7 +139,7 @@ def test_writer_truncates_torn_tail_before_appending(tmp_path):
     with seg.open("ab") as f:
         f.write(b'{"v": 1, "ty')
     j = Journal(tmp_path, FakeClock(T0))
-    j.append("signal", {"signal": "drain_handoff", "n": 2})
+    j.append("signal", {"signal": "drain_halted", "n": 2})
     assert [e.body["n"] for e in j.read()] == [1, 2]
     assert all(json.loads(l) for l in seg.read_text().splitlines())
 
@@ -217,13 +217,13 @@ def test_writer_refuses_non_object_body(tmp_path):
 def test_writer_refuses_non_string_ticket_or_key(tmp_path, field, value):
     j = Journal(tmp_path, FakeClock(T0))
     with pytest.raises(ValueError, match=field):
-        j.append("signal", {"signal": "drain_handoff"}, **{field: value})
+        j.append("signal", {"signal": "drain_halted"}, **{field: value})
     assert not (tmp_path / "journal").exists()
 
-    j.append("signal", {"signal": "drain_handoff", "n": 1})
+    j.append("signal", {"signal": "drain_halted", "n": 1})
     before = j.read()
     with pytest.raises(ValueError, match=field):
-        j.append("signal", {"signal": "drain_handoff"}, **{field: value})
+        j.append("signal", {"signal": "drain_halted"}, **{field: value})
     assert j.read() == before
 
 

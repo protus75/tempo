@@ -3,18 +3,16 @@
 import asyncio
 import json
 from dataclasses import FrozenInstanceError
-from pathlib import Path
 
 import pytest
 
 from tempo.artifacts import ReviewVerdict
 from tempo.driver import LlmStage
 from tempo.journal import EventType
-from tempo.llm import FakeLLM, LLMResult
+from tempo.llm import FakeLLM
 from tempo.lockfile import Lockfile
 from tempo.retro import RetroArtifact, measurements, production_evidence, project_window, render_report
 from tempo.scorecard import project_scorecard
-from tempo.specs import entry_unit_gap, required_units, resolve_plan_contract
 from tempo.stages import PackingSlip, check, implement
 from tempo.tickets import validate_ticket
 from tests.test_drain import confirmed
@@ -42,56 +40,19 @@ async def invoice(c, writer, stem, *, bypass=False, attempt=0):
     return (await check(writer.ctx, ticket, slip, attempt=attempt)).artifact
 
 
-async def review(c, writer, stem, verdict, *, attempt=0, cost=None):
+async def review(c, writer, stem, verdict, *, attempt=0):
     code = "ticket" if verdict == "rma" else "logic"
     findings = [] if verdict == "approve" else [{"code": code, "message": "finding",
                                                 "paved_road": "repair or retire"}]
     text = json.dumps({"verdict": verdict, "summary": "reviewed", "findings": findings})
-    writer.stages.driver.llm = FakeLLM([cost or text])
+    writer.stages.driver.llm = FakeLLM([text])
     stage = LlmStage(surface="review", emits=ReviewVerdict, gates=[], render=lambda *_: "review")
     return await writer.stages.driver.run(stage, None, ticket=stem, attempt=attempt,
-        workspace=c.repo, tier="medium", effort="low", stuck_budget=600,
-        expected_budget=300, scope_fence=())
+        workspace=c.repo, tier="medium", effort="low", stuck_budget=600)
 
 
 def rows(card):
     return {row.surface: row for row in card.surfaces}
-
-
-def test_scorecard_entry_unit():
-    plan = (Path(__file__).resolve().parents[1] / "TEMPO_PLAN.md").read_text()
-    unit = "19.P5.scorecard-reporting"
-    assert required_units(plan, "scorecard-reporting", ["19.I", unit, "section 14"]) == (unit,)
-    assert unit in required_units(plan, "phase5-continue-03", [unit])
-    resolved = resolve_plan_contract(plan, [unit, unit])
-    assert resolved.count(f"### {unit} ") == 1
-    assert entry_unit_gap(plan, unit) is None
-    for part in ("Owner", "Records", "Observable", "Tests"):
-        assert entry_unit_gap(plan.replace(f"- **{part}:**", f"- **Missing {part}:**"), unit)
-
-
-def test_escape_entry_unit():
-    import re
-    from tempo.specs import ENTRY_PARTS, PlanContractError
-    plan = (Path(__file__).resolve().parents[1] / "TEMPO_PLAN.md").read_text()
-    units = ("19.P6.escape-column", "19.P6.bug-gate-grammar", "19.P6.report-inbox-triage")
-    assert required_units(plan, "escape-column", ("19.I", *units, "10", "14")) == units
-    assert required_units(plan, "later-consumer", units) == units
-    assert units[0] in required_units(plan, "phase6-continue-04", units)
-    assert ENTRY_PARTS == ("Owner", "Records", "Observable", "Tests")
-    resolved = resolve_plan_contract(plan, (*units, *units))
-    for uid in units:
-        assert resolved.count(f"### {uid} ") == 1
-        assert entry_unit_gap(plan, uid) is None
-        unit = resolve_plan_contract(plan, [uid])
-        for part in ENTRY_PARTS:
-            for replacement in ("", f"- **{part}:**"):
-                broken = re.sub(rf"^- \*\*{part}:\*\*.*$", replacement, unit, flags=re.M)
-                assert part in entry_unit_gap(broken, uid)
-        for broken in ("", unit + unit):
-            assert entry_unit_gap(broken, uid)
-            with pytest.raises(PlanContractError):
-                resolve_plan_contract(broken, [uid])
 
 
 def escape(journal, box_id, matches):
@@ -126,7 +87,7 @@ def test_escape_counts_once_per_report_ticket_surface(tmp_path):
                for s in ("review", "verification"))
     assert all(result[s].escapes == 0 for s in ("failed", "bypassed", "unknown"))
     assert result["bypassed"].bypass_count == 1
-    assert card.boundary == "retro/1" and card.merged_ticket_count == card.spend_usd == 0
+    assert card.boundary == "retro/1" and card.merged_ticket_count == 0
     completed(c.journal, 2)
     assert project_scorecard(project_window(c.journal.read())).surfaces == ()
 
@@ -248,8 +209,6 @@ def test_scorecard_rates_and_prune_threshold(tmp_path):
     with pytest.raises(FrozenInstanceError):
         result.boundary = "changed"
     with pytest.raises(TypeError):
-        result.tokens["input"]["known"] = 99
-    with pytest.raises(TypeError):
         result.signal_counts["rework"] = 99
     event = window.events[-1]
     window.completed_checks[event.key] += ((event.ticket, "z", "fail", False),)
@@ -265,9 +224,7 @@ def test_scorecard_totals_and_rendering(tmp_path, monkeypatch):
     c, writer, hook, _ = rig(tmp_path)
     asyncio.run(invoice(c, writer, "one", bypass=True))
     head = asyncio.run(c.git.rev_parse(c.repo, "HEAD"))
-    measured = LLMResult(text='{"verdict":"approve","summary":"ok","findings":[]}',
-                         usd=1.25, input_tokens=11, output_tokens=None, provider="fake", model="fake")
-    asyncio.run(review(c, writer, "one", "approve", cost=measured))
+    asyncio.run(review(c, writer, "one", "approve"))
     call = c.journal.read()[-1]
     assert call.type == EventType.EFFECT_COMPLETION
     c.journal.append(call.type, call.body, ticket=call.ticket, key=call.key)
@@ -288,18 +245,14 @@ def test_scorecard_totals_and_rendering(tmp_path, monkeypatch):
         text = render_report(window, evidence, {"head": head}, [], RetroArtifact(proposals=[]))
         assert text == render_report(window, evidence, {"head": head}, [], RetroArtifact(proposals=[]))
     assert c.journal.read() == before
-    assert card.merged_ticket_count == 1 and card.spend_usd == 1.25
-    # Implement's real completed call has unknown usage in both directions.
-    assert card.tokens["input"] == {"known": 11, "unknown_calls": 1}
-    assert card.tokens["output"] == {"known": 0, "unknown_calls": 2}
+    assert card.merged_ticket_count == 1
     assert card.signal_counts == {"override": 1, "rework": 1, "gate-failure": 1, "integration-red": 1}
     assert card.gate_failure_count == 1
     assert "| scope_fence | 1 | 0 | 0 | 1 | 0.0000 | 0.0000 | false |" in text
     empty = project_window([])
     empty_text = render_report(empty, measurements(empty), {}, [], RetroArtifact(proposals=[]))
     assert empty_text.endswith("| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n")
-    assert project_scorecard(empty).spend_usd == project_scorecard(empty).merged_ticket_count == 0
-    assert project_scorecard(empty).tokens["input"] == {"known": 0, "unknown_calls": 0}
+    assert project_scorecard(empty).merged_ticket_count == 0
     assert all(count == 0 for count in project_scorecard(empty).signal_counts.values())
     writer.stages.driver.llm = FakeLLM(['{"proposals": []}'])
     lock = Lockfile(c.config.state_dir, instance_id="scorecard-test", clock=c.clock)

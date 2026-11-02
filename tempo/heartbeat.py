@@ -1,4 +1,4 @@
-"""Dormant heartbeat record and external liveness evidence (19.P3.heartbeat)."""
+"""Heartbeat record and external liveness evidence."""
 
 from collections.abc import Callable
 from datetime import datetime, timedelta

@@ -67,7 +67,6 @@ def test_every_call_is_dir_pinned_and_passes_env_and_timeout():
         (lambda g: g.ls_files(REPO), ["ls-files"]),
         (lambda g: g.rev_parse(REPO, "HEAD"), ["rev-parse", "--verify", "HEAD"]),
         (lambda g: g.merge_base(REPO, "main", "t-1"), ["merge-base", "main", "t-1"]),
-        (lambda g: g.git_common_dir(REPO), ["rev-parse", "--git-common-dir"]),
         (lambda g: g.diff(REPO, "main", "t-1"), ["diff", "main...t-1"]),
         (lambda g: g.diff_stat(REPO, "main", "t-1"), ["diff", "--stat", "main...t-1"]),
         (lambda g: g.add(REPO, ["a.py", "b c.py"]), ["add", "--", "a.py", "b c.py"]),
@@ -109,29 +108,6 @@ def test_rev_parse_and_describe_strip_output():
     g, _ = git((0, "abc123\n", ""), (0, "v1.0-3-gabc-dirty\n", ""))
     assert run(g.rev_parse(REPO, "HEAD")) == "abc123"
     assert run(g.describe(REPO)) == "v1.0-3-gabc-dirty"
-
-
-def test_git_common_dir_resolves_main_and_linked_worktree(tmp_path):
-    main = tmp_path / "main"
-    linked = tmp_path / "linked"
-    main.mkdir()
-    env = {
-        **os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
-    }
-    g = Git(SubprocessExec(), env=env, timeout=30.0)
-
-    async def scenario():
-        await g.init(main, branch="main")
-        (main / "file").write_text("base\n")
-        await g.add(main, ["file"])
-        await g.commit(main, "base")
-        await g.worktree_add(main, linked, "linked", "main")
-        assert await g.git_common_dir(main) == main / ".git"
-        assert await g.git_common_dir(linked) == main / ".git"
-
-    run(scenario())
 
 
 def test_ls_files_lists_committed_files_not_untracked_files(tmp_path):

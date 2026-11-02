@@ -14,7 +14,6 @@ from tempo.llm import FakeLLM
 from tempo.seams import LocalFileSystem
 from tempo.storm import StormLedger
 from tests.test_daemon_composition import CoreRig
-from tests.test_drain_reentry import NoChild
 from tests.test_journal import FakeClock, T0
 from tests.test_mergequeue import ctx as admission_context  # noqa: F401
 from tests.test_stages import STEM, TICKET, agent, verdict
@@ -83,7 +82,6 @@ def test_arrival_replay_survives_restart_and_roll(tmp_path, monkeypatch):
     box.enqueue(**ARRIVAL, occurrence_id="second")
     clock.advance(3601)
     box.enqueue(**ARRIVAL, occurrence_id="third")
-    journal.close()
     box, journal, _ = compose(tmp_path, clock)
     before = snapshot(tmp_path)
     assert box.enqueue(**ARRIVAL, occurrence_id="stable") == (id, False)
@@ -159,7 +157,7 @@ def test_invalid_arrivals_and_callback_failures_do_not_publish(tmp_path, monkeyp
         journal.append(EventType.SIGNAL, dict(kind="storm_occurrence"))
         expected = ValueError
     elif damage == "journal":
-        journal.append(EventType.SIGNAL, dict(kind="drain_handoff"))
+        journal.append(EventType.SIGNAL, dict(kind="drain_halted"))
         next(journal.dir.glob("*.jsonl")).write_bytes(b"{}\n")
         expected = JournalCorruption
     else:
@@ -256,9 +254,9 @@ def test_storm_producer_hook_is_active(tmp_path, monkeypatch, admission_context,
         reply["second_problems"] = [{"summary": "ordinary production arrival"}]
         return "```json\n" + json.dumps(reply) + "\n```"
 
-    llm = FakeLLM([report, verdict()])
+    llm = FakeLLM([report, verdict(), '{"proposals": []}'])  # drain: the quiescence retro follows the merge
     assert cli.main([verb, STEM] if verb == "run" else [verb], cwd=source.repo, env=source.env,
-                    clock=source.driver.clock, pipeline=lambda c: runner.bind(c, llm), reexec=NoChild()) == 0
+                    clock=source.driver.clock, pipeline=lambda c: runner.bind(c, llm)) == 0
     messages = Box(source.config.state_dir / "box", source.fs).messages()
     assert len(messages) == 1 and messages[0].summary == "ordinary production arrival"
     occurrences = [e for e in source.driver.journal.read() if e.body.get("kind") == "storm_occurrence"]

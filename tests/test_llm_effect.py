@@ -26,7 +26,7 @@ CONFIG = textwrap.dedent(
         package: test-cli
         auth: TEMPO_TEST_KEY
         models_by_tier: {low: haiku, medium: sonnet, high: opus, max: opus}
-        limits: {concurrency: 1, est_cost_per_call_usd: 0.25}
+        limits: {concurrency: 1}
     routing:
       - {tier: medium, surface: implement, candidates: [{provider: claude, model: sonnet}]}
     review: {}
@@ -79,12 +79,12 @@ def build(tmp_path: Path, llm: FakeLLM) -> tuple[Driver, Path]:
 def run(driver: Driver, ticket: str | None = "t-echo", attempt: int = 1):
     return asyncio.run(
         driver.run(ECHO, Stub(text="hi"), ticket=ticket, attempt=attempt, workspace=Path("."),
-                   tier="medium", effort="low", stuck_budget=600.0, expected_budget=300.0, scope_fence=())
+                   tier="medium", effort="low", stuck_budget=600.0)
     )
 
 
-def metered(text: str, usd: float = 0.5) -> LLMResult:
-    return LLMResult(text=text, input_tokens=10, output_tokens=5, provider="claude", model="sonnet", usd=usd)
+def served(text: str) -> LLMResult:
+    return LLMResult(text=text, provider="claude", model="sonnet")
 
 
 def llm_completions(state_dir: Path):
@@ -100,8 +100,8 @@ def test_key_is_the_universal_llm_shape():
     assert llm_key("t-1", 3, "implement", 2, 1) == "llm/t-1/3/implement/2/1"
 
 
-def test_each_call_journals_exactly_one_cost_bearing_completion(tmp_path):
-    llm = FakeLLM([metered(echo_json(""), usd=0.25), metered(echo_json("hi"), usd=0.5)])
+def test_each_call_journals_exactly_one_served_completion(tmp_path):
+    llm = FakeLLM([served(echo_json("")), served(echo_json("hi"))])
     driver, state_dir = build(tmp_path, llm)
     result = run(driver)
 
@@ -109,23 +109,22 @@ def test_each_call_journals_exactly_one_cost_bearing_completion(tmp_path):
     done = llm_completions(state_dir)
     assert len(done) == len(llm.requests) == 1  # the first valid reply ends the attempt
     assert done[0].key == "llm/t-echo/0/implement/1/1" and done[0].ticket == "t-echo"
-    assert done[0].body["cost"] == {"usd": 0.25, "input_tokens": 10, "output_tokens": 5,
-                                    "provider": "claude", "model": "sonnet"}
+    assert done[0].body["served"] == {"provider": "claude", "model": "sonnet"}
 
 
-def test_reprompt_takes_a_fresh_key_and_its_own_cost_event(tmp_path):
-    llm = FakeLLM(["not json", metered(echo_json("hi"))])
+def test_reprompt_takes_a_fresh_key_and_its_own_completion(tmp_path):
+    llm = FakeLLM(["not json", served(echo_json("hi"))])
     driver, state_dir = build(tmp_path, llm)
     assert run(driver).outcome == "ok"
 
     done = llm_completions(state_dir)
     assert [e.key for e in done] == ["llm/t-echo/0/implement/1/1", "llm/t-echo/0/implement/1/2"]
     assert len(done) == len(llm.requests) == 2
-    assert all("cost" in e.body for e in done)
+    assert all("served" in e.body for e in done)
 
 
 def test_same_sequence_reentry_replays_without_recalling(tmp_path):
-    llm = FakeLLM([metered(echo_json("hi"))])
+    llm = FakeLLM([served(echo_json("hi"))])
     driver, state_dir = build(tmp_path, llm)
     first = run(driver)
 
@@ -134,11 +133,11 @@ def test_same_sequence_reentry_replays_without_recalling(tmp_path):
     assert len(llm.requests) == 1  # the exhausted script would raise on a re-call
     assert replayed.outcome == first.outcome == "ok"
     assert replayed.artifact == first.artifact
-    assert len(llm_completions(state_dir)) == 1  # replay journals no second cost event
+    assert len(llm_completions(state_dir)) == 1  # replay journals no second completion
 
 
 def test_replay_survives_a_restart(tmp_path):
-    driver, state_dir = build(tmp_path, FakeLLM([metered(echo_json("hi"))]))
+    driver, state_dir = build(tmp_path, FakeLLM([served(echo_json("hi"))]))
     run(driver)
 
     fresh_llm = FakeLLM([])
@@ -149,7 +148,7 @@ def test_replay_survives_a_restart(tmp_path):
 
 
 def test_a_terminal_advances_run_seq_so_the_rerun_is_real_work(tmp_path):
-    llm = FakeLLM([metered(echo_json("hi")), metered(echo_json("hi"))])
+    llm = FakeLLM([served(echo_json("hi")), served(echo_json("hi"))])
     driver, state_dir = build(tmp_path, llm)
     run(driver)
     terminal(state_dir, "t-echo", "gate_failed")
@@ -177,14 +176,14 @@ def test_run_seq_counts_only_this_stems_terminals():
 
 
 def test_ticketless_surface_keys_on_its_surface_name(tmp_path):
-    driver, state_dir = build(tmp_path, FakeLLM([metered(echo_json("hi"))]))
+    driver, state_dir = build(tmp_path, FakeLLM([served(echo_json("hi"))]))
     run(driver, ticket=None)
     (done,) = llm_completions(state_dir)
     assert done.key == "llm/implement/0/implement/1/1" and done.ticket is None
 
 
 def test_recorded_result_is_scrubbed_before_the_completion_and_the_return(tmp_path):
-    llm = FakeLLM([metered(f"leak {SECRET}"), metered(echo_json("hi"))])
+    llm = FakeLLM([served(f"leak {SECRET}"), served(echo_json("hi"))])
     driver, state_dir = build(tmp_path, llm)
     run(driver)
 
@@ -193,32 +192,32 @@ def test_recorded_result_is_scrubbed_before_the_completion_and_the_return(tmp_pa
     assert llm_completions(state_dir)[0].body["result"]["text"] == "leak [REDACTED:TEMPO_TEST_KEY]"
 
 
-def test_failed_call_journals_no_completion_and_no_cost(tmp_path):
+def test_failed_call_journals_no_completion(tmp_path):
     driver, state_dir = build(tmp_path, FakeLLM([RuntimeError("boom")]))
     assert run(driver).outcome == "infra_error"
     events = [e for e in Journal(state_dir, clock).read() if (e.key or "").startswith("llm/")]
     assert [e.type for e in events] == ["effect_intent"]
 
 
-def test_effect_decorator_keys_on_its_arguments_and_records_cost(tmp_path):
+def test_effect_decorator_keys_on_its_arguments(tmp_path):
     j = Journal(tmp_path, clock)
     calls = []
 
-    @effect(key=lambda name, n: f"greet/{name}/{n}", cost=lambda r: {"usd": r["usd"]})
+    @effect(key=lambda name, n: f"greet/{name}/{n}")
     async def greet(name: str, n: int) -> dict:
         calls.append((name, n))
-        return {"text": f"hi {name}", "usd": 0.1}
+        return {"text": f"hi {name}"}
 
     effects = Effects(j)
     first = asyncio.run(greet(effects, "a", 1, ticket="t"))
     again = asyncio.run(greet(effects, "a", 1, ticket="t"))
     asyncio.run(greet(effects, "a", 2, ticket="t"))
 
-    assert first == again == {"text": "hi a", "usd": 0.1}
+    assert first == again == {"text": "hi a"}
     assert calls == [("a", 1), ("a", 2)]
     done = [e for e in j.read() if e.type == EventType.EFFECT_COMPLETION]
-    assert [(e.key, e.ticket, e.body["cost"]) for e in done] == [("greet/a/1", "t", {"usd": 0.1}),
-                                                                 ("greet/a/2", "t", {"usd": 0.1})]
+    assert [(e.key, e.ticket, e.body) for e in done] == [("greet/a/1", "t", {"result": {"text": "hi a"}}),
+                                                         ("greet/a/2", "t", {"result": {"text": "hi a"}})]
 
 
 def test_singleton_effect_takes_a_bare_string_key(tmp_path):
@@ -230,4 +229,4 @@ def test_singleton_effect_takes_a_bare_string_key(tmp_path):
 
     assert asyncio.run(retro(Effects(j), ticket=None)) == "done"
     (done,) = [e for e in j.read() if e.type == EventType.EFFECT_COMPLETION]
-    assert done.key == "retro/1" and "cost" not in done.body
+    assert done.key == "retro/1" and done.body == {"result": "done"}

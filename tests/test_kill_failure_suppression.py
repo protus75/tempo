@@ -246,7 +246,7 @@ async def test_kill_suppression_preserves_run_and_abort_failures(admission_conte
     journal.append(EventType.STATE_TRANSITION, {"to": "running"}, ticket=work.stem)
     # Existing runner custody produces the harvest before any notification suppression.
     await runner.harvest_failure(ctx, work, attempt=0, stage="implement", outcome="infra_error",
-                                 findings=[], results=())
+                                 findings=[])
     harvest_path = ctx.repo / f"tickets/{work.stem}/attempts/0/harvest.json"
     harvest = harvest_path.read_bytes()
     assert json.loads(harvest)["terminal"] == "infra_error"
@@ -260,7 +260,7 @@ async def test_kill_suppression_preserves_run_and_abort_failures(admission_conte
     ctx.driver.sleep = Timer()
     invocation = asyncio.create_task(ctx.driver.run(
         ECHO, Stub(text="hi"), ticket=work.stem, attempt=1, workspace=ctx.worktree(work.stem),
-        tier="medium", effort="low", stuck_budget=600, expected_budget=300.0, scope_fence=()))
+        tier="medium", effort="low", stuck_budget=600))
     await writer.started.wait()
     rig, projection = accepted(ctx.config.state_dir)
     worker = Worker(failure=RuntimeError("worker unwind"))

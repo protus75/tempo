@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from tempo.artifacts import ARTIFACT_SCHEMA_VERSION, OUTCOMES, Artifact, Cost, Finding, StageResult
+from tempo.artifacts import ARTIFACT_SCHEMA_VERSION, OUTCOMES, Artifact, Finding, StageResult
 from tempo.config import load_config
 from tempo.gates import (
     DEFAULT_GATE_SEVERITY,
@@ -78,7 +78,6 @@ def test_outcome_vocab_is_closed_and_includes_already_satisfied():
         "premise_failed",
         "timeout",
         "infra_error",
-        "budget_exceeded",
     }
 
 
@@ -109,16 +108,11 @@ def test_artifact_reader_refuses_newer_tolerates_older_and_rejects_unknown_keys(
 
 
 def test_stage_result_is_frozen_and_validates_outcome():
-    r = StageResult(outcome="already_satisfied", artifact=None, findings=[], cost=Cost())
+    r = StageResult(outcome="already_satisfied", artifact=None, findings=[])
     with pytest.raises(FrozenInstanceError):
         r.outcome = "ok"  # type: ignore[misc]
     with pytest.raises(ValueError, match="outcome"):
-        StageResult(outcome="done", artifact=None, findings=[], cost=Cost())  # type: ignore[arg-type]
-
-
-def test_cost_defaults_are_the_non_llm_shape():
-    c = Cost()
-    assert (c.usd, c.provider, c.model) == (0.0, None, None)
+        StageResult(outcome="done", artifact=None, findings=[])  # type: ignore[arg-type]
 
 
 # --- gate-lint -------------------------------------------------------------
@@ -194,7 +188,7 @@ def test_runner_applies_soft_severity_from_config(tmp_path):
                 kind: cli
                 package: test-cli
                 models_by_tier: {low: a, medium: b, high: c, max: d}
-                limits: {concurrency: 1, est_cost_per_call_usd: 0.25}
+                limits: {concurrency: 1}
             routing:
               - {tier: medium, surface: implement, candidates: [{provider: claude, model: b}]}
             review:
@@ -306,59 +300,3 @@ async def test_core_activation_committed_conduct():
 from tests.test_stages import repo
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("missing_base_test", [False, True])
-async def test_host_loop_regression_uses_real_bug_gate(tmp_path, missing_base_test):
-    import json
-    from dataclasses import replace
-    from hosts.fixture import scaffold
-    from tempo import stages
-    from tempo.tickets import stamp, validate_ticket
-    from tempo.seams import SubprocessExec
-    from tempo.git import Git
-    from tests.test_fixture_host import environment
-    from tests.test_merge import context
-    host = scaffold.copy_host(tmp_path / "host")
-    env = {**environment(host), "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@invalid",
-           "GIT_COMMITTER_NAME": "Fixture", "GIT_COMMITTER_EMAIL": "fixture@invalid"}
-    git = Git(SubprocessExec(), env=env, timeout=10)
-    (host / "TEMPO_PLAN.md").write_text("# Disposable plan\n")
-    (host / ".gitignore").write_text(".tempo/\n.fixture-runtime/\n__pycache__/\n")
-    existing_test = (host / "regression_test.py").read_bytes()
-    if missing_base_test:
-        (host / "regression_test.py").unlink()
-    await git.init(host, branch="main")
-    await git.add(host, [p.relative_to(host).as_posix() for p in host.rglob("*")
-        if p.is_file() and not {".git", ".fixture-runtime"}.intersection(p.parts)])
-    await git.commit(host, "defective fixture base")
-    raw = scaffold.scenario(host, "regression")["responses"]["author"][0]["ticket"]
-    raw = stamp(stamp(raw, "source", "human"), "state", "confirmed")
-    (host / "tickets/regression/evidence").mkdir(parents=True)
-    (host / "tickets/regression/ticket.md").write_text(raw)
-    (host / "tickets/regression/evidence/replay.json").write_bytes((host / "evidence/regression.json").read_bytes())
-    await git.add(host, ["tickets/regression"])
-    await git.commit(host, "fixture bug and durable evidence")
-    ctx = replace(context(host, []), env=env, git=git)
-    ticket = validate_ticket("regression", raw, host)
-    work = ctx.worktree("regression")
-    await git.worktree_add(host, work, "regression", "main")
-    try:
-        scaffold.scripted_reply(host, "regression", "implement", "fixture proof", True, workspace=work)
-        if missing_base_test:
-            (work / "regression_test.py").write_bytes(existing_test)
-        paths = list(scaffold.scenario(host, "regression")["edits"])
-        await git.add(work, paths + (["regression_test.py"] if missing_base_test else []))
-        await git.commit(work, "fixture score repair and carries")
-        safety = await stages.gather_safety_evidence(ctx, ticket, "ok")
-        bug, findings = await stages._gather_bug(ctx, ticket, safety, attempt=0, stage="check")
-        evidence = safety.model_copy(update={"bug_evidence": bug, "bug_findings": findings})
-        result = stages.BugEvidenceGate().check(evidence, work)
-        assert bug.head.rc == 0 and bug.head.regression_result == "pass"
-        assert bug.overlay_paths == ["fixtures/replay.json", "fixtures/report_regression.py"]
-        assert "settings.json" not in bug.overlay_paths
-        assert result.verdict == ("fail" if missing_base_test else "pass")
-        assert bug.base.regression_result == ("error" if missing_base_test else "defect")
-        assert bug.base.rc == (2 if missing_base_test else 1)
-        assert not (ctx.config.worktree_root / ".regression-base/regression").exists()
-    finally:
-        await git.worktree_remove(host, work)

@@ -101,7 +101,6 @@ async def test_checkpoint_merge_and_daily_triggers(tmp_path, trigger):
     await rig.poll()
     assert rig.exec.calls == []
     rig.journal.append(EventType.SIGNAL, {"signal": "ticket_intake", "commit": "ticket-plane"})
-    rig.journal.append(EventType.STATE_TRANSITION, {"to": "merged", "commit": None})
     rig.journal.append(EventType.STATE_TRANSITION, {"to": "running", "commit": "not-admitted"})
     if trigger != "quiet-day":
         rig.merges(4)

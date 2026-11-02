@@ -110,17 +110,14 @@ class SubprocessExec:
     ) -> tuple[int, str, str]:
         if shutil.which(argv[0], path=env.get("PATH", "")) is None:
             raise ExecutableNotFound(argv[0])
-        # The one unbounded caller -- the drain's self-upgrade handoff child -- streams to the operator through
-        # INHERITED stdio; its out/err come back empty (section 15).
-        stream = None if timeout is None else subprocess.PIPE
         with open(stdin_path, "rb") if stdin_path else open(os.devnull, "rb") as stdin:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 cwd=cwd,
                 env=dict(env),
                 stdin=stdin,
-                stdout=stream,
-                stderr=stream,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 start_new_session=True,
             )
             readers: list[asyncio.Task] = []
@@ -139,14 +136,11 @@ class SubprocessExec:
                 if on_spawn is not None:
                     on_spawn(proc.pid)  # start_new_session: the child's pid IS its pgid
                 async with asyncio.timeout(timeout):
-                    if stream is None:
-                        out, err = await proc.communicate()
-                    else:
-                        readers = [asyncio.create_task(_read_pipe(proc.stdout, stdout,
-                                                                 deliver if on_stdout_line is not None else None)),
-                                   asyncio.create_task(_read_pipe(proc.stderr, stderr)),
-                                   asyncio.create_task(proc.wait())]
-                        out, err, _ = await asyncio.gather(*readers)
+                    readers = [asyncio.create_task(_read_pipe(proc.stdout, stdout,
+                                                             deliver if on_stdout_line is not None else None)),
+                               asyncio.create_task(_read_pipe(proc.stderr, stderr)),
+                               asyncio.create_task(proc.wait())]
+                    out, err, _ = await asyncio.gather(*readers)
             except BaseException as exc:
                 # Timeout and outer cancellation alike: grandchildren must not outlive the call.
                 for reader in readers:
@@ -165,7 +159,7 @@ class SubprocessExec:
             if consumer_error is not None:
                 consumer_error.process_capture = (stdout.decode(errors="replace"), stderr.decode(errors="replace"))
                 raise consumer_error
-        return proc.returncode or 0, (out or b"").decode(errors="replace"), (err or b"").decode(errors="replace")
+        return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
 
     def kill_group(self, pgid: int) -> None:
         try:

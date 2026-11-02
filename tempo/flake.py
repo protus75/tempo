@@ -1,4 +1,4 @@
-"""Explicit flake detection and journal-derived quarantine (19.P3.flake-detection)."""
+"""Explicit flake detection and journal-derived quarantine."""
 
 import re
 from collections.abc import Callable

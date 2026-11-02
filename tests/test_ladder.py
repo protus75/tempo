@@ -10,7 +10,6 @@ from tempo.caps import consume, draws, next_rung, remaining
 from tempo.config import load_config
 from tempo.journal import EventType, Journal
 from tempo.llm import FakeLLM
-from tests.test_drain_reentry import NoChild
 from tests.test_stages import ENV, SNAG, STEM, agent, git, verdict
 from tests.test_terminal import author, clock, repo  # noqa: F401 -- fixture
 
@@ -23,7 +22,7 @@ providers:
     package: test-cli
     auth: FAKE_KEY
     models_by_tier: {low: A, medium: A, high: B, max: B}
-    limits: {concurrency: 1, est_cost_per_call_usd: 0.5}
+    limits: {concurrency: 1}
 routing:
   - {tier: low, surface: implement, candidates: [{provider: fake}]}
   - {tier: medium, surface: implement, candidates: [{provider: fake}]}
@@ -55,7 +54,7 @@ def terminals(repo):
 def run_drain(repo, script):
     llm = FakeLLM(script)
     code = main(["drain"], cwd=repo, env=ENV, clock=clock,
-                pipeline=lambda c: runner.bind(c, llm), reexec=NoChild())
+                pipeline=lambda c: runner.bind(c, llm))
     assert code == 0
     return llm
 
@@ -224,7 +223,7 @@ def test_split_dispatches_reviewed_rework(repo, monkeypatch, failure):
             async def forbidden(ticket):
                 pytest.fail("following drain dispatched refused split output")
             return forbidden
-        assert main(["drain"], cwd=repo, env=ENV, clock=clock, pipeline=pipeline, reexec=NoChild()) == 0
+        assert main(["drain"], cwd=repo, env=ENV, clock=clock, pipeline=pipeline) == 0
         assert [e for e in j.read() if e.body.get("signal") == "ticket_intake"] == before
         assert git(repo, "status", "--porcelain") == ""
     else:

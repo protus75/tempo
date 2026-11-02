@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from tempo import runner
 from tempo.__main__ import main
-from tempo.artifacts import Cost, Diagnosis, DiagnosisReply, Finding, StageResult
+from tempo.artifacts import Diagnosis, DiagnosisReply, Finding, StageResult
 from tempo.caps import consume, draws
 from tempo.config import load_config
 from tempo.journal import EventType, Journal
@@ -16,7 +16,6 @@ from tempo.llm import FakeLLM
 from tempo.providers import ProviderSetupError, resolve
 from tempo.specs import data_close, data_open
 from tempo.stages import StagesRun
-from tests.test_drain_reentry import NoChild
 from tests.test_providers import CONFIG as ROUTING_CONFIG
 from tests.test_stages import ENV, SNAG, STEM, agent, git, verdict
 from tests.test_terminal import author, clock, diagnosis_reply, repo  # noqa: F401 -- fixture
@@ -30,7 +29,7 @@ def invoke(repo: Path, script: list, verb: str = "run"):
     llm = FakeLLM(script)
     argv = [verb, STEM] if verb == "run" else [verb]
     code = main(argv, cwd=repo, env=ENV, clock=clock,
-                pipeline=lambda c: runner.bind(c, llm), reexec=NoChild())
+                pipeline=lambda c: runner.bind(c, llm))
     return code, llm
 
 
@@ -117,14 +116,13 @@ def test_invalid_verdict_reprompts_then_fails_closed_with_one_draw(repo):
 
 @pytest.mark.parametrize("outcome,findings,expected", [
     ("gate_failed", [], "workspace gone"),
-    ("budget_exceeded", [], None),
 ])
 def test_missing_workspace_and_no_call_short_circuits(repo, monkeypatch, outcome, findings, expected):
     author(repo)
 
     async def stage_seam(ctx, ticket):
         return StagesRun(attempt=0, results={"implement": StageResult(
-            outcome=outcome, artifact=None, findings=findings, cost=Cost())})
+            outcome=outcome, artifact=None, findings=findings)})
 
     monkeypatch.setattr(runner, "run_stages", stage_seam)
     code, llm = invoke(repo, [])

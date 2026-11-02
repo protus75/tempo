@@ -97,7 +97,7 @@ def test_bug_report_evidence_ticket_plane_commit(tmp_path, monkeypatch):
         return policy(*args, **kwargs)
     async def reviewing(*args, **kwargs):
         custody()
-        assert "kind: bug" in kwargs["text"] and "state: draft" in kwargs["text"]
+        assert "kind: bug" in kwargs["text"] and "state: confirmed" in kwargs["text"]
         observed.append("review")
         return await review(*args, **kwargs)
     def resolving(self, id, resolution):
@@ -239,7 +239,7 @@ def test_triage_authors_ticket_and_journals_intake(tmp_path, monkeypatch):
     assert _run(root, monkeypatch, llm) == 0
     text = (root / "tickets/repair-thing/ticket.md").read_text()
     ticket = validate_ticket("repair-thing", text, root)
-    assert ticket.frontmatter.source == "box:failure_report" and ticket.frontmatter.state == "draft"
+    assert ticket.frontmatter.source == "box:failure_report" and ticket.frontmatter.state == "confirmed"
     subjects = git_out(root, "log", "--format=%s").splitlines()
     assert subjects == ["tempo(repair-thing): ticket", *before]
     signals = [e for e in _events(root) if e.type == EventType.SIGNAL and e.ticket == "repair-thing"
@@ -255,7 +255,6 @@ def test_triage_authors_ticket_and_journals_intake(tmp_path, monkeypatch):
     assert len(verdicts) == 1 and verdicts[0].body["verdict"] == "approve"
 
 
-@pytest.mark.parametrize("baseline", ["ABSENT", "NO_GO", "GO", "REVOKED"])
 @pytest.mark.parametrize(("message_class", "extra", "expected"), [
     ("failure_report", {}, "confirmed"),
     ("retro_finding", {"retro_report_key": "retro/1", "fixed_failure": "broken behavior",
@@ -266,10 +265,8 @@ def test_triage_authors_ticket_and_journals_intake(tmp_path, monkeypatch):
     ("bug_report", {"bug_origin": "player", "has_repro": True}, "confirmed"),
     ("bug_report", {"bug_origin": "player", "has_repro": False}, "draft"),
 ])
-def test_author_uses_baseline_resolution(tmp_path, monkeypatch, baseline, message_class, extra, expected):
-    from tempo import author as module
+def test_author_uses_policy_table(tmp_path, monkeypatch, message_class, extra, expected):
     from tempo.config import load_config
-    from tempo.policy import baseline_identity
     root = make_root(tmp_path)
     _routes(root)
     path = root / "config.yaml"
@@ -277,36 +274,17 @@ def test_author_uses_baseline_resolution(tmp_path, monkeypatch, baseline, messag
                                            "engine_plane_safety_inventory: [config.yaml]"))
     cfg = load_config(None, cwd=root)
     journal = Journal(cfg.state_dir, Clock())
-    if baseline != "ABSENT":
-        identity = baseline_identity(cfg)
-        if baseline == "REVOKED":
-            identity["author"]["rows"]["max"]["model"] = "drifted"
-        journal.append(EventType.SIGNAL, {"signal": "review_baseline",
-                       "verdict": "NO_GO" if baseline == "NO_GO" else "GO", "identity": identity})
     box = _box(root)
     message_id, _ = box.enqueue(message_class=message_class, origin="test", summary="broken behavior", **extra)
-    reader, policy = module.resolve_baseline, module.start_state
-    resolutions, operands = [], []
-    def resolve(*args, **kwargs):
-        result = reader(*args, **kwargs)
-        resolutions.append(result)
-        return result
-    def starting_state(*args, **kwargs):
-        operands.append(kwargs["go"])
-        return policy(*args, **kwargs)
-    monkeypatch.setattr(module, "resolve_baseline", resolve)
-    monkeypatch.setattr(module, "start_state", starting_state)
-    llm = FakeLLM([reply("author"), author_reply("baseline-repair"), requisition_reply("approve")])
+    llm = FakeLLM([reply("author"), author_reply("policy-repair"), requisition_reply("approve")])
     assert _run(root, monkeypatch, llm) == 0
-    assert [r.state for r in resolutions] == [baseline]
-    assert operands == [baseline == "GO"]
-    state = expected if baseline == "GO" else "draft"
-    text = (root / "tickets/baseline-repair/ticket.md").read_text()
-    assert validate_ticket("baseline-repair", text, root).frontmatter.state == state
+    state = expected
+    text = (root / "tickets/policy-repair/ticket.md").read_text()
+    assert validate_ticket("policy-repair", text, root).frontmatter.state == state
     assert f"state: {state}" in next(r.rendered for r in llm.requests if r.surface == "requisition_review")
     intake, = [e for e in journal.read() if e.body.get("signal") == "ticket_intake"]
     assert intake.body["state"] == state
-    assert box.get(message_id).resolution == Resolution(kind="ticket", link="baseline-repair")
+    assert box.get(message_id).resolution == Resolution(kind="ticket", link="policy-repair")
 
 
 def test_author_reprompts_for_reused_stem_and_invalid_ticket(tmp_path, monkeypatch):
@@ -383,7 +361,6 @@ def test_prior_author_invocation_records_decision_without_author_call(tmp_path, 
 def test_reopened_retro_ticket_starts_draft(tmp_path, monkeypatch):
     from tempo.box import RereportJournal
     from tempo.config import load_config
-    from tempo.policy import baseline_identity
     from tests.test_retro_box import PROPOSAL
     root = make_root(tmp_path)
     _routes(root)
@@ -391,7 +368,6 @@ def test_reopened_retro_ticket_starts_draft(tmp_path, monkeypatch):
     path.write_text(path.read_text().replace("engine_plane_safety_inventory: []", "engine_plane_safety_inventory: [config.yaml]"))
     cfg = load_config(None, cwd=root)
     journal = Journal(cfg.state_dir, Clock())
-    journal.append(EventType.SIGNAL, {"signal": "review_baseline", "verdict": "GO", "identity": baseline_identity(cfg)})
     assert cfg.box_policy["retro_finding"] == "confirmed" and cfg.engine_plane_safety_inventory
     box = Box(cfg.state_dir / "box", LocalFileSystem(), rereport=RereportJournal(journal))
     id, _ = box.enqueue(message_class="retro_finding", origin="retro", summary=PROPOSAL["fixed_failure"],

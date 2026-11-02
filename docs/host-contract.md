@@ -2,8 +2,7 @@
 
 The installed engine owns process; the host owns project content, tickets and
 configuration. This document describes the merged configuration and interfaces.
-Report intake and cutover below are pending Phase 6 consumer contracts, not an
-activation instruction. Foreign process-state adoption is excluded.
+Foreign process-state adoption is excluded.
 
 ## Copyable configuration
 
@@ -23,7 +22,7 @@ providers:
     package: '@openai/codex' # pnpm package used by provider preflight
     # auth: OPENAI_API_KEY # environment-variable NAME; omit for ambient CLI login
     models_by_tier: {low: host-model, medium: host-model, high: host-model, max: host-model}
-    limits: {concurrency: 1, est_cost_per_call_usd: 0.25}
+    limits: {concurrency: 1}
 routing:
   - {tier: medium, surface: review, candidates: [{provider: codex}]}
   - {tier: medium, surface: implement, candidates: [{provider: codex, model: host-model}]}
@@ -61,8 +60,7 @@ Config:
     worktree_root: unset
     routing_default_tier: medium
     scheduler: {max_unmerged: 2}
-    caps: {diagnosis: 6, retry: 6, premise_bounce: 2, hardening: 3, infra: 6, quarantine: 5, poison: 2}
-    seeding: {max_seeds_per_admission: 3}
+    caps: {diagnosis: 6, retry: 6, premise_bounce: 2, infra: 6, quarantine: 5, poison: 2}
     circuit_breaker: {k: 3, cooldown_minutes: 10}
     drain: {max_runtime_hours: 12, max_ticket_minutes: 90}
     box_policy: {failure_report: confirmed, retro_finding: confirmed, override_report: draft, suggestion: draft, bug_report_self_diagnosed: confirmed, bug_report_player_repro: confirmed, bug_report_player_no_repro: draft}
@@ -77,7 +75,7 @@ ModelsByTier:
   defaults: {}
 Limits:
   required: [concurrency]
-  defaults: {est_cost_per_call_usd: unset, quota_window_minutes: 60}
+  defaults: {quota_window_minutes: 60}
 Route:
   required: [tier, surface, candidates]
   defaults: {}
@@ -107,10 +105,7 @@ Scheduler:
   defaults: {max_unmerged: 2}
 Caps:
   required: []
-  defaults: {diagnosis: 6, retry: 6, premise_bounce: 2, hardening: 3, infra: 6, quarantine: 5, poison: 2}
-Seeding:
-  required: []
-  defaults: {max_seeds_per_admission: 3}
+  defaults: {diagnosis: 6, retry: 6, premise_bounce: 2, infra: 6, quarantine: 5, poison: 2}
 CircuitBreaker:
   required: []
   defaults: {k: 3, cooldown_minutes: 10}
@@ -134,9 +129,8 @@ is currently refused: use `cli`; Implement requires a CLI even when API support
 eventually ships. Every CLI requires a nonempty `package` despite its unset model
 default. Shipped runtime adapters are `claude` and `codex`; the loader accepts
 other names but provider setup refuses names without an adapter. `auth` names an
-environment variable, never a literal secret. Codex reports no cost and requires
-`est_cost_per_call_usd` at adapter setup; Claude can report actual cost. Estimates
-are nonnegative, count fields are integers at least 1, and retry must not exceed
+environment variable, never a literal secret. Count fields are integers at
+least 1, and retry must not exceed
 diagnosis. Providers, routing, route candidates, argv and strategy paths are
 nonempty lists where declared. Notify requires a nonblank executable and
 NUL-free strings.
@@ -205,7 +199,7 @@ defaults: {agent_tier: medium, agent_effort: medium, gate_bypass: []}
 
 State is `draft | confirmed | rejected | merged`; priority `P0 | P1 | P2 | P3`;
 kind `bug | feature | chore`; tier and effort `low | medium | high | max`.
-Source is `human`, `seed` or `box:<class>` matching `box:[a-z][a-z0-9_]*`.
+Source is `human` or `box:<class>` matching `box:[a-z][a-z0-9_]*`.
 Each gate_bypass has only nonblank `code` (an engine gate code) and `reason`.
 Put ordering in Depends on and priority, not extra metadata. New human intake
 stamps source human and confirms; machine sources belong to engine authoring.
@@ -234,8 +228,7 @@ The minimal seams in `tempo/seams.py` are:
   timed work races injected sleep to a clock-derived deadline; tests advance
   deadlines without wall-clock waiting.
 - `async run(argv, *, cwd, env, timeout, stdin_path=None) -> (rc, out, err)`:
-  explicit required env and timeout (None only for the unbounded self-upgrade
-  handoff, which inherits stdio and returns empty out/err). Each child uses
+  explicit required env and timeout (None means unbounded). Each child uses
   start_new_session; timeout and outer cancellation use the same group kill and
   wait helper. `kill_group(pgid)` is synchronous SIGKILL signal-not-reap; run
   owns reaping. `on_spawn` publishes the pgid, provider call return clears it.
@@ -253,7 +246,7 @@ The minimal seams in `tempo/seams.py` are:
   OS errors raise NotificationFailed: fix argv/PATH and retry pending evidence.
 
 Non-LLM children inherit the parent environment minus every configured provider
-key; only the serving LLM gets its own key. Active-work, notification and handoff
+key; only the serving LLM gets its own key. Active-work and notification
 executors are separate; abort targets the executor that spawned active work.
 
 ## Instance custody
@@ -272,7 +265,7 @@ log and heartbeat. Decisions and tombstones are committed under
 each dispatch cycle: watcher/debounce in daemon, re-parsing in scaffold verbs;
 routing, severity and ceiling edits take effect without restart.
 
-## Pending report-inbox contract
+## Report-inbox contract
 
 The optional report_inbox is a directory for small host JSON reports, consumed
 by sequential triage into the same durable Suggestion Box. Version-1 reports
@@ -310,26 +303,3 @@ untrusted data at every hop: triage writes its own summary, raw text never enter
 ticket prose and later prompts see only delimited data. Evidence is quoted,
 never executed outside the deterministic replay harness. app_commit attribution
 is a later consumer's judgment, not proof of an introducing commit.
-
-## Pending cutover contract
-
-1. Unattended bootstrap self-build continues through Phase 6 under drain's safety
-   envelope; it never waits for supervised host merge confirms.
-2. Supervised fixture wiring uses a committed fixture host in a disposable copy,
-   scripted CLI and machine-actor confirms against its own subprocess. It proves
-   the pre-cutover loop; it does not constitute live-host acceptance.
-3. Commit the GO-grade baseline report and Author graph. The baseline scores at
-   least 50 planted defects and 15 clean controls, catch rate at least 0.85 and
-   false-snag rate at most 0.15. An incomplete/cap-exhausted report is NO_GO;
-   commit measured partial evidence and perform a bounded rerun. The operator's
-   Author-graph judgment is required even above those mechanical floors.
-4. Operator-recorded GO follows that committed baseline and judgment; the report
-   embeds its verdict signal's journal identity. GO binds to current resolved
-   review/author routing and spec-major identity. Absent, revoked or drifted GO
-   means supervised authoring and merge holds; operator confirm releases a held
-   candidate, with rechecks if main moved.
-5. NO_GO or no declared host waits at cutover. A declared live host is onboarded
-   only after GO and operator judgment; start serve on host work and perform
-   live-host acceptance separately. A fixture report cannot substitute for it.
-
-This document adds no report consumer, GO writer or runtime activation.

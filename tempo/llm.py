@@ -1,7 +1,6 @@
 """The LLM seam (TEMPO_PLAN.md section 6) and its scripted fake."""
 
 import asyncio
-import math
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,22 +18,13 @@ class LLMRequest:
     effort: AgentEffort
     ticket: str | None
     worktree: Path | None  # set for a cli Implement run only: the one surface granted write
-    budget_usd: float | None = None
-
-    def __post_init__(self) -> None:
-        if self.budget_usd is not None and (type(self.budget_usd) not in (float, int)
-                or not math.isfinite(self.budget_usd) or self.budget_usd < 0):
-            raise ValueError("budget_usd must be finite and nonnegative, or null")
 
 
 @dataclass(frozen=True)
 class LLMResult:
     text: str
-    input_tokens: int | None  # None when a cli stream reports no usage
-    output_tokens: int | None
     provider: str
     model: str
-    usd: float
 
 
 class LLM(Protocol):
@@ -87,7 +77,7 @@ class FakeLLM:
         if isinstance(item, LLMResult):
             return item
         if isinstance(item, str):
-            return LLMResult(text=item, input_tokens=None, output_tokens=None, provider="fake", model="fake", usd=0.0)
+            return LLMResult(text=item, provider="fake", model="fake")
         raise TypeError(f"unscriptable FakeLLM item {item!r}; use str, LLMResult, an exception, HANG, or a callable")
 
     def abort_current(self) -> None:

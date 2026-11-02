@@ -1,4 +1,4 @@
-"""Production daemon core and dispatch ownership (TEMPO_PLAN.md 19.P3.scheduler-activation)."""
+"""Production daemon core and dispatch ownership."""
 
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Set
@@ -17,11 +17,11 @@ from tempo.flake import Flake
 from tempo.control import CONTROL_DECISION, ControlInbox, ControlProjection, write_active
 from tempo.journal import EventType, Journal
 from tempo import runner
-from tempo.artifacts import Cost, Finding, StageResult
+from tempo.artifacts import Finding, StageResult
 from tempo.caps import spent
 from tempo.heartbeat import Heartbeat
 from tempo.mergequeue import ConflictHandoff, MergeQueue
-from tempo.merge import AdmissionBoundary, Held
+from tempo.merge import AdmissionBoundary
 from tempo.rework import ReworkOrder, record_supersedes, rework
 from tempo.runner import Dispatch
 from tempo.restart import Restart
@@ -53,12 +53,12 @@ def storm_producer(*, root: Path, fs: FileSystem, journal: Journal, clock: Clock
 
 def flake_detection(*, journal: Journal, box: Box, config: Config,
                     escalate: Callable[[str], None]) -> Flake:
-    """Dormant detection/release boundary supplied with the lock holder's existing writers."""
+    """Flake detection/release boundary supplied with the lock holder's existing writers."""
     return Flake(journal=journal, box=box, cap=config.caps.quarantine, escalate=escalate)
 
 
 class HeartbeatCycle:
-    """Explicit main-loop boundary; task owners supply responsiveness (19.P3.heartbeat)."""
+    """Explicit main-loop boundary; task owners supply responsiveness."""
 
     def __init__(self, *, heartbeat: Heartbeat, workers: Callable[[], bool],
                  merge_queue: Callable[[], bool], box_consumer: Callable[[], bool],
@@ -110,7 +110,7 @@ def _stop_workers(tasks: tuple[asyncio.Task, ...]) -> asyncio.Future:
 
 
 class WorkerStop:
-    """Stop owner for one supplied task set (19.P3.kill-worker-stop).
+    """Stop owner for one supplied task set.
 
     Construct a fresh boundary for a later task set. The lock holder supplies the
     inbox's recovered projection and the predecessor executor-abort operation.
@@ -134,7 +134,7 @@ class WorkerStop:
 
 
 class WorkerFailureObserver:
-    """Notification boundary for WorkerStop's supplied workers (19.P3.kill-failure-suppression).
+    """Notification boundary for WorkerStop's supplied workers.
 
     The lock holder supplies its current, durably folded projection. Observation
     never stops workers or replaces their owner's exception propagation.
@@ -327,7 +327,7 @@ class StartupBoundary:
 
 
 class DaemonTasks:
-    """Explicit lifetime owner for background consumers (19.P3.background-consumers)."""
+    """Explicit lifetime owner for background consumers."""
 
     def __init__(self, *, watcher: Callable[[], Awaitable[object]],
                  merge_queue: Callable[[], Awaitable[object]],
@@ -361,12 +361,11 @@ async def apply_rework(ctx: StageContext, ticket: Ticket, findings: list[Finding
     road = "shrink or split the committed ticket text and rerun drain"
     workspace = ctx.worktree(ticket.stem)
     if not workspace.exists():
-        return StageResult(outcome="gate_failed", artifact=None, cost=Cost(), findings=[Finding(
+        return StageResult(outcome="gate_failed", artifact=None, findings=[Finding(
             code="ticket_schema", message="Rework has no usable workspace", paved_road=road)])
     try:
         text = await ctx.git._run(ctx.repo, "show", f"HEAD:{ticket_path(ticket.stem)}")
-        original = parse_ticket(ticket.stem, text, ctx.repo,
-                                plan=(ctx.repo / "TEMPO_PLAN.md").read_text())
+        original = parse_ticket(ticket.stem, text, ctx.repo)
         tier, effort = runner.capability(original, ctx.driver.journal.read())
         result = await rework(ctx, original, text, findings, attempt=attempt, workspace=workspace,
                               tier=tier, effort=effort, stuck_budget=original.stuck_minutes * 60,
@@ -412,7 +411,7 @@ async def apply_rework(ctx: StageContext, ticket: Ticket, findings: list[Finding
                                          ticket=ticket.stem)
             if errors := await record_supersedes(ctx, order):
                 await restore_publication()
-                return StageResult(outcome="gate_failed", artifact=None, cost=result.cost, findings=errors)
+                return StageResult(outcome="gate_failed", artifact=None, findings=errors)
         except BaseException:
             cleanup = asyncio.create_task(restore_publication())
             try:
@@ -423,7 +422,7 @@ async def apply_rework(ctx: StageContext, ticket: Ticket, findings: list[Finding
             raise
         return result
     except Exception as exc:
-        return StageResult(outcome="gate_failed", artifact=None, cost=Cost(), findings=[Finding(
+        return StageResult(outcome="gate_failed", artifact=None, findings=[Finding(
             code="ticket_schema", message=ctx.driver.redactor.scrub(f"Rework publication refused: {exc}"),
             paved_road="commit every exact reviewed proposal before supersession; " + road)])
 
@@ -469,19 +468,15 @@ class TicketWriter:
             self.active = False
             boundary.run, boundary.ticket, boundary.next_stage = None, None, None
 
-    async def consume_result(self, ticket: Ticket, result: StageResult | ConflictHandoff | Held, *, attempt: int) -> None:
+    async def consume_result(self, ticket: Ticket, result: StageResult | ConflictHandoff, *, attempt: int) -> None:
         """Deliver the producing run's result; predecessor offers retain their existing custody."""
         if self.admission.deliver(ticket, attempt, result):
             return
-        if isinstance(result, Held):
-            return
         if isinstance(result, ConflictHandoff):
-            self.queue.held.pop(ticket.stem, None)
             await self.consume_handoff(ticket, result, attempt=attempt)
         elif result.outcome != "ok":
-            self.queue.held.pop(ticket.stem, None)
             await runner.harvest_failure(self.ctx, ticket, attempt=attempt, stage="merge",
-                outcome=result.outcome, findings=result.findings, results=(result,))
+                outcome=result.outcome, findings=result.findings)
             await runner.failure_terminal(self.ctx, ticket, attempt=attempt, stage="merge",
                 outcome=result.outcome, findings=result.findings)
 
@@ -494,7 +489,7 @@ class TicketWriter:
         ctx = self.ctx
         outcome = "gate_failed"
         await runner.harvest_failure(ctx, ticket, attempt=attempt, stage="merge", outcome=outcome,
-                                     findings=handoff.findings, results=())
+                                     findings=handoff.findings)
         reply = None
         if not spent(ctx.config.caps, ctx.driver.journal.read(), ticket.stem):
             reply = await apply_rework(ctx, ticket, handoff.findings, attempt=attempt, handoff=handoff)
@@ -505,7 +500,7 @@ class TicketWriter:
 
 def daemon_core(
     repo: Path, *, journal: Journal, load: Callable[[], Config],
-    bind: Callable[[ConfigSnapshot], Dispatch], plan: str | None,
+    bind: Callable[[ConfigSnapshot], Dispatch],
     read: Callable[[str], str | None], clock: Clock, sleep: Sleep, debounce: float,
     quarantined: Callable[[], Set[str]], drought_parked: Callable[[], Set[str]],
     completed_unmerged: Callable[[], int], max_unmerged: int,
@@ -518,7 +513,7 @@ def daemon_core(
         completed_unmerged=completed_unmerged, max_unmerged=max_unmerged,
     )
     watcher = Watcher(
-        repo, journal=journal, plan=plan, read=read, publish=scheduler.update, remove=scheduler.remove,
+        repo, journal=journal, read=read, publish=scheduler.update, remove=scheduler.remove,
         clock=clock, sleep=sleep, debounce=debounce,
     )
     return DaemonCore(admission, scheduler, watcher, control)

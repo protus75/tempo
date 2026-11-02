@@ -63,7 +63,7 @@ def test_occurrence_signal_shape_and_identity(tmp_path, stage, origin):
     assert journal.read() == [event] and storm.occurrences(SIG) == (event,)
     # These are other event kinds even when their data resembles occurrence data.
     journal.append(EventType.EFFECT_INTENT, event.body, ticket="one", key=event.key)
-    journal.append(EventType.SIGNAL, {"kind": "drain_handoff"})
+    journal.append(EventType.SIGNAL, {"kind": "drain_halted"})
     assert storm.count(SIG) == 1
 
 
@@ -95,7 +95,7 @@ def test_occurrence_signal_shape_and_identity_invalid_evidence(tmp_path, damage)
         field = {"id": "occurrence_id", "stage": "emitting_stage", "origin": "emitting_origin"}.get(damage, damage)
         body[field] = 7
     elif damage == "kind":
-        body["kind"] = "drain_handoff"
+        body["kind"] = "drain_halted"
     elif damage == "key":
         key = "wrong"
     elif damage == "null-key":

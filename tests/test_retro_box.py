@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import json
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
 
@@ -18,7 +17,6 @@ from tempo.journal import EventType, Journal
 from tempo.llm import FakeLLM
 from tempo.merge import write_squash
 from tempo.retro import Retro, project_window
-from tempo.specs import entry_unit_gap, required_units, resolve_plan_contract
 from tempo.storm import arrival_id
 from tempo.tickets import validate_ticket
 from tests.test_drain import pause_checkout
@@ -27,16 +25,6 @@ from tests.test_triage import author_reply, requisition_reply, reply, root_with_
 
 PROPOSAL = {"fixed_failure": "Observed café failure", "overcorrection_risk": "Rejecting useful inputs",
             "proposed_spec_paths": ["specs/review.md", "specs/author.md"]}
-
-
-def test_retro_box_entry_unit():
-    plan = (Path(__file__).resolve().parents[1] / "TEMPO_PLAN.md").read_text()
-    unit = "19.P5.retro-box-activation"
-    assert required_units(plan, "retro-box-activation", ()) == (unit,)
-    for stem in ("retro-box-activation", "phase5-continue"):
-        assert required_units(plan, stem, [unit, unit]).count(unit) == 1
-    assert resolve_plan_contract(plan, [unit, unit]).count(f"### {unit} ") == 1
-    assert entry_unit_gap(plan, unit) is None
 
 
 @pytest.mark.asyncio
@@ -91,7 +79,7 @@ async def test_completed_retro_proposals_reach_prompt_spec_merge(tmp_path, monke
     assert box.get(messages[0].id).resolution == Resolution(kind="ticket", link="repair-spec")
     text = (root / "tickets/repair-spec/ticket.md").read_text()
     ticket = validate_ticket("repair-spec", text, root)
-    assert ticket.frontmatter.source == "box:retro_finding" and ticket.frontmatter.state == "draft"
+    assert ticket.frontmatter.source == "box:retro_finding" and ticket.frontmatter.state == "confirmed"
     bridge, = [e for e in c.journal.read() if e.body.get("kind") == "retro_ticket_authored"]
     assert bridge.type == EventType.SIGNAL and bridge.key == "retro-ticket/repair-spec"
     assert bridge.ticket == "repair-spec" and bridge.body == {"kind": "retro_ticket_authored",
@@ -108,7 +96,6 @@ async def test_completed_retro_proposals_reach_prompt_spec_merge(tmp_path, monke
     assert c.journal.read() == before
     with pytest.raises(BoxError, match="restore the Author-produced bridge"):
         record_retro_ticket(c.journal, messages[1], ticket.stem)
-    await runner.verdict(ticket.stem, c, kill=False)
     implementation = FakeLLM([implement_reply(), verdict()])
     call = implementation.call
     async def scripted(request):

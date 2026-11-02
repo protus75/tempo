@@ -6,7 +6,7 @@ import gc
 import pytest
 
 from tempo import __main__ as cli, triage
-from tempo.artifacts import Cost, StageResult
+from tempo.artifacts import StageResult
 from tempo.daemon import DaemonTasks
 from tempo.journal import EventType
 from tempo.mergequeue import ConflictHandoff, MergeQueue
@@ -267,7 +267,7 @@ async def test_merge_results_remain_consumer_owned(admission_context, monkeypatc
     if outcome != "ok":
         expected = (ConflictHandoff(stem=work.stem, reviewed_sha="reviewed", conflicted_paths=[], findings=[])
                     if outcome == "handoff" else
-                    StageResult(outcome="gate_failed", artifact=None, findings=[], cost=Cost()))
+                    StageResult(outcome="gate_failed", artifact=None, findings=[]))
 
         async def admit(original, attempt):
             assert original is work and attempt == 0 and queue.active == work.stem

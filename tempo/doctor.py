@@ -1,4 +1,4 @@
-"""Read-only mechanical setup checks (19.P5.retro-doctor-cli)."""
+"""Read-only mechanical setup checks."""
 
 import fcntl
 from dataclasses import dataclass

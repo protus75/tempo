@@ -1,4 +1,4 @@
-"""Lock-held retro receipts and the shared ordered journal window (19.P5.retro-drain-invoker)."""
+"""Lock-held retro receipts and the shared ordered journal window."""
 
 import hashlib
 import json
@@ -77,9 +77,9 @@ def measurements(window: Window) -> dict:
     from tempo.mergequeue import CONFLICT_FACTS
     from tempo.rework import REWORK_ORDER
 
-    merges, calls = [], []
+    merges = []
     spikes = {kind: set() for kind in ("override", "rework", "gate-failure", "integration-red")}
-    sequences, running, durations, completed_calls = {}, {}, {}, set()
+    sequences, running, durations = {}, {}, {}
     for event in window.events:
         body, stem = event.body, event.ticket
         identity = (stem, sequences.get(stem, 0))
@@ -98,19 +98,8 @@ def measurements(window: Window) -> dict:
                 spikes["rework"].add((stem, body["attempt"]))
             if body.get("kind") == CONFLICT_FACTS and body.get("integration_red_paths"):
                 spikes["integration-red"].add(identity)
-        elif event.type == EventType.EFFECT_COMPLETION and (event.key or "").startswith("llm/"):
-            if event.key not in completed_calls:
-                calls.append(event)
-                completed_calls.add(event.key)
     unique = list({(row["ticket"], row["commit"]): row for row in merges}.values())
-    costs = [event.body["cost"] for event in calls if "cost" in event.body]
-    def tokens(field):
-        values = [cost.get(field) for cost in costs]
-        return {"known": sum(value for value in values if value is not None),
-                "unknown_calls": sum(value is None for value in values)}
     return {"merges": unique, "merged_count": len(unique),
-            "usd": sum(cost["usd"] for cost in costs),
-            "input_tokens": tokens("input_tokens"), "output_tokens": tokens("output_tokens"),
             "spikes": {kind: len(ids) for kind, ids in spikes.items()},
             "elapsed_seconds": [{"ticket": row["ticket"], "commit": row["commit"],
                                  "actual_seconds": durations[tuple(row["identity"])]} for row in unique]}
@@ -343,7 +332,7 @@ class Retro:
             stage = LlmStage(surface="retro", emits=RetroArtifact, gates=[], render=render_input)
             result = await driver.run(stage, consumed, ticket=None, run_seq=window.sequence, attempt=1,
                 workspace=c.repo, tier=spec.meta.tier, effort=spec.meta.effort,
-                stuck_budget=call_timeout(c.config), expected_budget="surface", scope_fence=())
+                stuck_budget=call_timeout(c.config))
             if result.outcome != "ok":
                 raise ValueError(result.outcome)
             tombstones = self.tombstones()

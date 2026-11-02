@@ -1,33 +1,9 @@
 """Starting-state policy for box-authored tickets (plan section 12)."""
 
 from collections.abc import Sequence
-from pathlib import Path
-from typing import get_args
 
 from tempo.box import MESSAGE_CLASSES
 from tempo.config import BoxRow, Config, StartState
-from tempo.llm import AgentTier
-from tempo.providers import resolve
-from tempo.specs import load_spec
-
-BASELINE_SIGNAL = "review_baseline"
-BASELINED_SURFACES = ("review", "author")
-TIERS: tuple[AgentTier, ...] = get_args(AgentTier)
-SPECS = Path(__file__).resolve().parent.parent / "specs"
-
-
-def baseline_identity(config: Config, specs_dir: Path = SPECS) -> dict:
-    """Return the current review and author routing rows and spec-major versions."""
-    out = {}
-    for surface in BASELINED_SURFACES:
-        rows = {}
-        for tier in TIERS:
-            served = resolve(config, tier, surface)
-            rows[tier] = {"provider": served.provider.name, "model": served.model}
-        path = specs_dir / f"{surface}.md"
-        major = int(load_spec(path.read_text()).meta.version.split(".")[0]) if path.exists() else None
-        out[surface] = {"spec_major": major, "rows": rows}
-    return out
 
 
 def policy_row(message_class: str, bug_origin: str | None, has_repro: bool | None) -> BoxRow:
@@ -61,11 +37,10 @@ def start_state(
     row: BoxRow,
     fence: Sequence[str],
     gate_bypass: Sequence[str],
-    go: bool,
     reopen: bool = False,
 ) -> StartState:
     """Resolve a box ticket's initial state, failing closed for every override."""
-    if (reopen or not go or not config.engine_plane_safety_inventory
+    if (reopen or not config.engine_plane_safety_inventory
             or touches_inventory(fence, config.engine_plane_safety_inventory) or gate_bypass):
         return "draft"
     return config.box_policy[row]

@@ -2,7 +2,6 @@
 
 import asyncio
 from dataclasses import FrozenInstanceError
-from pathlib import Path
 
 import pytest
 
@@ -12,11 +11,11 @@ from tempo.box import Box, Resolution
 from tempo.daemon import storm_producer
 from tempo.git import Git
 from tempo.journal import EventType, Journal
-from tempo.llm import FakeLLM, LLMResult
+from tempo.llm import FakeLLM
 from tempo.lockfile import Lockfile
 from tempo.retro import Retro, RetroArtifact, measurements, production_evidence, project_window, render_report
 from tempo.seams import LocalFileSystem, SubprocessExec
-from tempo.specs import entry_unit_gap, load_spec, required_units, resolve_plan_contract
+from tempo.specs import load_spec
 from tempo.status import project, render
 from tests.test_cli import ENV
 from tests.test_drain import Clock, make_root
@@ -64,27 +63,14 @@ def test_status_surfaces_confirmed_class_tombstones(tmp_path, monkeypatch, capsy
     assert ids[0] in render(current) and journal.read() == before
 
 
-def test_status_entry_unit():
-    plan = (Path(__file__).resolve().parents[1] / "TEMPO_PLAN.md").read_text()
-    unit = "19.P5.status-projection"
-    assert required_units(plan, "status-projection", ["19.I", unit, "section 13"]) == (unit,)
-    assert unit in required_units(plan, "phase5-continue-03", [unit])
-    assert resolve_plan_contract(plan, [unit, unit]).count(f"### {unit} ") == 1
-    assert entry_unit_gap(plan, unit) is None
-    for part in ("Owner", "Records", "Observable", "Tests"):
-        assert entry_unit_gap(plan.replace(f"- **{part}:**", f"- **Missing {part}:**"), unit)
-
-
 def test_status_current_window_scorecard(tmp_path):
     c, writer, _, _ = rig(tmp_path)
     asyncio.run(invoice(c, writer, "old"))
-    old_cost = LLMResult(text='{"verdict":"approve","summary":"ok","findings":[]}',
-        usd=2, input_tokens=None, output_tokens=3, provider="fake", model="fake")
-    asyncio.run(review(c, writer, "old", "approve", cost=old_cost))
+    asyncio.run(review(c, writer, "old", "approve"))
     merged(c.journal, "old")
     c.journal.append(EventType.EFFECT_INTENT, {}, key="retro/1")
     initial = asyncio.run(_status(c))
-    assert initial.scorecard.boundary == "initial" and initial.scorecard.spend_usd == 2
+    assert initial.scorecard.boundary == "initial"
     assert rows(initial.scorecard)["scope_fence"].catches == 1
     completed(c.journal, 1)
     for n in range(25):
@@ -98,9 +84,7 @@ def test_status_current_window_scorecard(tmp_path):
     c.journal.append(EventType.EFFECT_INTENT, {}, ticket="unfinished", key="ticket-plane/unfinished/0/checks")
     c.fs.write(c.repo / "tickets/current-24/checks.json", b"mutable bytes are not evidence")
     asyncio.run(review(c, writer, "current-24", "snag"))
-    cost = LLMResult(text='{"verdict":"approve","summary":"ok","findings":[]}',
-        usd=1.25, input_tokens=11, output_tokens=None, provider="fake", model="fake")
-    asyncio.run(review(c, writer, "current-24", "approve", attempt=1, cost=cost))
+    asyncio.run(review(c, writer, "current-24", "approve", attempt=1))
     head = asyncio.run(c.git.rev_parse(c.repo, "HEAD"))
     merged(c.journal, "current-24", head)
     merged(c.journal, "current-24", head)
@@ -111,9 +95,6 @@ def test_status_current_window_scorecard(tmp_path):
     status = asyncio.run(_status(c))
     card = status.scorecard
     assert card.boundary == "retro/1" and card.merged_ticket_count == 1
-    assert status.spend_usd == 3.25 and card.spend_usd == 1.25
-    assert card.tokens["input"] == {"known": 11, "unknown_calls": 26}
-    assert card.tokens["output"] == {"known": 0, "unknown_calls": 27}
     assert card.signal_counts == {"override": 1, "rework": 1, "gate-failure": 1, "integration-red": 1}
     assert card.gate_failure_count == 1
     result = rows(card)
@@ -135,15 +116,14 @@ def test_status_current_window_scorecard(tmp_path):
     c.journal.append(EventType.EFFECT_INTENT, {}, key="retro/3")
     empty = asyncio.run(_status(c)).scorecard
     assert empty.boundary == "retro/2" and empty.surfaces == ()
-    assert empty.merged_ticket_count == empty.spend_usd == empty.gate_failure_count == 0
-    assert all(value == {"known": 0, "unknown_calls": 0} for value in empty.tokens.values())
+    assert empty.merged_ticket_count == empty.gate_failure_count == 0
     assert all(value == 0 for value in empty.signal_counts.values())
     assert render(project([])).endswith("| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n")
 
 
 def test_status_production_provenance(tmp_path, monkeypatch, capsys):
     c, _, _, _ = rig(tmp_path)
-    spec_text = (runner.SPECS_DIR / "retro.md").read_text().replace('version: "1.1"', 'version: "7.3"')
+    spec_text = (runner.SPECS_DIR / "retro.md").read_text().replace('version: "1.2"', 'version: "7.3"')
     specs = tmp_path / "specs"
     specs.mkdir()
     (specs / "retro.md").write_text(spec_text)
@@ -183,7 +163,6 @@ def test_status_preserves_sections_and_is_write_free(tmp_path, monkeypatch, caps
             {"to": "gate_failed", "stage": "check", "routed": "reject_queue"}, ticket="held")
         c.journal.append(EventType.SIGNAL, {"signal": "ticket_intake", "source": "human", "state": "confirmed",
             "commit": "123456789abcdef"}, ticket="new")
-        c.journal.append(EventType.EFFECT_COMPLETION, {"result": {}, "cost": {"usd": 2}}, key="llm/spend/0/x/1/1")
         id, _ = box.enqueue(message_class="failure_report", origin="test", summary="visible", occurrence_id="original")
         box.resolve(id, Resolution(kind="tombstone", link="retired"))
         reopened, _ = box.enqueue(message_class="failure_report", origin="other", summary="reopened", occurrence_id="other")
@@ -191,13 +170,13 @@ def test_status_preserves_sections_and_is_write_free(tmp_path, monkeypatch, caps
         for n in range(3):
             box.record_rereport(reopened, occurrence_id=f"report/{n}")
         legacy = ("merged:\n- done\n\nin flight:\n- active\n\nblocked:\n- held: gate_failed\n\n"
-            "intake:\n- new: source: human, state: confirmed, commit 123456789abc\n\nspend:\n$2.00\n\n"
+            "intake:\n- new: source: human, state: confirmed, commit 123456789abc\n\n"
             "Reject queue:\n- held: gate_failed at check -- confirm held after editing, or reject held\n\n"
             f"Confirmed-class tombstones:\n- {id}: failure_report, 0 re-reports\n\n"
             f"Tombstone reopens:\n- {reopened}: reopened at 3 re-reports\n")
     else:
         legacy = ("merged:\n(none)\n\nin flight:\n(none)\n\nblocked:\n(none)\n\nintake:\n(none)\n\n"
-            "spend:\n$0.00\n\nReject queue:\n(none)\n\nConfirmed-class tombstones:\n(none)\n\n"
+            "Reject queue:\n(none)\n\nConfirmed-class tombstones:\n(none)\n\n"
             "Tombstone reopens:\n(none)\n")
     before = {p: p.read_bytes() for p in c.repo.rglob("*") if p.is_file()}
     def forbidden(*args, **kwargs):

@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from tempo import __main__ as cli, runner, stages
 from tempo.audit import audit_journal
-from tempo.artifacts import Cost, Harvest, StageResult
+from tempo.artifacts import Harvest, StageResult
 from tempo.box import Box
 from tempo.config import snapshot_config
 from tempo.driver import LlmStage
@@ -20,10 +20,9 @@ from tempo.journal import EventType, render_ts, run_seq
 from tempo.llmeffect import llm_call
 from tempo.providers import ADAPTERS, CodexAdapter, ProviderLLM, ProviderSession, candidates
 from tempo.redact import Redactor
-from tempo.seams import SubprocessExec
 from tempo.timers import Timers
 from tempo.tickets import intake
-from tests.test_cli import root, write, PLAN
+from tests.test_cli import root, write
 from tests.test_daemon_composition import CoreRig
 from tests.test_providers import CONFIG
 from tests.test_restart_timers import repository, held
@@ -46,7 +45,7 @@ def registry(root, monkeypatch):
     kind: cli
     package: scripted-backup
     models_by_tier: {low: b-low, medium: b-med, high: b-high, max: b-max}
-    limits: {concurrency: 1, est_cost_per_call_usd: 0.17}
+    limits: {concurrency: 1}
 '''
     config = CONFIG.replace('routing:', third + 'routing:').replace(
         'candidates: [{provider: codex}, {provider: claude}]',
@@ -57,7 +56,7 @@ def registry(root, monkeypatch):
 async def stage(rig, driver, stem='work', surface='implement', attempt=0, stuck=1200):
     return await driver.run(LlmStage(surface=surface, emits=Reply, gates=[], render=lambda *_: 'probe'),
         None, ticket=stem, attempt=attempt, workspace=rig.root, tier='medium', effort='low',
-        stuck_budget=stuck, expected_budget=600, scope_fence=())
+        stuck_budget=stuck)
 
 
 def outcomes(rig):
@@ -113,25 +112,25 @@ async def test_ordered_failover_preserves_served_identity(tmp_path, monkeypatch)
     rig.exec.reply = '{"text":"done"}'
     session.quota(driver.llm._config.providers[1])
     result = await stage(rig, driver)
-    assert result.outcome == 'ok' and (result.cost.provider, result.cost.model) == ('claude', 'c-med')
+    assert result.outcome == 'ok' and (result.provider, result.model) == ('claude', 'c-med')
     assert driver.detector.call.identity == ('claude', 'c-med')
     completion = next(e for e in reversed(rig.journal.read()) if e.type == EventType.EFFECT_COMPLETION)
-    assert completion.body['cost']['provider'] == 'claude' and completion.body['result']['model'] == 'c-med'
+    assert completion.body['served'] == {'provider': 'claude', 'model': 'c-med'} and completion.body['result']['model'] == 'c-med'
     argv = rig.exec.calls[-1][0]
     assert argv[0] == 'claude' and argv[argv.index('--model') + 1] == 'c-med'
     result = await stage(rig, driver, surface='review')
-    assert result.cost.model == 'c-max' and driver.detector.call.identity == ('claude', 'c-max')
+    assert result.model == 'c-max' and driver.detector.call.identity == ('claude', 'c-max')
     for _ in range(3):
         session.thresh.record_outcome('claude', 'outage', ticket='work', call_key='opening')
     result = await stage(rig, driver, attempt=1)
-    assert (result.cost.provider, result.cost.model) == ('backup', 'b-pinned')
+    assert (result.provider, result.model) == ('backup', 'b-pinned')
     assert driver.detector.call.identity == ('backup', 'b-pinned')
     session.quota(driver.llm._config.providers[2])
     refusal = session.drought(driver.llm._config, 'medium', 'implement')
     assert refusal.record['providers'] == ['codex', 'claude', 'backup']
     rig.time.advance(600)
     result = await stage(rig, driver, attempt=2)
-    assert result.cost.provider == 'claude'
+    assert result.provider == 'claude'
 
 
 @pytest.mark.asyncio
@@ -151,8 +150,8 @@ async def test_ordered_failover_preserves_served_identity_after_invalid_reply(tm
         return await original(argv, **kwargs)
     monkeypatch.setattr(rig.exec, 'run', run)
     result = await stage(rig, driver)
-    assert result.outcome == 'infra_error' and result.cost.attempts == 2
-    assert (result.cost.provider, result.cost.model) == driver.detector.call.identity == ('claude', 'c-med')
+    assert result.outcome == 'infra_error'
+    assert (result.provider, result.model) == driver.detector.call.identity == ('claude', 'c-med')
     assert result.findings[0].code == 'outage'
     assert [e.body['provider'] for e in outcomes(rig)] == ['codex', 'claude']
 
@@ -207,14 +206,14 @@ async def test_mid_run_drought_is_harvested_without_spine_draws(root, monkeypatc
             session.quota(provider)
         return StageResult(outcome='ok', artifact=stages.PackingSlip(produced_by_spec_version=1,
             produced_at_sha='fixture', stem=ticket.stem, branch=ticket.stem, outcome='ok',
-            summary='earlier', run_record='tickets/midrun/run.md'), findings=[], cost=prior.cost)
+            summary='earlier', run_record='tickets/midrun/run.md'), findings=[], provider=prior.provider, model=prior.model)
     async def check(ctx, ticket, slip, *, attempt):
         if nested:
             from tempo.requisition import review_ticket
             from tests.test_requisition import TICKET
-            await review_ticket(ctx.driver, repo=root, plan=PLAN, stem='seed', text=TICKET.replace('context.txt', 'config.yaml'),
+            await review_ticket(ctx.driver, repo=root, stem='seed', text=TICKET.replace('context.txt', 'config.yaml'),
                 specs_dir=runner.SPECS_DIR, tier='medium', stem_slot=ticket.stem,
-                run_seq=0, attempt=attempt, call_seq=1, expected_budget=600)
+                run_seq=0, attempt=attempt, call_seq=1)
         return await stage(rig, ctx.driver, stem=ticket.stem, surface='review')
     monkeypatch.setattr(stages, 'implement', implement)
     monkeypatch.setattr(stages, 'check', check)
@@ -242,7 +241,7 @@ async def test_single_candidate_cooldown_resumes_same_provider(tmp_path):
     rig.time.advance(3600)
     rig.exec.reply = '{"text":"done"}'
     result = await stage(rig, writer.ctx.driver)
-    assert result.outcome == 'ok' and result.cost.provider == 'codex'
+    assert result.outcome == 'ok' and result.provider == 'codex'
     assert len([e for e in rig.journal.read() if e.type == EventType.TIMER_FIRED]) == 1
 
 
@@ -297,11 +296,10 @@ async def test_one_provider_payload_and_timers_per_session(root, monkeypatch):
                 LlmStage(surface=surface, emits=Reply, gates=[], render=lambda *_: 'probe'), None,
                 ticket=None if ticketless else ticket.stem, attempt=0, workspace=ctx.repo,
                 tier='medium', effort='low', stuck_budget=1200,
-                expected_budget='surface' if ticketless else 600, scope_fence=(),
                 run_seq=len(seen) if ticketless else None)
             assert result.outcome == 'ok'
             if surface == 'implement':
-                assert result.cost.model == ('x-med' if len(seen) == 1 else 'x-refreshed')
+                assert result.model == ('x-med' if len(seen) == 1 else 'x-refreshed')
         if len(seen) == 1:
             ctx.fs.write(ctx.repo / 'config.yaml',
                          (ctx.repo / 'config.yaml').read_text().replace('x-med', 'x-refreshed').encode())
@@ -312,11 +310,11 @@ async def test_one_provider_payload_and_timers_per_session(root, monkeypatch):
     await rig.add('first')
     await rig.add('second')
     checkout = replace(rig.checkout, control=cli.build_control(rig.checkout))
-    report = await drain(checkout, runner.pipeline(checkout), reexec=SubprocessExec())
+    report = await drain(checkout, runner.pipeline(checkout))
     assert report.exit_code == 0 and len(seen) == 2 and seen[0] is seen[1] is checkout.control.providers
     assert not seen[0].waits
     rig.fs.publish = __import__('tempo.seams', fromlist=['LocalFileSystem']).LocalFileSystem().publish
-    rig.owner = cli.build_serve(rig.checkout, plan=PLAN)
+    rig.owner = cli.build_serve(rig.checkout)
     write(root, 'continuous', text())
     running = asyncio.create_task(rig.owner.run())
     try:
@@ -366,7 +364,7 @@ async def test_provider_wait_excluded_from_ticket_and_watchdog_budgets(tmp_path)
         rig.time.advance(0)
         await turn()
     result = await queued
-    assert result.outcome == 'ok' and result.cost.seconds == 0
+    assert result.outcome == 'ok' and driver.detector.active_seconds == 0
     replay = await stage(rig, driver, stuck=30)
     assert replay.outcome == 'ok' and len(outcomes(rig)) == 1
     session.thresh.release(held_slots[1])
@@ -448,7 +446,7 @@ async def test_production_spill_preserves_strict_sixty_second_boundary(tmp_path,
     for _ in range(12):
         await turn()
     if spill:
-        assert task.done() and task.result().cost.provider == 'claude'
+        assert task.done() and task.result().provider == 'claude'
     else:
         assert not task.done()
     if earlier:
@@ -460,7 +458,7 @@ async def test_production_spill_preserves_strict_sixty_second_boundary(tmp_path,
         rig.time.advance(0)
         await turn()
     result = await task
-    assert result.cost.provider == ('claude' if spill else 'codex')
+    assert result.provider == ('claude' if spill else 'codex')
 
 
 @pytest.mark.asyncio
@@ -489,14 +487,14 @@ async def test_auth_failure_excludes_provider_until_fresh_successful_preflight(t
     fresh = await prepared(rig)
     assert fresh.ctx.driver.llm.session is session
     result = await stage(rig, fresh.ctx.driver, attempt=1)
-    assert result.cost.provider == 'claude' and fresh.ctx.driver.detector.call.identity == ('claude', 'c-med')
+    assert result.provider == 'claude' and fresh.ctx.driver.detector.call.identity == ('claude', 'c-med')
     fail_process(rig, monkeypatch, 'not logged in')
     assert (await stage(rig, fresh.ctx.driver, surface='review', attempt=1)).findings[0].code == 'auth_error'
     assert session.exclusions() == {'codex', 'claude'}
     before = len(rig.journal.read())
     drought = await stage(rig, fresh.ctx.driver, stem=None, surface='author', attempt=2)
     assert drought.provider_drought == {'tier': 'medium', 'surface': 'author', 'providers': ['claude', 'codex']}
-    assert drought.cost.attempts == 0 and not session.timers.pending
+    assert not session.timers.pending
     assert not any(e.type in {EventType.EFFECT_INTENT, EventType.CAP_CONSUMED}
                    for e in rig.journal.read()[before:])
     monkeypatch.undo()
@@ -508,7 +506,7 @@ async def test_auth_failure_excludes_provider_until_fresh_successful_preflight(t
     restored = await runner.prepare_pipeline(checkout)
     assert restored.ctx.driver.llm.session.exclusions() == set()
     result = await stage(rig, restored.ctx.driver, attempt=2)
-    assert result.cost.provider == 'codex'
+    assert result.provider == 'codex'
 
 
 @pytest.mark.asyncio
@@ -552,8 +550,8 @@ async def test_auth_failure_excludes_provider_until_fresh_successful_preflight_q
         rig.time.advance(0)
         await turn()
     result = await queued
-    assert result.cost.provider == 'claude' and second.ctx.driver.detector.call.identity == ('claude', 'c-med')
-    assert result.cost.seconds == 0 and len(outcomes(rig)) == 2
+    assert result.provider == 'claude' and second.ctx.driver.detector.call.identity == ('claude', 'c-med')
+    assert second.ctx.driver.detector.active_seconds == 0 and len(outcomes(rig)) == 2
     assert all(session.thresh.occupancy(name) == (0, 0, 1) for name in ('claude', 'codex'))
     assert session.exclusions() == {'codex'}
 
@@ -590,7 +588,8 @@ async def test_provider_wait_excluded_from_ticket_and_watchdog_budgets_ticketles
     assert not any(e.type == EventType.EFFECT_INTENT for e in rig.journal.read())
     rig.time.advance(3600)
     result = await pending
-    assert result.outcome == 'ok' and result.cost.seconds == 0 and result.cost.provider == 'claude'
+    assert result.outcome == 'ok' and result.provider == 'claude'
+    assert writer.ctx.driver.detector.active_seconds == 0
     assert not session.waits
 
 
@@ -632,7 +631,7 @@ async def test_escalated_drought_uses_effective_route(root, monkeypatch, entry, 
     if entry == 'serve':
         from tempo.seams import LocalFileSystem
         rig.fs.publish = LocalFileSystem().publish
-        rig.owner = cli.build_serve(rig.checkout, plan=PLAN)
+        rig.owner = cli.build_serve(rig.checkout)
         control = rig.owner.control
     else:
         control = rig.core.control
@@ -653,15 +652,15 @@ async def test_escalated_drought_uses_effective_route(root, monkeypatch, entry, 
         result = await ctx.driver.run(
             LlmStage(surface='implement', emits=Reply, gates=[], render=lambda *_: 'probe'), None,
             ticket=original.stem, attempt=run_seq(rig.journal.read(), original.stem),
-            workspace=root, tier=tier, effort=effort, stuck_budget=1200, expected_budget=600, scope_fence=())
-        assert result.outcome == 'ok' and (result.cost.provider, result.cost.model) == ('claude', 'c-high')
+            workspace=root, tier=tier, effort=effort, stuck_budget=1200)
+        assert result.outcome == 'ok' and (result.provider, result.model) == ('claude', 'c-high')
         calls.append(original.stem)
         rig.transition(original.stem, 'already_satisfied')
         return 'already_satisfied'
 
     monkeypatch.setattr(runner, 'drive', drive)
     if entry == 'drain':
-        task = asyncio.create_task(drain(checkout, runner.pipeline(checkout), reexec=SubprocessExec()))
+        task = asyncio.create_task(drain(checkout, runner.pipeline(checkout)))
     elif entry == 'serve':
         task = asyncio.create_task(rig.owner.run())
     elif entry == 'run':
@@ -744,7 +743,7 @@ async def test_drain_drought_wait_observes_runtime_and_control(root, monkeypatch
         if ending == 'ceiling' and len(checkpoints) == 1:
             rig.time.advance(3599.95)
 
-    report = await drain(checkout, runner.pipeline(checkout), reexec=SubprocessExec(),
+    report = await drain(checkout, runner.pipeline(checkout),
                          before_dispatch=checkpoint)
     events = rig.journal.read()
     [park] = [e for e in events if 'provider_drought' in e.body]

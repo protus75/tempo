@@ -1,4 +1,4 @@
-"""Closed host reports and bounded inbox ingestion (plan 19.P6.report-inbox-triage)."""
+"""Closed host reports and bounded inbox ingestion."""
 
 import hashlib
 import json

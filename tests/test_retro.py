@@ -13,10 +13,10 @@ from tempo import runner
 from tempo.box import Box, DecisionRecord, render_record
 from tempo.effects import Effects
 from tempo.journal import EventType, Journal
-from tempo.llm import FakeLLM, LLMResult
+from tempo.llm import FakeLLM
 from tempo.retro import (Retro, RetroArtifact, measurements, production_evidence, project_window,
                          render_report, select_trigger)
-from tempo.specs import RENDER_BOUND_CHARS, REQ_RENDER_HEADROOM, data_open, data_close, entry_unit_gap, resolve_plan_contract
+from tempo.specs import RENDER_BOUND_CHARS, REQ_RENDER_HEADROOM, data_open, data_close
 from tests.test_drain import Clock, make_root, pause_checkout, confirmed, commit_ticket
 
 
@@ -46,27 +46,20 @@ def test_window_uses_completed_report_boundary(tmp_path):
     assert project_window([]).events == () and project_window([]).started_at is None
     assert select_trigger(project_window([]), measurements(project_window([])), c.clock(), forced=False) is None
     first = merged(j, "first", "real-merge-sha")
-    j.append(EventType.EFFECT_COMPLETION, {"result": {}, "cost": {
-        "usd": 1.25, "input_tokens": 10, "output_tokens": None}}, key="llm/first/0/implement/0/1")
-    j.append(EventType.EFFECT_COMPLETION, {"result": {}, "cost": {
-        "usd": .5, "input_tokens": None, "output_tokens": 4}}, key="llm/first/0/review/0/1")
     j.append(EventType.EFFECT_INTENT, {}, key="retro/1")
     initial = project_window(j.read())
     assert initial.events[0] == first and initial.boundary == "initial"
     facts = measurements(initial)
     assert facts["merged_count"] == 1 and facts["merges"][0]["commit"] == "real-merge-sha"
-    assert facts["usd"] == 1.75
-    assert facts["input_tokens"] == {"known": 10, "unknown_calls": 1}
-    assert facts["output_tokens"] == {"known": 4, "unknown_calls": 1}
     report = render_report(initial, facts, {"head": "actual-head", "spec_version": "1.0"}, [],
                            RetroArtifact(proposals=[]))
     assert report == render_report(initial, facts, {"head": "actual-head", "spec_version": "1.0"}, [],
                                   RetroArtifact(proposals=[]))
-    assert '"usd": 1.75' in report and '"actual-head"' in report
+    assert '"merged_count": 1' in report and '"actual-head"' in report
     completed(j, 1)
     older = merged(j, "older")
     completed(j, 2)
-    last = j.append(EventType.SIGNAL, {"kind": "drain_handoff"}, ticket=None)
+    last = j.append(EventType.SIGNAL, {"kind": "drain_halted"}, ticket=None)
     j.append(EventType.EFFECT_INTENT, {}, key="retro/3")
     window = project_window(j.read())
     assert window.boundary == "retro/2" and window.sequence == 3
@@ -78,7 +71,7 @@ def test_window_uses_completed_report_boundary(tmp_path):
 def test_window_over_headroom_is_read_on_demand(tmp_path, monkeypatch, size):
     c, writer, hook, llm = rig(tmp_path, ['{"proposals": []}'])
     merged(c.journal)
-    c.journal.append(EventType.SIGNAL, {"kind": "drain_handoff", "payload": "x" * size}, key="large")
+    c.journal.append(EventType.SIGNAL, {"kind": "drain_halted", "payload": "x" * size}, key="large")
     # Preserve multiplicity, null tickets, and journal order rather than sorting timestamps.
     event = c.journal.read()[-1]
     c.journal.append(event.type, event.body, ticket=event.ticket, key=event.key)
@@ -279,37 +272,24 @@ def test_artifact_is_closed_and_proposals_pair_the_risks():
                 {"proposals": [{"fixed_failure": "failure", "overcorrection_risk": "risk", "proposed_spec_paths": ["../x.md"]}]}):
         with pytest.raises(ValidationError):
             RetroArtifact.model_validate(raw)
-    plan = (Path(__file__).resolve().parents[1] / "TEMPO_PLAN.md").read_text()
-    unit = "19.P5.retro-drain-invoker"
-    assert entry_unit_gap(plan, unit) is None
-    assert resolve_plan_contract(plan, [unit, unit]).count(f"### {unit} ") == 1
 
 
-def test_receipt_uses_engine_provenance_usage_calibration_and_tombstones(tmp_path):
-    from tempo.driver import LlmStage
+def test_receipt_uses_engine_provenance_calibration_and_tombstones(tmp_path):
     proposal = {"fixed_failure": "A witnessed failure", "overcorrection_risk": "Rejecting useful inputs",
                 "proposed_spec_paths": ["specs/review.md"]}
-    prior = LLMResult(text='{"proposals": []}', usd=2.3, input_tokens=None, output_tokens=7,
-                      provider="measured-provider", model="measured-model")
-    c, writer, hook, llm = rig(tmp_path, [prior, json.dumps({"proposals": [proposal]})])
+    c, writer, hook, llm = rig(tmp_path, [json.dumps({"proposals": [proposal]})])
     commit_ticket(c.repo, "one", confirmed())
     record = DecisionRecord(id="retired", kind="tombstone", link="one", reopen_after_days=7)
     c.fs.write(c.repo / "tickets/decisions/retired.md", render_record(record, "Evidence digest\n").encode())
-    driver = writer.stages.driver
     c.journal.append(EventType.STATE_TRANSITION, {"to": "running"}, ticket="one")
     c.clock.now += timedelta(seconds=120)
-    stage = LlmStage(surface="review", emits=RetroArtifact, gates=[], render=lambda *_: "usage probe")
-    assert asyncio.run(driver.run(stage, None, ticket="one", attempt=0, workspace=c.repo, tier="medium",
-        effort="low", stuck_budget=600, expected_budget=300, scope_fence=())).outcome == "ok"
     head = asyncio.run(c.git.rev_parse(c.repo, "HEAD"))
     merged(c.journal, "one", head)
     assert asyncio.run(hook(forced=True))["commit"] != head
     report = (c.repo / "tickets/retro/000001.md").read_text()
     data = json.loads(report.split("```json\n")[1].split("\n```")[0])
-    assert data["provenance"] == {"head": head, "spec_version": "1.1", "at": c.clock().isoformat()}
-    assert data["measurements"]["usd"] == 2.3 and data["measurements"]["merged_count"] == 1
-    assert data["measurements"]["input_tokens"] == {"known": 0, "unknown_calls": 1}
-    assert data["measurements"]["output_tokens"] == {"known": 7, "unknown_calls": 0}
+    assert data["provenance"] == {"head": head, "spec_version": "1.2", "at": c.clock().isoformat()}
+    assert data["measurements"]["merged_count"] == 1
     assert data["calibration_divergence"] == [{"ticket": "one", "commit": head,
         "actual_seconds": 120.0, "predicted_seconds": 600, "divergence_seconds": -480.0}]
     assert data["tombstone_digest"] == [{**record.model_dump(), "body": "Evidence digest\n"}]

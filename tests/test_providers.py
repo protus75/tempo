@@ -46,7 +46,7 @@ CONFIG = textwrap.dedent(
         package: test-cli
         auth: CODEX_KEY
         models_by_tier: {low: x-low, medium: x-med, high: x-high, max: x-max}
-        limits: {concurrency: 1, est_cost_per_call_usd: 1.5}
+        limits: {concurrency: 1}
     routing:
       - {tier: medium, surface: implement, candidates: [{provider: codex}, {provider: claude}]}
       - {tier: high, surface: implement, candidates: [{provider: claude}]}
@@ -115,7 +115,7 @@ def jsonl(*events: dict) -> str:
     return "".join(json.dumps(e) + "\n" for e in events)
 
 
-def claude_ok(text="done", cost=0.42) -> str:
+def claude_ok(text="done") -> str:
     return jsonl(
         {"type": "system", "subtype": "init"},
         {"type": "assistant", "message": {"content": [{"type": "text", "text": "working"}]}},
@@ -124,13 +124,6 @@ def claude_ok(text="done", cost=0.42) -> str:
             "subtype": "success",
             "is_error": False,
             "result": text,
-            "total_cost_usd": cost,
-            "usage": {
-                "input_tokens": 10,
-                "cache_creation_input_tokens": 5,
-                "cache_read_input_tokens": 100,
-                "output_tokens": 7,
-            },
         },
     )
 
@@ -142,7 +135,7 @@ def codex_ok(text="patched") -> str:
         {"type": "item.completed", "item": {"id": "i0", "type": "agent_message", "text": "first"}},
         {"type": "item.completed", "item": {"id": "i1", "type": "command_execution", "command": "ls"}},
         {"type": "item.completed", "item": {"id": "i2", "type": "agent_message", "text": text}},
-        {"type": "turn.completed", "usage": {"input_tokens": 300, "cached_input_tokens": 200, "output_tokens": 40}},
+        {"type": "turn.completed"},
     )
 
 
@@ -174,7 +167,7 @@ def test_routing_hole_is_a_setup_refusal_naming_the_row(tmp_path):
 def test_placeholder_row_is_refused_before_any_call(tmp_path):
     cfg = config(tmp_path, CONFIG.replace("x-med", PLACEHOLDER))
     exec_ = FakeExec()
-    with pytest.raises(ProviderSetupError, match="Phase 1 prerequisites"):
+    with pytest.raises(ProviderSetupError, match="set the operator values in config.yaml"):
         call(cfg, exec_, tmp_path, req("implement", worktree=tmp_path))
     assert exec_.calls == []
 
@@ -194,12 +187,6 @@ def test_unknown_cli_provider_has_no_adapter(tmp_path):
         llm(cfg, FakeExec(), tmp_path)
 
 
-def test_no_cost_stream_without_estimate_is_a_setup_refusal(tmp_path):
-    cfg = config(tmp_path, CONFIG.replace(", est_cost_per_call_usd: 1.5", ""))
-    with pytest.raises(ProviderSetupError, match="est_cost_per_call_usd"):
-        llm(cfg, FakeExec(), tmp_path)
-
-
 def test_instance_config_routes_every_tier_for_review_author_implement():
     cfg = load_config(None, cwd=ROOT)
     assert cfg.state_dir == ROOT / ".tempo" / "state"
@@ -212,7 +199,7 @@ def test_instance_config_routes_every_tier_for_review_author_implement():
         assert author.model == getattr(author.provider.models_by_tier, tier)
         review = resolve(cfg, tier, "review")
         assert (review.provider.name, review.model) == ("claude", cfg.providers[0].models_by_tier.max)
-    llm(cfg, FakeExec(), ROOT)  # every provider has an adapter and its cost floor
+    llm(cfg, FakeExec(), ROOT)  # every provider has an adapter
 
 
 # --- key scoping ---
@@ -284,18 +271,9 @@ def test_claude_prompt_goes_on_stdin_never_argv(tmp_path):
     assert not any("PROMPT-BODY" in a for a in exec_.calls[0]["argv"])
 
 
-def test_claude_text_usage_and_cost_come_from_the_result_event(tmp_path):
-    result = call(config(tmp_path), FakeExec((0, claude_ok("verdict", 0.42), "")), tmp_path, req("review"))
-    assert (result.text, result.input_tokens, result.output_tokens) == ("verdict", 115, 7)
-    assert (result.provider, result.model, result.usd) == ("claude", "c-max", 0.42)
-
-
-def test_claude_result_without_cost_falls_back_to_estimate_else_fails_closed(tmp_path):
-    out = claude_ok().replace('"total_cost_usd": 0.42, ', "")
-    with pytest.raises(ProviderCallError, match="est_cost_per_call_usd"):
-        call(config(tmp_path), FakeExec((0, out, "")), tmp_path, req("review"))
-    cfg = config(tmp_path, CONFIG.replace("limits: {concurrency: 1}", "limits: {concurrency: 1, est_cost_per_call_usd: 2.0}"))
-    assert call(cfg, FakeExec((0, out, "")), tmp_path, req("review")).usd == 2.0
+def test_claude_text_comes_from_the_result_event(tmp_path):
+    result = call(config(tmp_path), FakeExec((0, claude_ok("verdict"), "")), tmp_path, req("review"))
+    assert (result.text, result.provider, result.model) == ("verdict", "claude", "c-max")
 
 
 @pytest.mark.parametrize(
@@ -340,10 +318,9 @@ def test_codex_read_only_surface_is_sandboxed_read_only_with_no_approvals(tmp_pa
     assert inv["cwd"] == tmp_path / "checkout"
 
 
-def test_codex_text_is_last_agent_message_usage_from_turn_completed_cost_is_the_estimate(tmp_path):
+def test_codex_text_is_last_agent_message(tmp_path):
     result = call(config(tmp_path), FakeExec((0, codex_ok("final"), "")), tmp_path, req("implement", worktree=tmp_path))
-    assert (result.text, result.input_tokens, result.output_tokens) == ("final", 300, 40)
-    assert (result.provider, result.model, result.usd) == ("codex", "x-med", 1.5)
+    assert (result.text, result.provider, result.model) == ("final", "codex", "x-med")
 
 
 @pytest.mark.parametrize(
@@ -562,7 +539,7 @@ def test_classified_error_preserves_scrubbed_evidence_and_login_road(tmp_path, n
                                     clock=lambda: datetime(2026, 10, 6, tzinfo=UTC), sleep=sleep)
         result = asyncio.run(driver.run(LlmStage(surface="review", emits=Reply, gates=[], render=lambda *_: "probe"),
                                        None, ticket=f"classification-{index}", attempt=0, workspace=tmp_path,
-                                       tier="medium", effort="low", stuck_budget=600, expected_budget=300.0, scope_fence=()))
+                                       tier="medium", effort="low", stuck_budget=600))
         assert result.outcome == "infra_error"
         if error.failure_class == "unclassified":
             assert result.findings == []
@@ -594,7 +571,7 @@ def test_cli_failure_classifier_is_active(tmp_path, monkeypatch):
         for surface in ("implement", "review"):
             result = await ctx.driver.run(LlmStage(surface=surface, emits=Reply, gates=[], render=lambda *_: "probe"),
                                           None, ticket="dormancy", attempt=0, workspace=tmp_path,
-                                          tier="medium", effort="low", stuck_budget=600, expected_budget=300.0, scope_fence=())
+                                          tier="medium", effort="low", stuck_budget=600)
             assert result.outcome == "infra_error"
             results.append(result)
         return "infra_error"
@@ -896,56 +873,3 @@ def test_routed_conduct_paths(tmp_path, names, expected):
     assert routed_conduct_paths(config, tmp_path) == tuple(tmp_path / p for p in expected)
     # The declared but unrouted provider must never add a path.
     assert len(config.providers) == 2
-
-
-def test_eval_budget_ceiling_before_spawn(tmp_path):
-    from dataclasses import replace
-    from tempo.providers import ProviderBudgetExceeded
-    cfg = config(tmp_path)
-    process = FakeExec((0, claude_ok(), ""), (0, codex_ok(), ""), (0, claude_ok(), ""))
-    client = llm(cfg, process, tmp_path)
-    asyncio.run(client.call(replace(req("review"), budget_usd=2.25)))
-    assert process.calls[-1]["argv"][-2:] == ["--max-budget-usd", "2.25"]
-    asyncio.run(client.call(replace(req("review", tier="low"), budget_usd=1.5)))
-    assert "--max-budget-usd" not in process.calls[-1]["argv"]
-    before = list(process.calls)
-    for budget in (1.49, 0.0):
-        with pytest.raises(ProviderBudgetExceeded, match="rerun"):
-            asyncio.run(client.call(replace(req("review", tier="low"), budget_usd=budget)))
-        assert process.calls == before
-    asyncio.run(client.call(req("review")))
-    assert "--max-budget-usd" not in process.calls[-1]["argv"]
-    for budget in (-1, float("inf"), float("nan"), True):
-        with pytest.raises(ValueError, match="finite"):
-            replace(req("review"), budget_usd=budget)
-
-    # Exercise the durable production call boundary, not just the raw adapter.
-    from tempo.effects import Effects
-    from tempo.llmeffect import llm_call
-    from tempo.thresh import fold_breakers
-    journal = client.session.journal
-    effects = Effects(journal)
-    before_events = journal.read()
-    before_breakers = fold_breakers(journal, client.session.clock())
-    before_calls = list(process.calls)
-    admitted = client.session.thresh.run
-    async def forbidden_admission(*args, **kwargs):
-        pytest.fail("budget refusal must precede Thresh.run")
-    client.session.thresh.run = forbidden_admission
-    for budget in (1.49, 0.0):
-        with pytest.raises(ProviderBudgetExceeded, match="rerun"):
-            asyncio.run(llm_call(effects, client, replace(req("review", tier="low"), budget_usd=budget),
-                Redactor({}), ticket="t-1", stem="t-1", run_seq=0, attempt=1, call_seq=1))
-        assert journal.read() == before_events
-        assert fold_breakers(journal, client.session.clock()) == before_breakers
-        assert process.calls == before_calls
-    client.session.thresh.run = admitted
-    # A cost-reporting primary remains usable when an estimated-cost fallback
-    # exceeds the remainder; the admitted call still carries the exact ceiling.
-    process.responses.append((0, claude_ok(cost=0.25), ""))
-    result = asyncio.run(llm_call(effects, client, replace(req("review"), budget_usd=0.5),
-        Redactor({}), ticket="t-1", stem="t-1", run_seq=0, attempt=1, call_seq=2))
-    assert result["usd"] == 0.25
-    assert process.calls[-1]["argv"][-2:] == ["--max-budget-usd", "0.5"]
-    assert [e.type for e in journal.read() if e.key == "llm/t-1/0/review/1/2"] == [
-        "effect_intent", "effect_completion"]

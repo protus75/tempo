@@ -1,4 +1,4 @@
-"""Journal-backed absolute deadlines (TEMPO_PLAN.md 19.P3.restart-timers)."""
+"""Journal-backed absolute deadlines."""
 
 from dataclasses import dataclass
 from datetime import datetime

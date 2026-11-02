@@ -1,8 +1,8 @@
-"""Provider admission and journal-backed breakers (19.P3.thresh-runtime).
+"""Provider admission and journal-backed breakers.
 
 One instance owns a session's slots across surfaces. Breaker truth is folded from
 the journal; neither queue state nor counters survive the session. Providers owns
-selection policy; the production callers own budget accounting.
+selection policy.
 """
 
 import asyncio

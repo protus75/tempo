@@ -3,7 +3,7 @@
 import ast
 import asyncio
 import json
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -16,130 +16,10 @@ from tempo.lockfile import Lockfile, LockHeld
 from tempo.restart import Restart
 from tempo.seams import LocalFileSystem, SubprocessExec
 from tempo.timers import Timers
-from tests.test_cli import ENV, PLAN, root
+from tests.test_cli import ENV, root
 from tests.test_daemon_composition import CoreRig, assert_startup_pause_wiring
 from tests.test_providers import CONFIG
 from tests.test_scheduler import Time, turn
-
-
-@pytest.mark.parametrize("case", ["held", "confirmed", "decision", "moved", "conflict", "ready-crash", "go", "revoked", "revoked-crash", "before-squash", "after-squash", "terminal", "report-terminal", "partial", "missing", "corrupt", "review-missing", "review-corrupt", "contradictory"])
-def test_restart_reconstructs_supervised_admission(tmp_path, monkeypatch, case):
-    from tests.test_mergequeue import ctx as context_fixture, commit
-    from tests.test_supervised_merge_hold import hold, confirm, baseline
-    from tests.test_effects import Crash
-    from tempo.mergequeue import held_admissions, regate_receipts
-    from tempo import merge
-    ctx = context_fixture.__wrapped__(tmp_path)
-    async def exercise():
-        nonlocal ctx
-        if case == "report-terminal":
-            from tests.test_stages import report_context
-            from tests.test_supervised_merge_hold import supervised
-            from tempo import stages
-            ctx, ticket = await report_context(ctx.repo)
-            ctx.driver.journal.append(EventType.STATE_TRANSITION, {"to": "running"}, ticket=ticket.stem)
-            await stages.run_stages(ctx, ticket)
-            queue = supervised(ctx)
-            queue.offer(ticket, attempt=0)
-            [held_run] = await queue.process()
-            assert isinstance(held_run, merge.Held)
-        else:
-            ticket, queue, held_run = await hold(ctx)
-        original = regate_receipts(ctx.driver.journal.read())
-        if case in ("confirmed", "decision", "moved", "conflict", "ready-crash", "before-squash", "after-squash", "terminal", "report-terminal"):
-            confirm(queue, held_run)
-            if case != "decision": await queue.control.inbox.settle_admissions(queue.confirm_draft)
-        if case in ("moved", "ready-crash"):
-            ctx.fs.write(ctx.repo / "tempo/other.py", b"moved\n")
-            await commit(ctx, ctx.repo, ["tempo/other.py"])
-        if case == "conflict":
-            ctx.fs.write(ctx.repo / "tempo/thing.py", b"conflicting main\n")
-            await commit(ctx, ctx.repo, ["tempo/thing.py"])
-        if case in ("go", "revoked", "revoked-crash"):
-            baseline(ctx)
-            if case == "revoked": baseline(ctx, "NO_GO")
-        if case in ("before-squash", "after-squash", "terminal", "report-terminal", "ready-crash", "revoked-crash"):
-            with monkeypatch.context() as patch:
-                if case in ("terminal", "report-terminal"):
-                    async def crash(*_): raise Crash()
-                    patch.setattr(merge, "retire", crash)
-                elif case in ("before-squash", "ready-crash", "revoked-crash"):
-                    async def crash(*_): raise Crash()
-                    patch.setattr(ctx.git, "merge_squash", crash)
-                else:
-                    append = ctx.driver.journal.append
-                    def crash(kind, body, **kwargs):
-                        event = append(kind, body, **kwargs)
-                        if kind == EventType.EFFECT_COMPLETION and kwargs.get("key") == f"merge/{ticket.stem}/0": raise Crash()
-                        return event
-                    patch.setattr(ctx.driver.journal, "append", crash)
-                with pytest.raises(Crash): await queue.process()
-            if case == "revoked-crash": baseline(ctx, "NO_GO")
-        if case in ("review-missing", "review-corrupt"):
-            path = f"tickets/{ticket.stem}/review.md"
-            if case == "review-missing": (ctx.repo / path).unlink()
-            else: ctx.fs.write(ctx.repo / path, (ctx.repo / path).read_bytes().replace(b"served approval", b"changed approval"))
-            await commit(ctx, ctx.repo, [path])
-        if case == "contradictory":
-            ctx.driver.journal.append(EventType.EFFECT_COMPLETION,
-                {"result": {**original[held_run.hold_id], "checked_tree": "a" * 40}}, ticket=ticket.stem, key=held_run.hold_id)
-        if case in ("partial", "corrupt"):
-            read = ctx.driver.journal.read
-            events = read()
-            changed = [replace(e, body={"result": {**e.body["result"], "checked_tree": "bad"}})
-                       if e.type == EventType.EFFECT_COMPLETION and e.key == held_run.hold_id else e for e in events]
-            if case == "partial": changed = [e for e in events if not (e.type == EventType.EFFECT_COMPLETION and e.key == held_run.hold_id)]
-            monkeypatch.setattr(ctx.driver.journal, "read", lambda: changed + read()[len(events):])
-        if case == "missing": await ctx.git.worktree_remove(ctx.repo, ctx.worktree(ticket.stem))
-        checkout = runner.Checkout(ctx.repo, ctx.config, ctx.env, ctx.exec_, ctx.git, ctx.driver.journal,
-                                   ctx.fs, ctx.driver.clock, ctx.driver.sleep)
-        def forbidden(*_a, **_k): pytest.fail("recovery reran a model stage")
-        from tempo.llm import FakeLLM
-        model = FakeLLM(['{"action":"escalate","tickets":[]}'])
-        async def prepare(local): return runner.bind(local, model)
-        owner = cli.build_serve(checkout, plan="# Plan\n", prepare=prepare if case == "conflict" else forbidden)
-        if case in ("missing", "corrupt", "review-missing", "review-corrupt", "contradictory"):
-            with pytest.raises(ValueError): await owner.core.startup()
-            assert not owner.core.restart.ready
-            with pytest.raises(ValueError): await owner.core.startup()
-            return
-        await owner.core.startup()
-        assert await owner.core.sweep_orphans() == []
-        if case in ("partial", "terminal", "report-terminal"):
-            assert not ctx.worktree(ticket.stem).exists()
-            assert not held_admissions(ctx.driver.journal.read())
-            return
-        assert ticket.stem in owner.queue.held and ctx.worktree(ticket.stem).exists()
-        if case == "conflict":
-            consumer = asyncio.create_task(owner.merge())
-            try:
-                for _ in range(10000):
-                    if owner.mutating is None and any(e.ticket == ticket.stem and e.body.get("to") == "gate_failed"
-                                                     for e in ctx.driver.journal.read()): break
-                    await asyncio.sleep(0.001)
-                else: pytest.fail("recovered conflict did not settle through serve")
-                assert [r.surface for r in model.requests] == ["rework"]
-                assert not ctx.worktree(ticket.stem).exists() and audit_journal(ctx.driver.journal) == []
-            finally:
-                consumer.cancel()
-                await asyncio.gather(consumer, return_exceptions=True)
-            return
-        results = await owner.queue.process()
-        if case in ("held", "revoked", "revoked-crash"):
-            assert results == [] and not control_releases(ctx.driver.journal.read())
-        else:
-            assert results[0].outcome == "ok" and not ctx.worktree(ticket.stem).exists()
-            assert not held_admissions(ctx.driver.journal.read())
-            assert sum(e.type == EventType.EFFECT_COMPLETION and e.key == f"merge/{ticket.stem}/0" for e in ctx.driver.journal.read()) == 1
-            assert sum(e.body.get("to") == "merged" for e in ctx.driver.journal.read()) == 1
-            assert len(regate_receipts(ctx.driver.journal.read())) == (2 if case in ("moved", "ready-crash") else 1)
-            assert all(regate_receipts(ctx.driver.journal.read())[k] == v for k, v in original.items())
-        before = ctx.driver.journal.read()
-        again = cli.build_serve(checkout, plan="# Plan\n", prepare=forbidden)
-        await again.core.startup()
-        assert ctx.driver.journal.read() == before and audit_journal(ctx.driver.journal) == []
-    from tempo.control import releases as control_releases
-    asyncio.run(exercise())
 
 
 def timers(state, time):
@@ -359,7 +239,7 @@ async def test_recovery_alert_through_serve_entrypoint(root, monkeypatch):
 
     monkeypatch.setattr(runner, "harvest_orphan", harvest)
     baseline = asyncio.all_tasks()
-    task = asyncio.create_task(serve.serve(rig.checkout, plan=PLAN, signals=signals))
+    task = asyncio.create_task(serve.serve(rig.checkout, signals=signals))
     try:
         await entered.wait()
         assert calls == [] and dead.exists()

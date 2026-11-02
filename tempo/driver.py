@@ -8,16 +8,15 @@ Every model call crosses the LLM effect (tempo/llmeffect.py); the driver never c
 """
 
 import asyncio
-import json
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from tempo.artifacts import Cost, Finding, Outcome, StageResult
+from tempo.artifacts import Finding, Outcome, StageResult
 from tempo.config import Config, ConfigSnapshot, Severity
 from tempo.effects import Effects
 from tempo.enginelog import EngineLog
@@ -25,7 +24,7 @@ from tempo.gates import Gate, GateReport, merge_severity, run_gates
 from tempo.journal import Journal, run_seq as journal_run_seq
 from tempo.llm import LLM, AgentEffort, AgentTier, LLMAborted, LLMRequest, LLMResult
 from tempo.llmeffect import llm_call
-from tempo.providers import ProviderBudgetExceeded, ProviderCallError, ProviderDrought, ProviderLLM, WRITING_SURFACES
+from tempo.providers import ProviderCallError, ProviderDrought, ProviderLLM, WRITING_SURFACES
 from tempo.redact import Redactor
 from tempo.seams import Clock, FileSystem, LocalFileSystem, Sleep
 
@@ -72,17 +71,8 @@ class ProviderDroughtResult(StageResult):
 @dataclass
 class _Tally:
     calls: int = 0
-    tokens: int | None = None
-    usd: float = 0.0
     last: LLMResult | None = None
     findings: list[Finding] = field(default_factory=list)
-
-    def add(self, r: LLMResult) -> None:
-        self.last = r
-        self.usd += r.usd
-        used = [t for t in (r.input_tokens, r.output_tokens) if t is not None]
-        if used:
-            self.tokens = (self.tokens or 0) + sum(used)
 
 
 @dataclass
@@ -189,10 +179,7 @@ class Driver:
         tier: AgentTier,
         effort: AgentEffort,
         stuck_budget: float,
-        expected_budget: float | Literal['surface', 'eval'],
-        scope_fence: Sequence[str],
         run_seq: int | None = None,
-        budget_usd: float | None = None,
     ) -> StageResult:
         if self._active is not None:
             raise ValueError("await the active Driver.run or abort_current before another stage")
@@ -200,8 +187,6 @@ class Driver:
         task = asyncio.create_task(self._run(
             stage, consumed, ticket=ticket, attempt=attempt, workspace=workspace,
             tier=tier, effort=effort, stuck_budget=stuck_budget, run_seq=run_seq,
-            expected_budget=expected_budget, scope_fence=scope_fence,
-            budget_usd=budget_usd,
         ))
         invocation = _Invocation(task)
         self._active = invocation
@@ -228,23 +213,10 @@ class Driver:
                 ):
                     self._active = None
 
-    def materialize_exit_window(self, declarations: Mapping[str, Sequence], workspace: Path) -> Path | None:
-        """Freeze resolved declarations in the consuming worktree, through the Driver's writer seam."""
-        from dataclasses import asdict
-        if not declarations:
-            return None
-        path = workspace / ".tempo" / "exit-read-window.json"
-        payload = {declaration: [asdict(event) for event in events]
-                   for declaration, events in declarations.items()}
-        self.spool._fs.write(path, (json.dumps(payload, indent=2) + "\n").encode())
-        return path
-
     async def _run(
         self, stage: LlmStage, consumed: Any, *, ticket: str | None, attempt: int,
         workspace: Path, tier: AgentTier, effort: AgentEffort, stuck_budget: float,
         run_seq: int | None,
-        expected_budget: float | Literal['surface', 'eval'], scope_fence: Sequence[str],
-        budget_usd: float | None,
     ) -> StageResult:
         """Run one stage attempt; `attempt` is the run sequence (section 6), stuck_budget in seconds."""
         stem = ticket or stage.surface  # ticketless surfaces spool and key under their surface name
@@ -253,18 +225,14 @@ class Driver:
         seq = run_seq if run_seq is not None else journal_run_seq(self.journal.read(), stem)
         spool_stem = f"{stem}/{run_seq}" if run_seq is not None else stem
         self.begin_watch(owner=stem, ticket=ticket, run_sequence=seq, surface=stage.surface,
-                         workspace=workspace, expected_budget=expected_budget,
-                         stuck_budget=stuck_budget, scope_fence=scope_fence, attempt=attempt)
+                         stuck_budget=stuck_budget, attempt=attempt)
         started = self.clock()
-        prior_wait = self.detector.cap_wait() if self.detector else 0
         deadline = started.timestamp() + stuck_budget
         ctx = {"stem": stem, "attempt": attempt, "surface": stage.surface}
         tally = _Tally()
         self.log.event("stage_start", **ctx, stuck_budget=stuck_budget)
 
         def done(outcome: Outcome, artifact: BaseModel | None = None) -> StageResult:
-            seconds = max(0, (self.clock() - started).total_seconds()
-                          - ((self.detector.cap_wait() if self.detector else 0) - prior_wait))
             self.log.event("stage_end", **ctx, outcome=outcome, calls=tally.calls)
             last = tally.last
             detector = self.detector
@@ -272,15 +240,8 @@ class Driver:
             provider, model = (last.provider, last.model) if last else (None, None)
             if meter is not None and (last is None or outcome in {'infra_error', 'timeout'}):
                 provider, model = meter.identity
-            cost = Cost(
-                tokens=tally.tokens,
-                seconds=seconds,
-                attempts=tally.calls,
-                usd=tally.usd,
-                provider=provider,
-                model=model,
-            )
-            return StageResult(outcome=outcome, artifact=artifact, findings=tally.findings, cost=cost)
+            return StageResult(outcome=outcome, artifact=artifact, findings=tally.findings,
+                               provider=provider, model=model)
 
         async def failed(exc, call, name, *, pre_call=False):
             self.spool.write(spool_stem, attempt, f"{name}/error.txt", f"{type(exc).__name__}: {exc}")
@@ -296,9 +257,6 @@ class Driver:
 
         outcome: Outcome = "ok"
         for call_seq in range(1, self.retry_cap + 2):  # the first call plus retry_cap re-prompts
-            remaining = None if budget_usd is None else max(0.0, budget_usd - tally.usd)
-            if remaining == 0:
-                return done("budget_exceeded")
             call = {**ctx, "call_seq": call_seq}
             name = f"{stage.surface}/call-{call_seq:02d}"
             prompt = stage.render(consumed, tally.findings)
@@ -309,7 +267,6 @@ class Driver:
                 effort=effort,
                 ticket=ticket,
                 worktree=workspace if stage.surface in WRITING_SURFACES else None,
-                budget_usd=remaining,
             )
             # Before the call: a call that raises or hangs must leave exactly what was sent on disk.
             self.spool.write(spool_stem, attempt, f"{name}/prompt.md", prompt)
@@ -327,13 +284,10 @@ class Driver:
                 self.log.event("stuck_budget_kill", **call)
                 tally.findings = []
                 return done("timeout")
-            except ProviderBudgetExceeded:
-                tally.calls -= 1
-                return done("budget_exceeded")
             except Exception as e:
                 return await failed(e, call, name, pre_call=True)
             result = LLMResult(**recorded)
-            tally.add(result)
+            tally.last = result
             self.spool.write(spool_stem, attempt, f"{name}/output.txt", result.text)
 
             try:
@@ -390,7 +344,7 @@ class Driver:
                 from tempo.seams import NotificationFailed
                 notice = watchdog_notifications(config, env, self.effects, self.log,
                     redactor=self.redactor, cwd=workspace, owner=owner, ticket=ticket,
-                    run_sequence=sequence, identity=exc.provider)
+                    identity=exc.provider)
                 if config.notify:
                     try:
                         await send(self.effects, notice.notifications, config.notify, owner=owner,
@@ -404,26 +358,15 @@ class Driver:
                 if exc.failure_class and exc.paved_road else [])
 
     async def abort_current(self) -> None:
-        """Stop and observe only the currently owned stage; dormant until explicitly invoked."""
+        """Stop and observe only the currently owned stage; runs only when explicitly invoked."""
         invocation = self._active
         if invocation is not None:
             await _observe(self._abort(invocation))
 
-    def begin_watch(self, *, owner, ticket, run_sequence, surface, workspace,
-                    expected_budget, stuck_budget, scope_fence, attempt):
-        from tempo.__main__ import watchdog_observation, watchdog_notifications
+    def begin_watch(self, *, owner, ticket, run_sequence, surface, stuck_budget, attempt):
+        from tempo.__main__ import watchdog_notifications
         from tempo.watchdog import Detector
 
-        if expected_budget == 'surface':
-            if ticket is not None:
-                raise ValueError('ticket-owned calls need the ticket expected budget')
-            expected = stuck_budget / 2
-        elif expected_budget == 'eval':
-            expected = stuck_budget / 2
-        elif isinstance(expected_budget, (int, float)) and expected_budget > 0:
-            expected = expected_budget
-        else:
-            raise ValueError('missing ticket expected budget; supply its Time budget')
         identity = (owner, run_sequence, surface, attempt)
         if self.detector is not None and identity == self._watch_identity:
             if self._active is not None:
@@ -436,12 +379,12 @@ class Driver:
             def cap_wait():
                 return self.provider_wait(owner, run_sequence)
             prior_wait = cap_wait()
-            self.detector = Detector(expected_minutes=expected / 60, stuck_minutes=stuck_budget / 60,
-                clock=self.clock, sleep=self.sleep, observe=watchdog_observation(workspace, scope_fence),
+            self.detector = Detector(stuck_minutes=stuck_budget / 60,
+                clock=self.clock, sleep=self.sleep,
                 cap_wait=lambda: cap_wait() - prior_wait, log=self.log,
                 notify=watchdog_notifications(config, env, self.effects, self.log,
                     redactor=self.redactor, cwd=self.llm._cwd,
-                    owner=owner, ticket=ticket, run_sequence=run_sequence, identity=surface))
+                    owner=owner, ticket=ticket, identity=surface))
             if self._active is not None:
                 self._active.detector = self.detector
 

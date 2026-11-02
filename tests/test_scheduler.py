@@ -12,7 +12,7 @@ from tempo.journal import EventType, Journal
 from tempo.scheduler import Scheduler
 from tempo.tickets import INTAKE_SIGNAL, parse_ticket
 from tempo.watcher import WATCHER_PARSE_FAILURE, Watcher
-from tests.test_cli import PLAN, TICKET
+from tests.test_cli import TICKET
 
 
 class Time:
@@ -65,7 +65,7 @@ class Rig:
         )
         self.files = {}
         self.watcher = Watcher(
-            root, plan=PLAN, read=self.files.get, journal=self.journal,
+            root, read=self.files.get, journal=self.journal,
             publish=self.scheduler.update, remove=self.scheduler.remove,
             clock=self.time, sleep=self.time.sleep, debounce=5,
         )
@@ -79,7 +79,7 @@ class Rig:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(raw)
         self.files[stem] = raw
-        ticket = parse_ticket(stem, raw, self.root, plan=PLAN)
+        ticket = parse_ticket(stem, raw, self.root)
         self.scheduler.update(ticket)
         return ticket
 

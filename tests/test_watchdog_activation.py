@@ -13,7 +13,6 @@ from tempo.driver import LlmStage
 from tempo.journal import EventType
 from tempo.requisition import review_ticket
 from tempo.watchdog import EventConsumer
-from eval import diagnose, harness
 from tests.test_cli import root, write
 from tests.test_daemon_composition import CoreRig
 from tests.test_providers import CONFIG, PythonProviderExec, claude_ok
@@ -50,12 +49,10 @@ async def composed(tmp_path, monkeypatch, *, config=WATCH_CONFIG):
     return rig, ctx, ticket
 
 
-async def call(rig, driver, ticket, *, surface='implement', attempt=0, expected=600,
+async def call(rig, driver, ticket, *, surface='implement', attempt=0,
                stuck=1200, sequence=None, stage=None):
     return await driver.run(stage or probe(surface), None, ticket=ticket, attempt=attempt,
-        workspace=rig.root, tier='medium', effort='low', stuck_budget=stuck,
-        expected_budget=expected, scope_fence=('tempo/thing.py',) if surface == 'implement' else (),
-        run_seq=sequence)
+        workspace=rig.root, tier='medium', effort='low', stuck_budget=stuck, run_seq=sequence)
 
 
 @pytest.mark.asyncio
@@ -73,39 +70,28 @@ async def test_every_production_driver_surface_is_watched(tmp_path, monkeypatch)
     monkeypatch.setattr(providers.CliAdapter, 'invoke', observed)
     rig.exec.reply = '{"text":"done"}'
     for surface in ('implement', 'review', 'rework', 'diagnose', 'retro'):
-        result = await call(rig, ctx.driver, ticket.stem, surface=surface,
-                            expected=ticket.expected_minutes * 60)
+        result = await call(rig, ctx.driver, ticket.stem, surface=surface)
         assert result.outcome == 'ok'
         req, detector, meter = seen[-1]
         assert req.surface == surface and req.ticket == ticket.stem
         assert req.worktree == (rig.root if surface == 'implement' else None)
-        assert detector.observe.fence == (('tempo/thing.py',) if surface == 'implement' else ())
-        assert detector.expected_seconds == ticket.expected_minutes * 60
         assert detector.stuck_seconds == 1200
-        assert meter.tools == ({"i1"} if surface == "implement" else set())
-        assert (result.cost.provider, result.cost.model, result.cost.usd) == (
-            ('codex', 'x-med', 1.5) if surface == 'implement' else ('claude', 'c-max', .42))
+        assert (result.provider, result.model) == (('codex', 'x-med') if surface == 'implement'
+                                                   else ('claude', 'c-max'))
+        completion = [e for e in rig.journal.read() if e.type == EventType.EFFECT_COMPLETION
+                      and e.key == f'llm/{ticket.stem}/0/{surface}/0/1']
+        assert completion[-1].body['served'] == {'provider': result.provider, 'model': result.model}
 
-    for surface, expected, stuck, boundary in (('author', 450, 900, 675), ('triage', 300, 600, 450)):
-        result = await call(rig, ctx.driver, None, surface=surface, expected='surface',
-                            stuck=stuck, sequence=7)
+    for surface, stuck in (('author', 900), ('triage', 600)):
+        result = await call(rig, ctx.driver, None, surface=surface, stuck=stuck, sequence=7)
         assert result.outcome == 'ok'
         req, detector, _ = seen[-1]
-        assert req.ticket is req.worktree is None and detector.observe.fence == ()
-        assert (detector.expected_seconds, detector.stuck_seconds) == (expected, stuck)
-        rig.time.advance(boundary - .01)
+        assert req.ticket is req.worktree is None
+        assert detector.stuck_seconds == stuck
+        rig.time.advance(stuck - .01)
         assert detector.region == 'healthy'
         rig.time.advance(.01)
-        assert detector.region == 'soft'
-        rig.time.advance(stuck - boundary)
         assert detector.region == 'stuck'
-
-    before = len(seen)
-    with pytest.raises(ValueError, match='expected budget'):
-        await call(rig, ctx.driver, ticket.stem, expected=None)
-    assert len(seen) == before
-    with pytest.raises(ValueError, match='ticket-owned'):
-        await call(rig, ctx.driver, ticket.stem, expected='surface')
 
     # Same invocation's retries and nested reviewed Author proposals share the detector.
     (tmp_path / 'context.txt').write_text('context')
@@ -113,15 +99,15 @@ async def test_every_production_driver_surface_is_watched(tmp_path, monkeypatch)
     async def nested(artifact, seq):
         d = ctx.driver.detector
         rig.exec.reply = '{"verdict":"approve","summary":"reviewed","findings":[]}'
-        verdict = await review_ticket(ctx.driver, repo=tmp_path, plan='', stem='candidate',
+        verdict = await review_ticket(ctx.driver, repo=tmp_path, stem='candidate',
             text=TICKET, specs_dir=SPECS, tier='medium', stem_slot='author', run_seq=8,
-            attempt=0, call_seq=seq, expected_budget=ctx.driver.detector.expected_seconds)
+            attempt=0, call_seq=seq)
         assert verdict.verdict == 'approve' and ctx.driver.detector is d
         calls.append(d)
         from tempo.gates import GateReport
         return GateReport(code='requisition_review', verdict='pass')
     rig.exec.reply = '{"text":"done"}'
-    assert (await call(rig, ctx.driver, None, surface='author', expected='surface', stuck=900,
+    assert (await call(rig, ctx.driver, None, surface='author', stuck=900,
                        sequence=8, stage=probe('author', nested))).outcome == 'ok'
     assert seen[-1][0].surface == 'requisition_review' and seen[-1][1] is calls[0]
     assert seen[-1][0].worktree is None
@@ -139,9 +125,9 @@ async def test_every_production_driver_surface_is_watched(tmp_path, monkeypatch)
     async def nested_rework(artifact, seq):
         parent = ctx.driver.detector
         rig.exec.reply = '{"verdict":"approve","summary":"reviewed","findings":[]}'
-        verdict = await review_ticket(ctx.driver, repo=tmp_path, plan='', stem='candidate',
+        verdict = await review_ticket(ctx.driver, repo=tmp_path, stem='candidate',
             text=TICKET, specs_dir=SPECS, tier='medium', stem_slot=ticket.stem, run_seq=0,
-            attempt=1, call_seq=seq, expected_budget=ticket.expected_minutes * 60)
+            attempt=1, call_seq=seq)
         assert verdict.verdict == 'approve' and ctx.driver.detector is parent
         assert seen[-1][0].surface == 'requisition_review' and seen[-1][1] is parent
         from tempo.gates import GateReport
@@ -150,176 +136,17 @@ async def test_every_production_driver_surface_is_watched(tmp_path, monkeypatch)
     assert (await call(rig, ctx.driver, ticket.stem, surface='rework', attempt=1,
                        stage=probe('rework', nested_rework))).outcome == 'ok'
 
-    # Check's separate requisition calls carry the seeding parent's budget authority.
+    # Separate requisition calls share one standalone detector.
     standalone = []
     for seq in (1, 2):
-        verdict = await review_ticket(ctx.driver, repo=tmp_path, plan='', stem='candidate',
+        verdict = await review_ticket(ctx.driver, repo=tmp_path, stem='candidate',
             text=TICKET, specs_dir=SPECS, tier='medium', stem_slot='seeding', run_seq=0,
-            attempt=0, call_seq=seq, expected_budget=ticket.expected_minutes * 60)
+            attempt=0, call_seq=seq)
         assert verdict.verdict == 'approve'
         standalone.append(ctx.driver.detector)
         assert seen[-1][0].surface == 'requisition_review' and seen[-1][0].worktree is None
-        assert ctx.driver.detector.expected_seconds == ticket.expected_minutes * 60
-        assert ctx.driver.detector.observe.fence == ()
         assert any(e.key == f'llm/seeding/0/requisition_review/0/{seq}' for e in rig.journal.read())
-    assert standalone[0] is standalone[1] and standalone[0].calls == 2
-    assert standalone[0].bases == {('claude', 'c-max'): .42}
-
-
-@pytest.mark.asyncio
-async def test_production_soft_band_notifies_once_without_kill(tmp_path, monkeypatch):
-    deliveries = []
-    class NotificationExec:
-        async def run(self, argv, **kwargs):
-            assert kwargs['cwd'] == tmp_path
-            assert 'CLAUDE_KEY' not in kwargs['env'] and 'CODEX_KEY' not in kwargs['env']
-            deliveries.append(argv)
-            return 0, 'delivered', ''
-
-    monkeypatch.setattr(cli, 'SubprocessExec', NotificationExec)
-    config = WATCH_CONFIG.replace('limits: {concurrency: 1}',
-                                 'limits: {concurrency: 1, est_cost_per_call_usd: 0.1}').replace(
-                                     '[{provider: codex}, {provider: claude}]', '[{provider: claude}]') + 'notify: [notify]\n'
-    rig, ctx, ticket = await composed(tmp_path, monkeypatch, config=config)
-    invoke = providers.CliAdapter.invoke
-    detectors = []
-    count = 0
-
-    async def spinning(self, req, model, **kwargs):
-        nonlocal count
-        count += 1
-        d = kwargs['consumer'].detector
-        detectors.append(d)
-        rig.exec.reply = 'invalid' if count % 3 else '{"text":"done"}'
-        if count % 3 == 1:
-            rig.time.advance(90)
-        if count % 3 == 2:
-            (tmp_path / 'tempo/thing.py').write_text(str(count))
-        return await invoke(self, req, model, **kwargs)
-
-    monkeypatch.setattr(providers.CliAdapter, 'invoke', spinning)
-    killed = []
-    monkeypatch.setattr(ctx.driver.llm, 'abort_current', lambda: killed.append('killed'))
-    for seq in (0, 1):
-        result = await call(rig, ctx.driver, ticket.stem, surface='implement', expected=60, stuck=180,
-                            attempt=seq)
-        assert result.outcome == 'ok' and result.cost.attempts == 3
-        batch = detectors[seq * 3:(seq + 1) * 3]
-        assert batch[0] is batch[1] is batch[2] and batch[0].warned
-        keys = [e.key for e in rig.journal.read() if e.key == f'notify/work/spiral-warning/{seq}']
-        assert keys == [f'notify/work/spiral-warning/{seq}'] * 2
-        assert batch[0].progress_epoch == 1
-        repeated = await call(rig, ctx.driver, ticket.stem, surface='implement', expected=60,
-                              stuck=180, attempt=seq)
-        assert repeated.cost.usd == result.cost.usd and repeated.cost.provider == result.cost.provider
-        assert ctx.driver.detector is batch[0]
-        assert len(deliveries) == seq + 1
-        rig.transition(ticket.stem, 'gate_failed')
-    assert detectors[0] is not detectors[3] and len(deliveries) == 2 and killed == []
-    for seq in (0, 1):
-        events = [e for e in rig.journal.read() if e.key == f'notify/work/spiral-warning/{seq}']
-        assert [e.type for e in events] == [EventType.EFFECT_INTENT, EventType.EFFECT_COMPLETION]
-    assert not any('stuck-past-threshold' in (e.key or '') for e in rig.journal.read())
-
-
-@pytest.mark.asyncio
-async def test_eval_owned_budgets_preserve_synthetic_identities(tmp_path, monkeypatch):
-    rig, ctx, _ = await composed(tmp_path, monkeypatch)
-    invoke = providers.CliAdapter.invoke
-    observed = []
-    async def events(self, req, model, **kwargs):
-        d = kwargs['consumer'].detector
-        observed.append((req, d))
-        rig.exec.reply = ('{"verdict":"approve","summary":"approved","findings":[]}'
-                         if req.surface == 'review' else '{"verdict":"escalate","lessons":["Try stronger reasoning."]}')
-        if len(observed) == 1:
-            rig.exec.reply = 'invalid JSON'
-        return await invoke(self, req, model, **kwargs)
-    monkeypatch.setattr(providers.CliAdapter, 'invoke', events)
-    fixture = next(f for f in harness.load_fixtures() if f.expected.defect_class == 'none')
-    assert '## Time budget' not in fixture.ticket
-    for attempt in (1, 2):
-        await harness.run_baseline(config=ctx.config, driver=ctx.driver, journal=rig.journal,
-            fixtures=[fixture], workspace=tmp_path)
-        req, d = observed[-1]
-        assert req.ticket == f'baseline-{fixture.name}' and req.worktree is None
-        assert (d.expected_seconds, d.stuck_seconds, d.observe.fence) == (600, 1200, ())
-        assert any(e.key == f'llm/baseline-{fixture.name}/0/review/{attempt}/1' for e in rig.journal.read())
-        assert rig.checkout.config.state_dir / f'spools/baseline-{fixture.name}/{attempt}/review/call-01/prompt.md' in rig.fs.files
-        assert any('/providers/' in str(p) and f'/baseline-{fixture.name}/' in str(p)
-                   for p in rig.fs.files)
-        if attempt == 1:
-            assert observed[0][1] is observed[1][1]
-            assert any(e.key == f'llm/baseline-{fixture.name}/0/review/1/2' for e in rig.journal.read())
-        rig.time.advance(899.99)
-        assert d.region == 'healthy'
-        rig.time.advance(.01)
-        assert d.region == 'soft'
-        rig.time.advance(300)
-        assert d.region == 'stuck'
-
-    cases = diagnose.load_cases()[:2]
-    assert all('## Time budget' not in case.ticket for case in cases)
-    # The actual eval's second call sees the deadline clipped to 400 seconds.
-    progress_calls = []
-    def progress(line):
-        progress_calls.append(line)
-        if len(progress_calls) == 1:
-            rig.time.advance(2000)
-    report = await diagnose.run_eval(config=ctx.config, driver=ctx.driver, journal=rig.journal,
-        cases=cases, clock=rig.time, report_path=tmp_path / 'diagnosis-report.json', progress=progress)
-    assert len(report.cases) == 2
-    for (req, d), case, budget in zip(observed[-2:], cases, (600, 400)):
-        assert req.ticket == f'diagnose-eval-{case.name}' and req.worktree is None
-        assert (d.expected_seconds, d.stuck_seconds, d.observe.fence) == (budget / 2, budget, ())
-        assert any(e.key == f'llm/diagnose-eval-{case.name}/0/diagnose/1/1' for e in rig.journal.read())
-        assert rig.checkout.config.state_dir / f'spools/diagnose-eval-{case.name}/1/diagnose/call-01/prompt.md' in rig.fs.files
-
-    # Actual eval entry points keep their unchanged hard timeout even for silent calibration calls.
-    for mode, budget in (('baseline', 1200), ('diagnosis', 400)):
-        entered, cleaned = asyncio.Event(), asyncio.Event()
-        target = f'baseline-{fixture.name}' if mode == 'baseline' else f'diagnose-eval-{cases[1].name}'
-        async def hung(self, req, model, **kwargs):
-            if req.ticket != target:
-                return await events(self, req, model, **kwargs)
-            observed.append((req, kwargs['consumer'].detector))
-            kwargs['consumer'].consume({'type': 'assistant', 'message': {'id': 'message', 'content': [
-                {'type': 'tool_use', 'id': 'hung-tool', 'name': 'Read', 'input': {}}]}})
-            entered.set()
-            try:
-                await asyncio.Event().wait()
-            finally:
-                cleaned.set()
-        monkeypatch.setattr(providers.CliAdapter, 'invoke', hung)
-        if mode == 'baseline':
-            task = asyncio.create_task(harness.run_baseline(config=ctx.config, driver=ctx.driver,
-                journal=rig.journal, fixtures=[fixture], workspace=tmp_path))
-        else:
-            progress_calls.clear()
-            task = asyncio.create_task(diagnose.run_eval(config=ctx.config, driver=ctx.driver,
-                journal=rig.journal, cases=cases, clock=rig.time,
-                report_path=tmp_path / 'diagnosis-timeout-report.json', progress=progress))
-        await asyncio.wait_for(entered.wait(), 5)
-        req, d = observed[-1]
-        assert req.ticket == target and req.worktree is None and d.observe.fence == ()
-        assert (d.expected_seconds, d.stuck_seconds) == (budget / 2, budget)
-        assert d.call.tools == {'hung-tool'}
-        rig.time.advance(budget * .75 - .01)
-        await turn()
-        assert d.region == 'healthy' and not task.done()
-        rig.time.advance(.01)
-        await turn()
-        assert d.region == 'soft' and not task.done()
-        rig.time.advance(budget / 4)
-        result = await asyncio.wait_for(task, 5)
-        assert cleaned.is_set() and d.region == 'stuck'
-        if mode == 'baseline':
-            assert result['scores']['unscored'] == [{'fixture': fixture.name, 'outcome': 'timeout'}]
-            key = f'llm/{target}/0/review/3/1'
-        else:
-            assert result.cases[1].outcome == 'timeout'
-            key = f'llm/{target}/0/diagnose/2/1'
-        assert [e.type for e in rig.journal.read() if e.key == key] == [EventType.EFFECT_INTENT]
+    assert standalone[0] is standalone[1]
 
 
 @pytest.mark.asyncio
@@ -378,7 +205,6 @@ async def test_production_hard_timeout_group_kill_is_harvested(root, monkeypatch
         reader, writer = connection.result()
         ctx = rig.owner.writers['work'].ctx
         assert ctx.driver.llm._exec is ctx.exec_ is rig.exec
-        assert ctx.driver.detector.call.tools == {'tool'}
         rig.time.advance(120)
         await until(rig, lambda: bool(harvested) and not ctx.worktree('work').exists())
         assert await asyncio.wait_for(reader.read(), 5) == b''

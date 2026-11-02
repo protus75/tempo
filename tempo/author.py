@@ -15,7 +15,6 @@ from tempo.git import GitError
 from tempo.artifacts import Finding
 from tempo.inbox import CAPS, bounded, report_data
 from tempo.journal import EventType
-from tempo.baseline import resolve_baseline
 from tempo.policy import policy_row, start_state
 from tempo.requisition import RequisitionVerdict, review_ticket
 from tempo.runner import Checkout, SPECS_DIR
@@ -231,21 +230,18 @@ async def author(checkout: Checkout, driver: Driver, box: Box, message: Message,
         nonlocal reviewed, reviewed_text, reviewed_state
         assert isinstance(artifact, AuthorReply)
         if author_gate.check(artifact, checkout.repo).verdict == "fail":
-            # Grammar-invalid candidates never spend a requisition review call.
+            # Grammar-invalid candidates never reach a requisition review call.
             return GateReport(code="requisition_review", verdict="pass")
         provisional = stamp(stamp(artifact.ticket, "source", f"box:{message.message_class}"), "state", "draft")
         parsed = validate_ticket(artifact.stem, provisional, checkout.repo)
         state = start_state(checkout.config, row=row, fence=parsed.scope_fence,
                             gate_bypass=parsed.frontmatter.gate_bypass,
-                            go=resolve_baseline(checkout.config, checkout.journal.read(), specs_dir=SPECS_DIR).binds,
                             reopen=message.reopen)
         text = stamp(provisional, "state", state)
         reviewed = await review_ticket(
-            driver, repo=checkout.repo, plan=(checkout.repo / "TEMPO_PLAN.md").read_text(),
-            stem=artifact.stem, text=text, specs_dir=SPECS_DIR,
+            driver, repo=checkout.repo, stem=artifact.stem, text=text, specs_dir=SPECS_DIR,
             tier=checkout.config.routing_default_tier, stem_slot="author", run_seq=pass_no,
-            attempt=message.seq, call_seq=call_seq,
-         expected_budget=AUTHOR_STUCK_S / 2)
+            attempt=message.seq, call_seq=call_seq)
         reviewed_text = text
         reviewed_state = state
         findings = reviewed.findings
@@ -263,8 +259,7 @@ async def author(checkout: Checkout, driver: Driver, box: Box, message: Message,
                      render=render_author, review=review_candidate,
                      terminal_findings=frozenset({"requisition_rma"})), None,
             ticket=None, run_seq=pass_no, attempt=message.seq, workspace=checkout.repo,
-            tier=checkout.config.routing_default_tier, effort=spec.meta.effort, stuck_budget=AUTHOR_STUCK_S,
-            expected_budget='surface', scope_fence=())
+            tier=checkout.config.routing_default_tier, effort=spec.meta.effort, stuck_budget=AUTHOR_STUCK_S)
     except BaseException:
         author_gate.cleanup()
         raise

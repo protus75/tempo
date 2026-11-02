@@ -1,4 +1,4 @@
-"""The `run <stem>` scaffold verb (TEMPO_PLAN.md sections 11.2, 18, 19.P1): one ticket through intake, the
+"""The `run <stem>` scaffold verb (TEMPO_PLAN.md sections 11.2, 18): one ticket through intake, the
 single-writer lockfile, and the stage-dispatch seam, all in the one process holding the lock.
 
 Exit codes (section 18): 0 merged, 1 a non-ok ticket terminal, 2 an engine-plane refusal.
@@ -8,6 +8,7 @@ import asyncio
 import sys
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, assert_never, cast
 
@@ -19,24 +20,22 @@ import yaml
 from tempo.artifacts import Finding, Harvest, StageResult
 from tempo.box import BOX_DIR
 from tempo.storm import arrival_id
-from tempo.caps import capability, consume, lineage, next_rung, remaining, spent, spent_reason
+from tempo.caps import capability, consume, next_rung, spent, spent_reason
 from tempo.config import Config, ConfigSnapshot, snapshot_config
 from tempo.driver import Driver
 from tempo.effects import Effects
-from tempo.git import Git, GitError
-from tempo.hardening import ROUND_SIGNAL, hardener_round, open_round, rounds
+from tempo.git import Git
 from tempo.journal import TERMINAL_STATES, Dispatch as JournalDispatch, Event, EventType, Journal, dispatch_of
 from tempo.llm import LLM
 from tempo.lockfile import Lockfile
-from tempo.merge import Held, compose_pipeline, merge
+from tempo.merge import compose_pipeline, merge
 from tempo.providers import ProviderLLM
 from tempo.reconcile import reconcile
 from tempo.seams import Clock, FileSystem, GroupExec, Sleep
-from tempo.specs import registry_rows, unit_sha
 from tempo.stages import (DiagnosisMaterial, StageContext, diagnose, lift_outbox,
                           run_stages, write_diagnosis)
 from tempo.status import last_states, reject_queue
-from tempo.tickets import (INTAKE_SIGNAL, PLAN_FILE, TICKETS_DIR, Ticket, TicketInvalid, intake,
+from tempo.tickets import (INTAKE_SIGNAL, Ticket, TicketInvalid, intake,
                            parse_ticket, split_frontmatter, stamp, stem_findings, ticket_path, validate_ticket)
 
 EXIT_MERGED = 0
@@ -47,7 +46,6 @@ EXIT_REFUSED = 2
 SPECS_DIR = Path(__file__).resolve().parent.parent / "specs"
 HARVEST_TAIL_CHARS = 4_000
 IDENTICAL_K = 3
-SPEC_GAP_HOLD: JournalDispatch = "spec_gap_hold"
 
 # The stage seam: drives the validated ticket through the stages and merge, journals the run's single
 # terminal transition (section 11), and returns that terminal state.
@@ -136,7 +134,7 @@ def bind(checkout: Checkout, llm: LLM) -> Dispatch:
                        git=checkout.git, fs=checkout.fs, driver=driver, specs_dir=SPECS_DIR)
 
     def escalate(event: Event) -> None:
-        # Queue signals are already journaled; notification transport lands in Phase 4.
+        # Queue signals are already journaled; the CLI run path has no notification transport.
         return None
 
     from tempo.daemon import TicketWriter
@@ -160,8 +158,6 @@ async def drive(ctx: StageContext, ticket: Ticket, *, admission=None, consume_ha
 
         stage, result = "merge", await (admission(ticket, attempt=run.attempt) if admission is not None
                                        else merge(ctx, ticket, attempt=run.attempt))
-        if isinstance(result, Held):
-            return "running"
         if isinstance(result, ConflictHandoff):
             assert consume_handoff is not None
             return await consume_handoff(ticket, result, attempt=run.attempt)
@@ -169,8 +165,7 @@ async def drive(ctx: StageContext, ticket: Ticket, *, admission=None, consume_ha
             return "merged"
     if result.outcome != "already_satisfied":
         await harvest_failure(ctx, ticket, attempt=run.attempt, stage=stage, outcome=result.outcome,
-                              findings=result.findings, results=(*run.results.values(),)
-                              + ((result,) if stage == "merge" else ()))
+                              findings=result.findings)
     drought = getattr(result, 'provider_drought', None)
     quota = any(f.code == 'quota_exhausted' for f in result.findings)
     if drought is not None or quota:
@@ -179,23 +174,12 @@ async def drive(ctx: StageContext, ticket: Ticket, *, admission=None, consume_ha
     if result.outcome in {"infra_error", "timeout"}:
         ticket_sha = await ctx.git.rev_parse(ctx.repo, f"HEAD:{ticket_path(ticket.stem)}")
         consume(ctx.driver.journal, ticket.stem, "infra", ticket_sha)
-    gaps: dict[str, list[str]] = {}
-    if ((stage == "check" and result.outcome == "gate_failed")
-            or (stage == "implement" and result.outcome == "premise_failed")):
-        for finding in result.findings:
-            if finding.kind == "spec_gap" and finding.unit is not None:
-                gaps.setdefault(finding.unit, []).append(finding.message)
-    if gaps and hardener_round(ctx.driver.journal.read(), ticket.stem) is None:
-        await hold_on_hardening(ctx, ticket, gaps, attempt=run.attempt, to=result.outcome, stage=stage)
-        if ctx.worktree(ticket.stem).exists():
-            await ctx.git.worktree_remove(ctx.repo, ctx.worktree(ticket.stem))
-        return result.outcome
     over_bound = result.outcome == "premise_failed" and any(
         f.code == "render_over_bound" for f in result.findings)
     if result.outcome == "premise_failed" and not over_bound:
         ticket_sha = await ctx.git.rev_parse(ctx.repo, f"HEAD:{ticket_path(ticket.stem)}")
         consume(ctx.driver.journal, ticket.stem, "premise_bounce", ticket_sha)
-    diagnosed = result.outcome != "budget_exceeded" and not over_bound
+    diagnosed = not over_bound
     if (diagnosed and isinstance(ctx.driver.llm, ProviderLLM)
             and not spent(ctx.config.caps, ctx.driver.journal.read(), ticket.stem)
             and ctx.worktree(ticket.stem).exists()):
@@ -249,12 +233,12 @@ async def drive(ctx: StageContext, ticket: Ticket, *, admission=None, consume_ha
 
 
 async def harvest_failure(ctx: StageContext, ticket: Ticket, *, attempt: int, stage: str,
-                          outcome: str, findings: list[Finding], results: tuple[StageResult, ...]) -> None:
+                          outcome: str, findings: list[Finding]) -> None:
     """A failed harvest never interrupts failure dispatch or the producing terminal."""
     if ctx.worktree(ticket.stem).exists():
         try:
             await harvest(ctx, ticket.stem, attempt=attempt, stage=stage, terminal=outcome,
-                          findings=findings, results=results)
+                          findings=findings, wall_seconds=run_wall_seconds(ctx, ticket.stem))
         except Exception as exc:
             ctx.driver.journal.append(EventType.SIGNAL,
                                       {"signal": "harvest_failed", "error": ctx.driver.redactor.scrub(f"{type(exc).__name__}: {exc}")},
@@ -295,7 +279,8 @@ async def failure_terminal(ctx: StageContext, ticket: Ticket, *, outcome: str, s
             if ctx.worktree(ticket.stem).exists():
                 try:
                     await harvest(ctx, ticket.stem, attempt=attempt, stage=stage, terminal=outcome,
-                                  findings=[*findings, *extra], results=(reworked,), kind="harvest-rework")
+                                  findings=[*findings, *extra],
+                                  wall_seconds=run_wall_seconds(ctx, ticket.stem), kind="harvest-rework")
                 except Exception:
                     storm_producer(root=ctx.config.state_dir / BOX_DIR, fs=ctx.fs,
                                journal=ctx.driver.journal, clock=ctx.driver.clock).enqueue(
@@ -314,7 +299,7 @@ async def failure_terminal(ctx: StageContext, ticket: Ticket, *, outcome: str, s
         match prior_dispatch := dispatch_of(previous[-1]) if previous else None:
             case "retry":
                 identical = verdict == "retry" and previous[-1].get("reason") == reason
-            case "escalate" | "reject_queue" | "spec_gap_hold" | None:
+            case "escalate" | "reject_queue" | None:
                 identical = False
             case _:
                 assert_never(prior_dispatch)
@@ -339,7 +324,7 @@ async def failure_terminal(ctx: StageContext, ticket: Ticket, *, outcome: str, s
     match terminal_dispatch := dispatch_of(terminal):
         case "reject_queue":
             routed = True
-        case "retry" | "escalate" | "spec_gap_hold" | None:
+        case "retry" | "escalate" | None:
             routed = bool(spent(ctx.config.caps, history, ticket.stem))
         case _:
             assert_never(terminal_dispatch)
@@ -355,111 +340,16 @@ async def failure_terminal(ctx: StageContext, ticket: Ticket, *, outcome: str, s
     return "rejected" if split else outcome
 
 
-async def hold_on_hardening(ctx: StageContext, ticket: Ticket, gaps: dict[str, list[str]], *, attempt: int,
-                            to: str = "gate_failed", stage: str | None = "check") -> None:
-    """Join the engine's open round or file one covering this terminal's gapped units."""
-    history = ctx.driver.journal.read()
-    plan = (ctx.repo / PLAN_FILE).read_text()
-    plan_units = {uid: unit_sha(plan, uid) for uid in sorted(gaps)}
-    # Round-less Reject terminals must not erase the last round's unchanged coverage.
-    prior = next((e.body for e in reversed(lineage(history, ticket.stem))
-                  if e.type == EventType.STATE_TRANSITION and e.ticket == ticket.stem
-                  and e.body.get("to") in TERMINAL_STATES and "round" in e.body
-                  and "plan_units" in e.body), None)
-    covered = next((r.units for r in rounds(history) if prior is not None and r.number == prior["round"]), {})
-    unchanged = {uid for uid, sha in (prior["plan_units"] if prior else {}).items()
-                 if uid in covered and unit_sha(plan, uid) == sha}
-    reject_dispatch: JournalDispatch = "reject_queue"
-    if set(gaps) <= unchanged:
-        ctx.driver.journal.append(EventType.STATE_TRANSITION,
-                                  {"to": to, "stage": stage, "reason": "spec_gap_unresolved",
-                                   "dispatch": reject_dispatch, "routed": "reject_queue",
-                                   "plan_units": plan_units}, ticket=ticket.stem)
-        return
-    if remaining(ctx.config.caps, history, ticket.stem, "hardening") <= 0:
-        ctx.driver.journal.append(EventType.STATE_TRANSITION,
-                                  {"to": to, "stage": stage, "reason": "hardening cap spent",
-                                   "dispatch": reject_dispatch, "routed": "reject_queue",
-                                   "plan_units": plan_units}, ticket=ticket.stem)
-        return
-    ticket_sha = await ctx.git.rev_parse(ctx.repo, f"HEAD:{ticket_path(ticket.stem)}")
-    consume(ctx.driver.journal, ticket.stem, "hardening", ticket_sha)
-    record = open_round(history)
-    number = record.number if record is not None else len(rounds(history)) + 1
-    if record is None:
-        await file_hardening(ctx, ticket, {uid: facts for uid, facts in gaps.items() if uid not in unchanged},
-                             number, plan=plan)
-    ctx.driver.journal.append(EventType.STATE_TRANSITION,
-                              {"to": to, "stage": stage, "reason": "spec_gap", "dispatch": SPEC_GAP_HOLD,
-                               "round": number, "plan_units": plan_units}, ticket=ticket.stem)
-
-
-def hardening_text(ticket: Ticket, gaps: dict[str, list[str]], *, plan: str) -> str:
-    rows = registry_rows(plan)
-    tier = "high" if any(rows[uid.rsplit(".", 1)[1]][1].get("deep") for uid in gaps) else "medium"
-    contract = ["19.L"]
-    units = []
-    criteria = []
-    for uid, facts in sorted(gaps.items()):
-        phase, row_spec = rows[uid.rsplit(".", 1)[1]]
-        units.append(uid)
-        contract.append(f"19.P{phase}")
-        if unit_sha(plan, uid) != "absent":
-            contract.append(uid)
-        contract.extend(f"section {c}" if not str(c).startswith("19.") else str(c)
-                        for c in row_spec.get("cite", []) or [])
-        for fact in facts:
-            criteria.append(f"{len(criteria) + 2}. `{PLAN_FILE}` unit `{uid}` states the needed fact,"
-                            " consistent with merged code. Gap fact (untrusted data):\n"
-                            f"> {' '.join(fact.split())}")
-    return (f"---\nstate: confirmed\nsource: seed\npriority: {ticket.frontmatter.priority}\nkind: chore\n"
-            f"agent_tier: {tier}\nagent_effort: {tier}\n---\n\n"
-            "## Depends on\nnone\n\n## Context\n- tests/test_plan_lint.py\n\n"
-            "## Plan contract\n" + "".join(f"- {c}\n" for c in dict.fromkeys(contract)) + "\n"
-            f"## Goal / Why\n`{PLAN_FILE}` states every fact `{ticket.stem}` needs from its gapped units.\n\n"
-            "## Scope in / Scope out\n- In: the fenced entry units, with their Owner, Records, Observable,"
-            " and Tests parts; insert a missing unit after its phase's last unit.\n"
-            "- Out: every other plan byte, code, and tickets.\n\n"
-            "## Scope fence\n" + "".join(f"- {PLAN_FILE}#{uid}\n" for uid in units) + "\n"
-            "## Acceptance criteria\n1. `uv run pytest tests/test_plan_lint.py` exits 0.\n"
-            + "\n".join(criteria) + "\n\n"
-            "## Verification\n```\nuv run pytest tests/test_plan_lint.py\n```\n\n"
-            "## Definition of rejected\nStating a fact needs plan text outside the fenced units,"
-            " or contradicts merged code.\n\n## Time budget\n- expected: 30m\n- stuck: 90m\n")
-
-
-async def file_hardening(ctx: StageContext, ticket: Ticket, gaps: dict[str, list[str]], n: int, *, plan: str) -> str:
-    """Commit once per round, then publish its identity from the durable Effect result."""
-    async def commit() -> dict:
-        stem = f"plan-gap-{n}"
-        rel = ticket_path(stem)
-        units = {uid: unit_sha(plan, uid) for uid in sorted(gaps)}
-        facts = [{"unit": uid, "message": fact}
-                 for uid, messages in sorted(gaps.items()) for fact in messages]
-        ctx.fs.write(ctx.repo / rel, hardening_text(ticket, gaps, plan=plan).encode())
-        await ctx.git.add(ctx.repo, [rel])
-        await ctx.git.commit(ctx.repo, f"tempo({ticket.stem}): hardening round {n}", only=[rel])
-        return {"commit": await ctx.git.rev_parse(ctx.repo, "HEAD"), "ticket": stem,
-                "round": n, "units": units, "filed_by": ticket.stem, "gaps": facts}
-
-    committed = await ctx.driver.effects.run(commit, key=f"ticket-plane/hardening/{n}", ticket=ticket.stem)
-    stem = committed["ticket"]
-    history = ctx.driver.journal.read()
-    if not any(e.type == EventType.SIGNAL and e.ticket == stem and e.body.get("signal") == INTAKE_SIGNAL
-               and e.body.get("commit") == committed["commit"] for e in history):
-        ctx.driver.journal.append(EventType.SIGNAL,
-                                  {"signal": INTAKE_SIGNAL, "source": "seed", "state": "confirmed",
-                                   "new": True, "commit": committed["commit"]}, ticket=stem)
-    if not any(r.number == committed["round"] for r in rounds(history)):
-        ctx.driver.journal.append(EventType.SIGNAL,
-                                  {"signal": ROUND_SIGNAL, **{k: committed[k] for k in
-                                   ("round", "units", "filed_by", "gaps")}}, ticket=stem)
-    return stem
+def run_wall_seconds(ctx: StageContext, stem: str) -> float | None:
+    """Wall-clock seconds since the stem's latest `running` transition; None when it never ran."""
+    started = next((e.ts for e in reversed(ctx.driver.journal.read()) if e.type == EventType.STATE_TRANSITION
+                    and e.ticket == stem and e.body.get("to") == "running"), None)
+    return None if started is None else (ctx.driver.clock() - datetime.fromisoformat(started)).total_seconds()
 
 
 async def harvest(
     ctx: StageContext, stem: str, *, attempt: int, stage: str | None, terminal: str,
-    findings: list[Finding], results: tuple[StageResult, ...], kind: str = "harvest",
+    findings: list[Finding], wall_seconds: float | None, kind: str = "harvest",
 ) -> None:
     """Extract the allowlisted failed-run record and lift it through the one outbox lane."""
     spool = ctx.config.state_dir / "spools" / stem / str(attempt)
@@ -478,8 +368,7 @@ async def harvest(
         attempt=attempt, stage=stage, terminal=terminal, findings=findings, reason=reason,
         diff_stat=await ctx.git.diff_stat(ctx.repo, "main", stem),
         stage_log_tail=stage_log_tail, events_tail=events_tail,
-        wall_seconds=sum(r.cost.seconds for r in results) if results else None,
-        usd=sum(r.cost.usd for r in results) if results else None,
+        wall_seconds=wall_seconds,
         run_record=record if (ctx.repo / record).is_file() else None,
     )
     path = ctx.worktree(stem) / "tickets" / stem / "attempts" / str(attempt) / "harvest.json"
@@ -495,7 +384,7 @@ async def harvest_orphan(checkout: Checkout, stem: str, attempt: int) -> None:
     driver.effects = Effects(checkout.journal)
     ctx = StageContext(repo=checkout.repo, config=checkout.config, env=checkout.env, exec_=checkout.exec_,
                        git=checkout.git, fs=checkout.fs, driver=driver, specs_dir=SPECS_DIR)
-    await harvest(ctx, stem, attempt=attempt, stage=None, terminal="abandoned", findings=[], results=())
+    await harvest(ctx, stem, attempt=attempt, stage=None, terminal="abandoned", findings=[], wall_seconds=None)
 
 
 async def run_ticket(stem: str, checkout: Checkout, dispatch: Dispatch) -> int:
@@ -576,18 +465,8 @@ async def verdict(stem: str, checkout: Checkout, *, kill: bool) -> int:
                            and e.body.get("signal") == "reject_verdict" and e.body.get("verdict") == "keep"
                            and e.body.get("actor") == "operator"), None)
         if prior_keep is not None and prior_keep.body.get("ticket_sha") == ticket_sha:
-            terminal = next((e.body for e in reversed(history) if e.type == EventType.STATE_TRANSITION
-                             and e.ticket == stem and e.body.get("to") in TERMINAL_STATES), {})
-            changed = False
-            if "plan_units" in terminal:
-                try:
-                    plan = await checkout.git._run(checkout.repo, "show", f"HEAD:{PLAN_FILE}")
-                except GitError:
-                    plan = ""
-                changed = any(unit_sha(plan, uid) != sha for uid, sha in terminal["plan_units"].items())
-            if not changed:
-                raise Refusal(f"{stem} was already kept at this ticket content",
-                              "edit the ticket (or fix the plan and regenerate it) before re-enqueueing")
+            raise Refusal(f"{stem} was already kept at this ticket content",
+                          "edit the ticket before re-enqueueing")
         if stem not in reject_queue(history):
             raise Refusal(f"{stem} is neither a draft nor in the Reject queue",
                           "run `status` to list the Reject queue")
@@ -662,8 +541,7 @@ async def _dead_dependents(dead: str, checkout: Checkout) -> None:
         stem = path.parent.name
         if stem == dead or _ticket_state(path) != "confirmed" or last.get(stem) in {"merged", "already_satisfied", "rejected"}:
             continue
-        ticket = parse_ticket(stem, path.read_text(), checkout.repo,
-                              plan=(checkout.repo / "TEMPO_PLAN.md").read_text())
+        ticket = parse_ticket(stem, path.read_text(), checkout.repo)
         for dependency in sorted(set(ticket.depends) & deaths):
             if not any(e.type == EventType.SIGNAL and e.ticket == stem
                    and e.body.get("signal") == "dead_dependency" and e.body.get("dead") == dependency

@@ -4,7 +4,7 @@ import re
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 
-from tempo.caps import DECLARED_CAPS
+from tempo.caps import CAPS
 from tempo.journal import Event, EventType, Journal, TERMINAL_STATES
 
 
@@ -34,7 +34,7 @@ class _Run:
     completions: set[str | None] = field(default_factory=set)
 
 
-def audit(segments: Iterable[tuple[Event, ...]], caps: Collection[str] = DECLARED_CAPS) -> list[Violation]:
+def audit(segments: Iterable[tuple[Event, ...]], caps: Collection[str] = CAPS) -> list[Violation]:
     """Fold the journal's ordered segments, returning every invariant violation."""
     violations: list[Violation] = []
     runs: dict[str, _Run] = {}
@@ -86,9 +86,7 @@ def audit(segments: Iterable[tuple[Event, ...]], caps: Collection[str] = DECLARE
 
                         if state == "merged":
                             commit = event.body.get("commit")
-                            valid_commit = commit is None or (
-                                isinstance(commit, str) and bool(_COMMIT.fullmatch(commit))
-                            )
+                            valid_commit = isinstance(commit, str) and bool(_COMMIT.fullmatch(commit))
                             if "commit" not in event.body:
                                 violations.append(Violation(
                                     "merged_carries_commit", event.ticket,
@@ -117,6 +115,6 @@ def audit(segments: Iterable[tuple[Event, ...]], caps: Collection[str] = DECLARE
     return violations
 
 
-def audit_journal(journal: Journal, caps: Collection[str] = DECLARED_CAPS) -> list[Violation]:
+def audit_journal(journal: Journal, caps: Collection[str] = CAPS) -> list[Violation]:
     """Audit through the journal's one parser."""
     return audit(journal.read_segments(), caps)

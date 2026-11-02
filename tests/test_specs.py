@@ -7,145 +7,15 @@ from tempo.specs import (
     QUOTED_DELIM,
     RENDER_BOUND_CHARS,
     REQ_RENDER_HEADROOM,
-    PlanContractError,
     RenderOverBound,
     SpecError,
     data_close,
     data_open,
-    entry_unit_gap,
-    hardenable_units,
     lint_spec,
     load_spec,
     render,
-    required_units,
-    resolve_plan_contract,
     validate_data_blocks,
 )
-
-
-def test_hardenable_units_are_own_row_plus_cited_entry_units():
-    plan = """### 19.P3 Phase 3
-```yaml
-# BEGIN_REGISTRY_P3
-seeds:
-  own: {}
-  cited: {}
-  exit: {exit: true}
-# END_REGISTRY_P3
-```
-### 19.P3.cited Cited
-- **Owner:** o
-- **Records:** r
-- **Observable:** b
-- **Tests:** t
-### 19.P3.orphan Orphan
-"""
-    cites = ("19.P3.cited", "19.P3.own", "19.P3.cited", "19.P3.exit", "19.P3.orphan", "19.P4.cited", "19.L")
-    assert hardenable_units(plan, "own", cites) == ("19.P3.own", "19.P3.cited")
-    assert hardenable_units(plan, "exit", cites) == ("19.P3.cited", "19.P3.own")
-    assert hardenable_units(plan, "unregistered", ()) == ()
-    assert entry_unit_gap(plan, "19.P3.own") == "entry unit 19.P3.own is missing"
-    assert entry_unit_gap(plan, "19.P3.cited") is None
-    assert "Tests" in entry_unit_gap(plan.replace("- **Tests:** t", "- **Tests:**"), "19.P3.cited")
-
-
-def test_phase_citing_ticket_hardens_every_row_of_its_phase():
-    from pydantic import ValidationError
-    from tempo.requisition import RequisitionReply
-
-    plan = """### 19.P3 Phase 3
-```yaml
-# BEGIN_REGISTRY_P3
-seeds:
-  payload: {}
-  own: {}
-  present: {}
-  lookahead: {}
-  exit: {exit: true}
-# END_REGISTRY_P3
-```
-### 19.P3.present Present
-- **Owner:** o
-- **Records:** r
-- **Observable:** b
-- **Tests:** t
-### 19.P4 Phase 4
-```yaml
-# BEGIN_REGISTRY_P4
-seeds:
-  other: {}
-  other-exit: {exit: true}
-# END_REGISTRY_P4
-```
-"""
-    cites = ("19.P3.present", "19.P3", "19.P3.own", "19.P3", "19.P3.exit", "19.L")
-    units = hardenable_units(plan, "own", iter(cites))
-    assert units == ("19.P3.own", "19.P3.present", "19.P3.payload", "19.P3.lookahead")
-    assert hardenable_units(plan, "exit", ("19.P3",)) == (
-        "19.P3.payload", "19.P3.own", "19.P3.present", "19.P3.lookahead")
-    assert hardenable_units(plan, "unregistered", ("19.P4", "19.P3")) == (
-        "19.P4.other", "19.P3.payload", "19.P3.own", "19.P3.present", "19.P3.lookahead")
-    without_phase = hardenable_units(plan, "own", ("19.P3.present", "19.L"))
-    assert without_phase == ("19.P3.own", "19.P3.present")
-    assert hardenable_units(plan, "unregistered", ("19.L",)) == ()
-    for uid in ("19.P3.payload", "19.P3.lookahead"):
-        assert entry_unit_gap(plan, uid) == f"entry unit {uid} is missing"
-        reply = {"verdict": "snag", "summary": "Missing phase entry", "findings": [{
-            "code": "plan_entry", "message": "Entry is missing", "paved_road": "State the entry contract",
-            "kind": "spec_gap", "unit": uid,
-        }]}
-        assert RequisitionReply.model_validate(reply, context={"hardenable_units": units}).findings[0].unit == uid
-        with pytest.raises(ValidationError, match="spec_gap unit must be one of"):
-            RequisitionReply.model_validate(reply, context={"hardenable_units": without_phase})
-    for uid in ("19.P3.exit", "19.P4.other"):
-        reply["findings"][0]["unit"] = uid
-        with pytest.raises(ValidationError, match="spec_gap unit must be one of"):
-            RequisitionReply.model_validate(reply, context={"hardenable_units": units})
-
-
-def test_required_units_exclude_phase_rows():
-    plan = """### 19.P4 Phase 4
-```yaml
-# BEGIN_REGISTRY_P4
-seeds:
-  uncited: {}
-  own: {}
-  present: {}
-  missing: {}
-  exit: {exit: true}
-# END_REGISTRY_P4
-```
-### 19.P4.present Present
-- **Owner:** o
-- **Records:** r
-- **Observable:** b
-- **Tests:** t
-### 19.P4.orphan Orphan
-"""
-    cites = ("19.P4", "19.P4.present", "19.P4.own", "19.P4.missing", "19.P4.present",
-             "19.P4.exit", "19.P4.orphan", "19.P3.present", "19.L")
-    assert required_units(plan, "own", iter(cites)) == (
-        "19.P4.own", "19.P4.present", "19.P4.missing")
-    assert hardenable_units(plan, "own", iter(cites)) == (
-        "19.P4.own", "19.P4.present", "19.P4.missing", "19.P4.uncited")
-    assert required_units(plan, "exit", cites) == ("19.P4.present", "19.P4.own", "19.P4.missing")
-    assert required_units(plan, "own", ()) == ("19.P4.own",)
-    assert required_units(plan, "unregistered", ("19.P4", "19.L")) == ()
-    assert required_units(plan, "exit", ()) == ()
-
-
-@pytest.mark.parametrize("name", ["implement", "requisition_review"])
-def test_specs_name_every_hardenable_unit_kind(name):
-    specs = Path(__file__).resolve().parent.parent / "specs"
-    body = " ".join(load_spec((specs / f"{name}.md").read_text()).body.split())
-    for rule in (
-        "ticket's own non-exit registry entry unit",
-        "each registry entry unit its `## Plan contract` cites",
-        "for each cited phase unit `19.P<n>`, every non-exit row's entry unit of that phase",
-        "present or absent",
-        "Name the unit that is missing or under-specified, never a unit that refers to it.",
-    ):
-        assert rule in body
 
 
 def test_implement_spec_defines_both_premise_kinds():
@@ -154,16 +24,14 @@ def test_implement_spec_defines_both_premise_kinds():
     for rule in (
         "A ticket that contradicts stated spec or merged code, or is malformed, is `kind: authoring_error`.",
         "A fence wall -- a `## Scope fence` missing a path the criteria force -- is `authoring_error`.",
-        "A missing or under-specified governing entry unit is `kind: spec_gap` with that `unit`",
-        "For `spec_gap`, `unit` is required when the ticket has any such units",
-        "Every other finding has `unit: null`.",
+        "A governing spec that omits a fact the work needs is `kind: spec_gap`",
     ):
         assert rule in body
 
 
 def test_spec_lint_accepts_the_implement_and_requisition_specs():
     specs = Path(__file__).resolve().parent.parent / "specs"
-    for name, version in (("implement", "1.4"), ("requisition_review", "2.2")):
+    for name, version in (("implement", "1.5"), ("requisition_review", "2.3")):
         text = (specs / f"{name}.md").read_text()
         assert lint_spec(text) == []
         assert load_spec(text).meta.version == version
@@ -208,7 +76,7 @@ def test_render_bound_and_headroom_are_the_plan_constants():
 
 def test_engine_source_never_spells_the_raw_delimiter():
     # Section 13: a file carrying the raw delimiter can never be injected as Context.
-    for p in ("tempo/specs.py", "tests/test_specs.py", "tests/test_plan_lint.py"):
+    for p in ("tempo/specs.py", "tests/test_specs.py"):
         assert DATA_DELIM not in (Path(__file__).parent.parent / p).read_text()
 
 
@@ -325,160 +193,9 @@ def test_validate_data_blocks_flags_unpaired_delimiter():
     assert validate_data_blocks(f"prose {DATA_DELIM} prose") != []
 
 
-# --- Plan contract resolver ---
-
-PLAN = """# Title
-
-## 1. One
-
-one body
-
-## 19. Phases
-
-intro
-
-### 19.L Laws
-
-laws body
-
-### 19.P0 Phase 0
-
-p0 body
-
-```
-## 2. not a heading (fenced)
-```
-
-### 19.P1 Phase 1
-
-p1 body
-
-## 20. Open
-
-open body
-
-## 22. Appendix
-
-why
-"""
-
-
-def test_section_cited_twice_resolves_to_its_bytes_exactly_once():
-    out = resolve_plan_contract(PLAN, ["1", "1"])
-    assert out == "## 1. One\n\none body\n\n"
-
-
-def test_unit_id_resolves_to_exactly_its_unit():
-    p0 = resolve_plan_contract(PLAN, ["19.P0"])
-    assert p0.startswith("### 19.P0 Phase 0\n")
-    assert "p0 body" in p0 and "## 2. not a heading" in p0
-    assert "p1 body" not in p0 and "laws body" not in p0
-    assert resolve_plan_contract(PLAN, ["19.P1"]) == "### 19.P1 Phase 1\n\np1 body\n\n"
-
-
-def test_resolution_is_verbatim_in_first_citation_order():
-    out = resolve_plan_contract(PLAN, ["20", "19.L", "20", "1"])
-    assert out == (
-        "## 20. Open\n\nopen body\n\n" + "### 19.L Laws\n\nlaws body\n\n" + "## 1. One\n\none body\n\n"
-    )
-
-
-@pytest.mark.parametrize("bad", ["7", "19.P5", "19.P9", "19.X", "section", "TEMPO_PLAN.md", "2"])
-def test_unknown_id_is_refused(bad):
-    with pytest.raises(PlanContractError) as e:
-        resolve_plan_contract(PLAN, ["1", bad])
-    assert e.value.finding.paved_road
-
-
-def test_fenced_heading_never_resolves():
-    with pytest.raises(PlanContractError):
-        resolve_plan_contract(PLAN, ["2"])
-
-
-def test_section_22_is_refused():
-    with pytest.raises(PlanContractError) as e:
-        resolve_plan_contract(PLAN, ["22"])
-    assert "22" in str(e.value)
-
-
-def test_duplicate_heading_is_refused():
-    with pytest.raises(PlanContractError):
-        resolve_plan_contract(PLAN + "## 1. Again\n\nx\n", ["1"])
-
-
-def test_real_plan_unit_resolves():
-    plan = (Path(__file__).parent.parent / "TEMPO_PLAN.md").read_text()
-    unit = resolve_plan_contract(plan, ["19.P0"])
-    assert unit.startswith("### 19.P0 ") and "### 19.P1" not in unit
-    assert unit in plan
-
-
 def test_lint_reports_file_line_numbers():
     text = spec_text("The ticket:\n{{ticket}}")
     (finding,) = [f for f in lint_spec(text) if f.code == "data_outside_block"]
     assert text.splitlines()[finding.line - 1] == "{{ticket}}"
 
 
-SUB_PLAN = """## 11. Spine
-
-intro
-
-### 11.1 Caps
-
-caps body
-
-### 11.4 Dispatch
-
-dispatch body
-
-## 19. Phases
-
-### 19.P3 Phase 3
-
-registry
-
-### 19.P3.rework-stage Rework
-
-rework body
-
-## 20. Open
-
-open body
-"""
-
-
-def test_subsection_resolves_to_exactly_its_subsection():
-    assert resolve_plan_contract(SUB_PLAN, ["11.4"]) == "### 11.4 Dispatch\n\ndispatch body\n\n"
-    assert "dispatch body" in resolve_plan_contract(SUB_PLAN, ["11"])
-
-
-def test_entry_unit_resolves_apart_from_its_phase_unit():
-    assert resolve_plan_contract(SUB_PLAN, ["19.P3"]) == "### 19.P3 Phase 3\n\nregistry\n\n"
-    assert resolve_plan_contract(SUB_PLAN, ["19.P3.rework-stage"]) == "### 19.P3.rework-stage Rework\n\nrework body\n\n"
-
-
-def test_section_cited_with_its_own_subsection_is_refused():
-    with pytest.raises(PlanContractError) as e:
-        resolve_plan_contract(SUB_PLAN, ["11", "11.4"])
-    assert "not both" in e.value.finding.paved_road
-
-
-@pytest.mark.parametrize("text, pid", [("section 11.4", "11.4"), ("section 11", "11"), ("19.I", "19.I"),
-                                       ("19.P3.rework-stage", "19.P3.rework-stage")])
-def test_plan_id_canonicalizes_new_forms(text, pid):
-    from tempo.specs import plan_id
-    assert plan_id(text) == pid
-
-
-def test_unit_sha_is_absent_for_a_missing_unit_and_tracks_unit_bytes():
-    import hashlib
-    from tempo.specs import unit_sha
-    uid = "19.P3.rework-stage"
-    assert unit_sha(SUB_PLAN, "19.P3.missing") == "absent"
-    expected = hashlib.sha256(resolve_plan_contract(SUB_PLAN, [uid]).encode()).hexdigest()
-    assert unit_sha(SUB_PLAN, uid) == expected
-    assert unit_sha(SUB_PLAN.replace("rework body", "rework changed"), uid) != expected
-    assert unit_sha(SUB_PLAN.replace("registry", "registry changed"), uid) == expected
-    assert unit_sha(SUB_PLAN.replace("Rework", "Renamed"), uid) != expected
-    with pytest.raises(PlanContractError):
-        unit_sha(SUB_PLAN + resolve_plan_contract(SUB_PLAN, [uid]), uid)

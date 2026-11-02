@@ -14,7 +14,7 @@ from tempo.journal import EventType, Journal
 def test_dispatch_vocabulary_is_closed():
     Dispatch = journal_module.Dispatch
     dispatch_of = journal_module.dispatch_of
-    assert get_args(Dispatch) == ("retry", "escalate", "reject_queue", "spec_gap_hold")
+    assert get_args(Dispatch) == ("retry", "escalate", "reject_queue")
     assert dispatch_of({}) is None
     for name in get_args(Dispatch):
         assert dispatch_of({"dispatch": name}) == name
@@ -112,7 +112,7 @@ def test_every_engine_signal_name_is_listed():
 
 @pytest.mark.parametrize("body", [
     {"signal": "spec_gap_hold"}, {},
-    {"signal": "drain_handoff", "kind": "drain_handoff"},
+    {"signal": "drain_halted", "kind": "drain_halted"},
     {"kind": "other"}, {"signal": None}, {"kind": []},
 ])
 def test_unknown_signal_name_is_refused_at_append(tmp_path, body):
@@ -121,7 +121,7 @@ def test_unknown_signal_name_is_refused_at_append(tmp_path, body):
         journal.append(EventType.SIGNAL, body)
     assert not journal.dir.exists()
     assert journal.read() == []
-    journal.append(EventType.SIGNAL, {"signal": "drain_handoff"})
+    journal.append(EventType.SIGNAL, {"signal": "drain_halted"})
     before = {p: p.read_bytes() for p in journal.dir.iterdir()}
     with pytest.raises(ValueError, match="SIGNAL_NAMES"):
         journal.append(EventType.SIGNAL, body)

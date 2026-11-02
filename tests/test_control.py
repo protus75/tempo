@@ -1,4 +1,3 @@
-import asyncio
 import json
 import os
 import stat
@@ -9,65 +8,13 @@ from threading import Barrier, Event
 
 import pytest
 
-from tempo import __main__ as cli_root, control, daemon
+from tempo import control, daemon
 from tempo.control import ControlProjection, ControlRequest, publish_request, validate_request
 from tempo.journal import EventType, Journal
 from tempo.seams import FileSystem, LocalFileSystem
 from tests.test_cli import Stages, cli, journal, root, ticket, write
 from tests.test_daemon_composition import CoreRig, assert_startup_pause_wiring
 from tests.test_effects import Crash, FakeClock
-
-
-@pytest.mark.parametrize("point", ["decision", "release", "normal"])
-def test_supervised_request_identity_and_replay(tmp_path, monkeypatch, point):
-    from tests.test_mergequeue import ctx as context_fixture
-    from tests.test_supervised_merge_hold import hold, confirm
-    ctx = context_fixture.__wrapped__(tmp_path)
-    async def exercise():
-        ticket, queue, held = await hold(ctx)
-        inbox = queue.control.inbox
-        for request_id, life, stem, identity, actor in [("old-life", "old", ticket.stem, held.hold_id, "operator"),
-                ("foreign", inbox.lifecycle_id, "foreign", held.hold_id, "operator"),
-                ("old-hold", inbox.lifecycle_id, ticket.stem, "superseded", "operator")]:
-            publish_request(ctx.config.state_dir, control.AdmissionRequest(request_id, life, "confirm", stem, identity, actor), ctx.fs)
-        for request_id, edit in [("bad-actor", {"actor": "unknown"}), ("bad-verb", {"verb": "authorize"}),
-                                 ("bad-shape", {"extra": True})]:
-            raw = asdict(control.AdmissionRequest(request_id, inbox.lifecycle_id, "confirm", ticket.stem, held.hold_id, "operator")) | edit
-            ctx.fs.publish(ctx.config.state_dir / f"control/inbox/{request_id}.json", json.dumps(raw).encode())
-        inbox.consume()
-        assert all(e.body["decision"] != "accepted" for e in control.decisions(ctx.driver.journal.read()))
-        assert all("current admission" in e.body["reason"] for e in control.decisions(ctx.driver.journal.read())
-                   if e.body["decision"] == "rejected")
-        appended = ctx.driver.journal.append
-        def crash(kind, body, **kwargs):
-            event = appended(kind, body, **kwargs)
-            if (point == "decision" and body.get("decision") == "accepted" or point == "release"
-                    and kind == EventType.EFFECT_COMPLETION and (kwargs.get("key") or "").startswith(control.MERGE_RELEASE + "/")):
-                raise Crash()
-            return event
-        monkeypatch.setattr(ctx.driver.journal, "append", crash)
-        if point == "decision":
-            with pytest.raises(Crash): confirm(queue, held)
-        else:
-            confirm(queue, held)
-        if point == "release":
-            with pytest.raises(Crash): await inbox.settle_admissions(queue.confirm_draft)
-        monkeypatch.setattr(ctx.driver.journal, "append", appended)
-        await inbox.settle_admissions(queue.confirm_draft)
-        before = ctx.driver.journal.read()
-        inbox.consume()
-        await inbox.settle_admissions(queue.confirm_draft)
-        assert ctx.driver.journal.read() == before
-        [release] = control.releases(before).values()
-        assert release == dict(stem=ticket.stem, attempt=0, hold_id=held.hold_id, request_id="confirmation",
-                              lifecycle_id=inbox.lifecycle_id, verdict="confirm", actor="operator")
-        [accepted] = [e.body for e in control.decisions(before) if e.body["decision"] == "accepted"]
-        assert set(accepted) == {"kind", "request_id", "lifecycle_id", "verb", "stem", "hold_id", "actor", "decision", "reason"}
-        confirm(queue, held, verdict="reject", request_id="duplicate")
-        assert list(control.decisions(ctx.driver.journal.read()))[-1].body["decision"] == "stale"
-        [result] = await queue.process()
-        assert result.outcome == "ok" and len(control.releases(ctx.driver.journal.read())) == 1
-    asyncio.run(exercise())
 
 
 class Rig:

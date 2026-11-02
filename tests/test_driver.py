@@ -28,7 +28,7 @@ CONFIG = textwrap.dedent(
         package: test-cli
         auth: TEMPO_TEST_KEY
         models_by_tier: {low: haiku, medium: sonnet, high: opus, max: opus}
-        limits: {concurrency: 1, est_cost_per_call_usd: 0.25}
+        limits: {concurrency: 1}
     routing:
       - {tier: medium, surface: implement, candidates: [{provider: claude, model: sonnet}]}
     review: {}
@@ -108,8 +108,6 @@ def build(tmp_path: Path, llm: FakeLLM, *, fires: bool = False, env=None) -> tup
 def run(driver: Driver, stage: LlmStage = ECHO, text: str = "hi", **kw):
     kw = {"ticket": "t-echo", "attempt": 1, "workspace": Path("."), "tier": "medium", "effort": "low"} | kw
     kw.setdefault("stuck_budget", 600.0)
-    kw.setdefault("expected_budget", 300.0)
-    kw.setdefault("scope_fence", ())
     return asyncio.run(driver.run(stage, Stub(text=text), **kw))
 
 
@@ -128,10 +126,9 @@ def test_echo_stage_with_empty_gate_list_emits_validated_artifact(tmp_path):
     assert result.outcome == "ok"
     assert result.artifact == Echo(produced_by_spec_version=1, produced_at_sha="abc123", echoed="hi")
     assert result.findings == []
-    assert result.cost.attempts == 1
-    assert result.cost.provider == "fake"
+    assert len(llm.requests) == 1
+    assert (result.provider, result.model) == ("fake", "fake")
     req = llm.requests[0]
-    assert req.budget_usd is None
     assert (req.surface, req.tier, req.effort, req.ticket) == ("implement", "medium", "low", "t-echo")
     assert (spool(state) / "implement" / "call-01" / "prompt.md").read_text() == req.rendered
     assert (spool(state) / "implement" / "call-01" / "output.txt").read_text() == echo_json("hi")
@@ -174,8 +171,7 @@ def test_hung_call_is_aborted_at_stuck_budget_and_prompt_survives(tmp_path):
         async with asyncio.timeout(5):  # wall-clock guard: a driver that skips abort_current deadlocks here
             return await driver.run(
                 ECHO, Stub(text="hi"), ticket="t-echo", attempt=1, workspace=Path("."),
-                tier="medium", effort="low", stuck_budget=90.0,
-                expected_budget=300.0, scope_fence=())
+                tier="medium", effort="low", stuck_budget=90.0)
 
     result = asyncio.run(bounded())
     assert result.outcome == "timeout"
@@ -204,7 +200,7 @@ def test_schema_invalid_output_is_reprompted_with_the_validation_finding(tmp_pat
     driver, state = build(tmp_path, llm)
     result = run(driver)
     assert result.outcome == "ok"
-    assert result.cost.attempts == 3
+    assert len(llm.requests) == 3
     second = llm.requests[1].rendered
     assert "[invalid_artifact]" in second
     assert "produced_at_sha" in llm.requests[2].rendered  # the missing field is named
@@ -320,12 +316,12 @@ def test_soft_gate_failure_passes_with_findings(tmp_path):
     assert len(llm.requests) == 1
 
 
-def test_cost_sums_calls(tmp_path):
-    usage = LLMResult(text="junk", input_tokens=10, output_tokens=5, provider="p", model="m", usd=0.25)
-    final = LLMResult(text=echo_json("hi"), input_tokens=3, output_tokens=2, provider="p", model="m", usd=0.25)
-    driver, _ = build(tmp_path, FakeLLM([usage, final]))
-    cost = run(driver).cost
-    assert (cost.tokens, cost.attempts, cost.usd, cost.provider, cost.model) == (20, 2, 0.5, "p", "m")
+def test_result_names_the_last_served_route(tmp_path):
+    junk = LLMResult(text="junk", provider="p", model="m")
+    final = LLMResult(text=echo_json("hi"), provider="q", model="n")
+    driver, _ = build(tmp_path, FakeLLM([junk, final]))
+    result = run(driver)
+    assert (result.provider, result.model) == ("q", "n")
 
 
 def test_ticketless_surface_spools_under_its_surface_name(tmp_path):
@@ -401,68 +397,3 @@ def test_engine_log_rotates_by_size(tmp_path):
     assert json.loads((tmp_path / "engine.log").read_text().splitlines()[-1])["n"] == 39
 
 
-@pytest.mark.parametrize("history", ["initial", "intent", "multiple", "empty", "no-match"])
-def test_exit_read_window_materialization(tmp_path, monkeypatch, history):
-    from dataclasses import asdict
-    from types import SimpleNamespace
-    from tempo.journal import EventType
-    from tempo.seams import LocalFileSystem
-    from tempo.stages import resolve_exit_window
-
-    driver, state = build(tmp_path, FakeLLM([]))
-    j = driver.journal
-    if history != "empty":
-        j.append(EventType.STATE_TRANSITION, {"to": "merged", "commit": "before"}, ticket="other")
-    if history == "intent":
-        j.append(EventType.EFFECT_INTENT, {}, key="retro/1")
-    if history in {"multiple", "no-match"}:
-        j.append(EventType.EFFECT_COMPLETION, {"result": {"commit": "first"}}, key="retro/1")
-        j.append(EventType.STATE_TRANSITION, {"to": "merged"}, ticket="old-window")
-        j.append(EventType.EFFECT_COMPLETION, {"result": {"commit": "latest"}}, key="retro/2")
-    if history not in {"empty", "no-match"}:
-        body = {"kind": "drain_handoff", "nested": [None, {"exact": "value"}]}
-        j.append(EventType.SIGNAL, body, ticket=None)
-        j.append(EventType.STATE_TRANSITION, {"to": "gate_failed"}, ticket="unrelated")
-        driver.clock.now -= timedelta(seconds=1)
-        j.append(EventType.SIGNAL, {"kind": "drain_handoff", "ordinal": "second"}, ticket="foreign")
-        driver.clock.now += timedelta(seconds=1)
-        j.append(EventType.SIGNAL, body, ticket=None)
-    snapshot = j.read()
-    boundary = max((i for i, e in enumerate(snapshot)
-                    if e.type == EventType.EFFECT_COMPLETION and (e.key or "").startswith("retro/")), default=-1)
-    suffix = snapshot[boundary + 1:]
-    canonical = {f"{kind}: current retro window": [asdict(e) for e in suffix if e.type == kind]
-                 for kind in ("signal", "state_transition", "effect_completion")}
-    declarations = "-   signal  :   current retro window  \n- state_transition: current retro window\n- effect_completion: current retro window\n"
-    def ticket(stem, declaration=declarations):
-        return SimpleNamespace(stem=stem, sections={"Exit-read window": declaration})
-    consumed = resolve_exit_window(ticket("phase5-exit"), snapshot)
-    assert consumed == resolve_exit_window(ticket("phase6-exit"), snapshot)
-    writes = []
-    fs = LocalFileSystem()
-    def write(path, data):
-        writes.append((path, data))
-        fs.write(path, data)
-    monkeypatch.setattr(driver.spool._fs, "write", write)
-    # Later events cannot change any declaration in the already resolved snapshot.
-    j.append(EventType.STATE_TRANSITION, {"to": "merged"}, ticket="appended-later")
-    j.append(EventType.SIGNAL, {"kind": "drain_handoff"}, ticket="appended-later")
-    workspace = tmp_path / "exit-worktree"
-    path = driver.materialize_exit_window(consumed, workspace)
-    assert len(writes) == 1 and writes[0][0] == path
-    assert json.loads(path.read_text()) == canonical
-    assert all(set(event) == {"v", "type", "ts", "ticket", "key", "body"}
-               for events in canonical.values() for event in events)
-    if history not in {"empty", "no-match"}:
-        signals = canonical["signal: current retro window"]
-        assert signals[0] == signals[2] and signals[0]["ticket"] is None
-        assert signals[1]["body"]["ordinal"] == "second" and signals[1]["ts"] < signals[0]["ts"]
-        assert asdict(snapshot[-1]) == signals[-1]
-    # The consumed exit read is self-contained even without the live journal directory.
-    fs.replace(state, tmp_path / "offline-state")
-    assert not state.exists() and json.loads(path.read_text()) == canonical
-    assert resolve_exit_window(SimpleNamespace(stem="no-declaration", sections={}), snapshot) == {}
-    assert driver.materialize_exit_window({}, workspace) is None
-    for declaration in ("- unknown: current retro window", "- signal: since yesterday", "- signal: anything nonblank"):
-        with pytest.raises(ValueError, match="EVENT_VERSIONS.*current retro window"):
-            resolve_exit_window(ticket("phase5-exit", declaration), snapshot)

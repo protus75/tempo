@@ -10,8 +10,8 @@ from unittest.mock import Mock
 import pytest
 
 from tempo import __main__ as cli, daemon, journal as journal_module, runner, stages
-from tempo.artifacts import Cost, Finding, StageResult
-from tempo.box import Box, BoxError, Message, Resolution, Verdict, ingest_bootstrap, ingest_main_checkout
+from tempo.artifacts import Finding, StageResult
+from tempo.box import Box, BoxError, Message, Resolution, Verdict
 from tempo.flake import Flake, RerunEvidence
 from tempo.journal import EventType, Journal
 from tempo.llm import FakeLLM
@@ -21,7 +21,6 @@ from tempo.seams import LocalFileSystem
 from tempo.storm import STORM_THRESHOLD, STORM_TRIP, STORM_WINDOW, StormLedger
 from tests.test_daemon_composition import CoreRig
 from tests.test_drain import Script, commit_ticket, confirmed, make_root
-from tests.test_drain_reentry import NoChild
 from tests.test_journal import FakeClock, T0
 from tests.test_mergequeue import ctx as admission_context, ready, scripted
 from tests.test_stages import STEM, agent
@@ -114,7 +113,6 @@ def test_storm_threshold_window_and_signature_isolation(tmp_path, monkeypatch):
     assert trip.body["crossing_occurrence_id"] == "crossing"
     assert trip.body["trip_id"] == digest([SIG, "first", "crossing"])
     clock.advance(7200)
-    journal.close()
     box, journal, _ = compose(tmp_path, clock)
     before = snapshot(tmp_path)
     box.recover()
@@ -123,7 +121,7 @@ def test_storm_threshold_window_and_signature_isolation(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("stage,origin", [("implement", "one"), ("check", None), ("review", "one"),
-                                         (None, None), (None, "bootstrap-ingest"),
+                                         (None, None), (None, "suggestion-origin"),
                                          ("depends", "child"), ("unknown", "one"), ("", "")])
 def test_storm_trip_targets_are_closed(tmp_path, stage, origin):
     box, journal, clock = compose(tmp_path)
@@ -169,7 +167,6 @@ def test_storm_trip_and_report_crash_replay(tmp_path, monkeypatch, point, after,
         patch.setattr(box.fs, "write", fail_write)
         with pytest.raises(exception, match="injected crash"):
             box.enqueue(**ARRIVAL, occurrence_id="arrival/5")
-    journal.close()
     if point == "occurrence" and not after:
         # No durable crossing exists; retry the original arrival while its window is live.
         box, journal, _ = compose(tmp_path, clock)
@@ -216,7 +213,7 @@ def test_storm_trip_evidence_fails_closed(tmp_path, damage):
     else:
         field = {"id": "trip_id", "stage": "emitting_stage", "origin": "emitting_origin",
                  "first": "first_occurrence_id", "crossing": "crossing_occurrence_id"}.get(damage, damage)
-        body[field] = "drain_handoff" if field == "kind" else "wrong"
+        body[field] = "drain_halted" if field == "kind" else "wrong"
     journal.append(type, body, key=key, ticket=ticket)
     before = snapshot(tmp_path)
     for operation in (box.recover, lambda: box.enqueue(**ARRIVAL, occurrence_id="new")):
@@ -277,7 +274,7 @@ def test_storm_activation_does_not_hold_dispatch_or_notify(tmp_path, monkeypatch
             return consumer
         monkeypatch.setattr(cli, "build_control", build)
     assert cli.main([verb, "one"] if verb == "run" else [verb], cwd=root, env=ENV,
-                    clock=clock, pipeline=script, reexec=NoChild()) == 0
+                    clock=clock, pipeline=script) == 0
     assert script.calls == (["one"] if verb == "run" else ["unrelated", "one"])
     assert script.lock_held == [True] * len(script.calls)
     assert len(trips(journal)) == 1
@@ -288,7 +285,7 @@ def test_storm_activation_does_not_hold_dispatch_or_notify(tmp_path, monkeypatch
     assert all(m.status == "pending" for m in box.messages())
 
 
-SITES = ("implement", "fallback-raises", "fallback-absent", "dependency", "base", "flake", "bootstrap", "main-ingest")
+SITES = ("implement", "fallback-raises", "fallback-absent", "dependency", "base", "flake")
 
 
 async def exercise_site(ctx, monkeypatch, site, attempt=2):
@@ -325,7 +322,7 @@ async def exercise_site(ctx, monkeypatch, site, attempt=2):
             monkeypatch.setattr(runner, "harvest", failed)
         finding = Finding(code="logic", message="Rework refused", paved_road="shrink and retry")
         result = await runner.failure_terminal(ctx, ticket, outcome="gate_failed", stage="review", findings=[],
-            attempt=attempt, reworked=StageResult(outcome="gate_failed", artifact=None, cost=Cost(), findings=[finding]),
+            attempt=attempt, reworked=StageResult(outcome="gate_failed", artifact=None, findings=[finding]),
             rework_requested=True)
         assert result == "gate_failed"
         assert journal.read()[-1].body["to"] == "gate_failed"
@@ -359,7 +356,7 @@ async def exercise_site(ctx, monkeypatch, site, attempt=2):
         assert journal.read() == before
         parts = [["base-red", STEM, attempt, "review", n] for n in (1, 2)]
         stage, origin = "review", STEM
-    elif site == "flake":
+    else:
         flake = daemon.flake_detection(journal=journal, box=box, config=ctx.config,
                                       escalate=lambda _: pytest.fail("unexpected cap"))
         test_id = "tests/test_é.py::test_12"
@@ -376,20 +373,6 @@ async def exercise_site(ctx, monkeypatch, site, attempt=2):
             assert flake.release(box_id=box_id) == projection
         assert journal.read() == before
         stage, origin = "check", test_id
-    else:
-        text = "  same é 1  \n\n same é 2\n"
-        source_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        parts = [["bootstrap-ingest", source_digest, n] for n in (1, 3)]
-        if site == "bootstrap":
-            ids = ingest_bootstrap(box, text)
-            assert len(ids) == 2 and ids[0] == ids[1]
-            assert ingest_bootstrap(box, text) == ids
-        else:
-            ctx.fs.write(ctx.repo / "bootstrap/suggestions.md", text.encode())
-            before_count = len(box.messages())
-            assert await ingest_main_checkout(ctx.repo, ctx.git, ctx.fs, journal=journal, clock=clock) == 1 - before_count
-            assert await ingest_main_checkout(ctx.repo, ctx.git, ctx.fs, journal=journal, clock=clock) == 0
-        stage, origin = None, "bootstrap-ingest"
     return box, parts, stage, origin
 
 
@@ -399,7 +382,7 @@ def test_production_arrival_site_closure(admission_context, monkeypatch, site):
     hook = Mock(wraps=daemon.storm_producer)
     monkeypatch.setattr(daemon, "storm_producer", hook)
     box, parts, stage, origin = asyncio.run(exercise_site(ctx, monkeypatch, site))
-    assert hook.call_count >= (1 if site in {"flake", "bootstrap"} else 2)
+    assert hook.call_count >= (1 if site == "flake" else 2)
     incoming = occurrences(ctx.driver.journal)
     assert len(incoming) == len(parts)
     assert all(e.body["emitting_stage"] == stage and e.body["emitting_origin"] == origin for e in incoming)
@@ -447,7 +430,7 @@ def test_production_arrival_preserves_caller_behavior(admission_context, monkeyp
         assert report.summary == "Rework refused; shrink and retry"
         assert (report.message_class, report.origin, report.stage, report.outcome) == (
             "failure_report", STEM, "review", "gate_failed")
-    if site in {"implement", "flake", "bootstrap", "main-ingest"}:
+    if site in {"implement", "flake"}:
         assert len(box.messages()) == 1  # distinct arrivals preserve the existing signature dedup
 
 
@@ -457,7 +440,7 @@ def test_successful_rework_harvest_is_not_an_arrival(admission_context):
         ticket = await ready(ctx)
         finding = Finding(code="logic", message="refused", paved_road="shrink and retry")
         result = await runner.failure_terminal(ctx, ticket, outcome="gate_failed", stage="review", findings=[],
-            attempt=2, reworked=StageResult(outcome="gate_failed", artifact=None, cost=Cost(), findings=[finding]),
+            attempt=2, reworked=StageResult(outcome="gate_failed", artifact=None, findings=[finding]),
             rework_requested=True)
         assert result == "gate_failed"
     asyncio.run(exercise())
@@ -528,7 +511,7 @@ async def test_storm_leaves_daemon_selection_and_accounting_unchanged(admission_
     def forbidden(*args, **kwargs):
         pytest.fail("storm invoked an external notification")
     monkeypatch.setattr("tempo.effects.Effects.run", forbidden)
-    core = cli.build_daemon_core(checkout, plan=None, read=lambda _: None, debounce=0,
+    core = cli.build_daemon_core(checkout, read=lambda _: None, debounce=0,
         quarantined=lambda: set(), drought_parked=lambda: set(), completed_unmerged=lambda: 0,
         prepare=prepare)
     box = core.control._recover.__self__
@@ -562,12 +545,11 @@ def test_production_startup_recovers_without_new_arrival(admission_context, star
     for n in range(6):
         ledger.record(signature=SIG, occurrence_id=f"arrival/{n}",
                       emitting_stage="implement", emitting_origin="one")
-    journal.close()
     clock.advance(7200)
     if startup == "daemon":
         journal = Journal(ctx.config.state_dir, clock)
         checkout = runner.Checkout(ctx.repo, ctx.config, ctx.env, ctx.exec_, ctx.git, journal, ctx.fs, clock)
-        core = cli.build_daemon_core(checkout, plan=None, read=lambda _: None, debounce=0,
+        core = cli.build_daemon_core(checkout, read=lambda _: None, debounce=0,
             quarantined=lambda: set(), drought_parked=lambda: set(), completed_unmerged=lambda: 0)
         before = snapshot(ctx.config.state_dir)
         assert len(trips(journal)) == 0
@@ -577,7 +559,7 @@ def test_production_startup_recovers_without_new_arrival(admission_context, star
         if startup == "run":
             asyncio.run(ready(ctx, "one"))
         assert cli.main([startup, "one"] if startup == "run" else [startup], cwd=ctx.repo, env=ctx.env,
-                        clock=clock, pipeline=Script(), reexec=NoChild()) == 0
+                        clock=clock, pipeline=Script()) == 0
         journal = Journal(ctx.config.state_dir, clock)
     assert len(trips(journal)) == 1
     reports = Box(ctx.config.state_dir / "box", ctx.fs).messages()

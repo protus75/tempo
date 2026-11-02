@@ -63,7 +63,6 @@ def test_snapshot_preserves_all_validated_config_values(tmp_path, extras):
                          "[{provider: claude, model: sonnet}, {provider: claude}]")
     if extras:
         text = text.replace("kind: cli", "kind: cli\n    auth: PROVIDER_TOKEN")
-        text = text.replace(", est_cost_per_call_usd: 0.25", "")
     put_config(tmp_path, text + extras)
     source = load_config(None, cwd=tmp_path)
     snapshot = snapshot_config(source)
@@ -72,7 +71,6 @@ def test_snapshot_preserves_all_validated_config_values(tmp_path, extras):
     assert snapshot.state_dir == tmp_path / ".tempo"
     assert snapshot.worktree_root == tmp_path / ("elsewhere" if extras else ".tempo/worktrees")
     assert snapshot.providers[0].auth == ("PROVIDER_TOKEN" if extras else None)
-    assert snapshot.providers[0].limits.est_cost_per_call_usd == (None if extras else 0.25)
     assert snapshot.providers[0].limits.quota_window_minutes == 60
     assert snapshot.routing[0].candidates[1].model is None
     assert snapshot.report_inbox == (tmp_path / "inbox" if extras else None)

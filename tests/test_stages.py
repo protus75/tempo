@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import pytest
 
 from tempo.config import load_config
-from tempo.artifacts import SHAKEOUT_REPORT, ShakeoutEntry, ShakeoutReport
 from tempo.box import BOX_DIR, Box
 from tempo.driver import Driver
 from tempo.git import Git
@@ -24,14 +23,13 @@ from tempo.stages import (
     Invoice,
     PackingSlip,
     RunRecordGate,
-    ScopeFenceGate,
     SnagList,
     StageContext,
     _prior_findings,
     read_review,
     run_stages,
 )
-from tempo.tickets import TicketInvalid, validate_ticket
+from tempo.tickets import validate_ticket
 
 
 def test_retro_driver_access_is_public_and_read_only(repo):
@@ -49,37 +47,6 @@ def test_retro_driver_access_is_public_and_read_only(repo):
     with pytest.raises(RetroConstructionError, match="construct the pipeline with its shared Driver.*Pipeline.stages.driver"):
         Retro(checkout, SimpleNamespace()).driver()
 
-
-def test_exit_window_is_materialized_before_the_real_implement_call(repo, monkeypatch):
-    from dataclasses import asdict
-    from tempo import stages
-    from tempo.journal import EventType
-    from tests.test_merge import context
-    author(repo)
-    path = repo / f"tickets/{STEM}/ticket.md"
-    text = path.read_text() + "\n## Exit-read window\n-  signal:  current retro window  \n- state_transition: current retro window\n"
-    path.write_text(text)
-    git(repo, "add", f"tickets/{STEM}/ticket.md")
-    git(repo, "commit", "-m", "exit declaration")
-    seen = []
-    def act(req):
-        data = json.loads((req.worktree / ".tempo/exit-read-window.json").read_text())
-        assert data == {"signal: current retro window": [asdict(first)], "state_transition: current retro window": []}
-        assert '.tempo/exit-read-window.json' in req.rendered
-        seen.append(data)
-        return implement_reply(outcome="already_satisfied")
-    ctx = context(repo, [act])
-    first = ctx.driver.journal.append(EventType.SIGNAL, {"kind": "drain_handoff"}, ticket=None)
-    prepare = stages.prepare_worktree
-    async def append_during_prepare(*args):
-        result = await prepare(*args)
-        ctx.driver.journal.append(EventType.STATE_TRANSITION, {"to": "merged"}, ticket="later")
-        ctx.driver.journal.append(EventType.SIGNAL, {"kind": "drain_handoff"}, ticket="later")
-        return result
-    monkeypatch.setattr(stages, "prepare_worktree", append_during_prepare)
-    ticket = validate_ticket(STEM, text, repo)
-    assert asyncio.run(stages.implement(ctx, ticket, attempt=0)).outcome == "ok"
-    assert len(seen) == 1
 
 SPECS = Path(__file__).resolve().parent.parent / "specs"
 SECRET = "sk-test-not-for-children"
@@ -102,7 +69,7 @@ providers:
     package: test-cli
     auth: FAKE_KEY
     models_by_tier: {low: m, medium: m, high: m, max: m}
-    limits: {concurrency: 1, est_cost_per_call_usd: 0.5}
+    limits: {concurrency: 1}
 routing:
   - {tier: medium, surface: implement, candidates: [{provider: fake}]}
   - {tier: medium, surface: review, candidates: [{provider: fake}]}
@@ -174,7 +141,6 @@ def repo(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
     (root / "tempo").mkdir(parents=True)
     (root / "tempo" / "thing.py").write_text("")
-    (root / "TEMPO_PLAN.md").write_text("# Plan\n")
     (root / "config.yaml").write_text(CONFIG)
     (root / ".gitignore").write_text(".tempo/\n")
     adopt_conduct(root)
@@ -184,10 +150,10 @@ def repo(tmp_path: Path) -> Path:
     return root
 
 
-def author(repo: Path, bypass: str = "", plan_contract: str = "") -> None:
+def author(repo: Path, bypass: str = "") -> None:
     path = repo / "tickets" / STEM / "ticket.md"
     path.parent.mkdir(parents=True)
-    path.write_text(TICKET.format(bypass=bypass).replace("## Goal / Why", plan_contract + "## Goal / Why"))
+    path.write_text(TICKET.format(bypass=bypass))
     git(repo, "add", "tickets")
     git(repo, "commit", "-m", f"tempo({STEM}): ticket")
 
@@ -222,8 +188,8 @@ def verdict(v: str = "approve", findings: list | None = None) -> str:
 SNAG = {"code": "logic", "path": "tempo/thing.py", "line": 1, "message": "wrong word", "paved_road": "write ok"}
 
 
-def run(repo: Path, script: list, bypass: str = "", plan_contract: str = ""):
-    author(repo, bypass, plan_contract)
+def run(repo: Path, script: list, bypass: str = ""):
+    author(repo, bypass)
     config = load_config(None, cwd=repo)
     llm = FakeLLM(script)
     clock = lambda: datetime(2026, 10, 5, tzinfo=UTC)  # noqa: E731
@@ -247,98 +213,9 @@ def outcomes(result) -> dict[str, str]:
     return {name: r.outcome for name, r in result.results.items()}
 
 
-def _report_bytes() -> str:
-    entry = ShakeoutEntry(member="member_one", group="first", planted_fault="fault", expected="ok",
-                          observed="ok", producing_run="member_one/0", auditor=[], green=True)
-    return ShakeoutReport(produced_by_spec_version=1, produced_at_sha="abc", entries=[entry]).model_dump_json()
-
-
 def _report_ticket(monkeypatch, verification: str) -> None:
     monkeypatch.setattr(__import__(__name__, fromlist=["TICKET"]), "TICKET",
                         TICKET.replace("env\n", verification + "\n"))
-
-
-def _write_outbox_report(path: str, body: str):
-    def act(req: LLMRequest) -> str:
-        assert req.worktree is not None
-        (req.worktree / "tempo/thing.py").write_text("ok\n")
-        git(req.worktree, "add", "tempo/thing.py")
-        git(req.worktree, "commit", "-m", "work")
-        target = req.worktree / "tickets" / STEM / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(body)
-        return implement_reply()
-    return act
-
-
-def test_verification_report_lifts_only_in_checks_commit(repo, monkeypatch):
-    (repo / "source.json").write_text(_report_bytes())
-    git(repo, "add", "source.json")
-    git(repo, "commit", "-m", "source")
-    _report_ticket(monkeypatch, f"cp source.json tickets/{STEM}/{SHAKEOUT_REPORT}")
-    result, _, _ = run(repo, [agent({"tempo/thing.py": "ok\n"}), verdict()])
-    assert outcomes(result)["check"] == "ok"
-    assert (repo / "tickets" / STEM / SHAKEOUT_REPORT).is_file()
-    run_commit = git(repo, "log", "--format=%H", "--grep", f"tempo({STEM}): run-record").splitlines()[0]
-    assert SHAKEOUT_REPORT not in git(repo, "show", "--format=", "--name-only", run_commit)
-    checks_commit = git(repo, "log", "--format=%H", "--grep", f"tempo({STEM}): checks").splitlines()[0]
-    assert SHAKEOUT_REPORT in git(repo, "show", "--format=", "--name-only", checks_commit)
-
-
-def test_invalid_report_fails_check_without_lifting_checks_or_report(repo, monkeypatch):
-    (repo / "source.json").write_text('{"invalid":true}')
-    git(repo, "add", "source.json")
-    git(repo, "commit", "-m", "source")
-    _report_ticket(monkeypatch, f"cp source.json tickets/{STEM}/{SHAKEOUT_REPORT}")
-    result, _, _ = run(repo, [agent({"tempo/thing.py": "ok\n"})])
-    assert outcomes(result)["check"] == "gate_failed"
-    assert [f.code for f in result.last[1].findings] == ["verification"]
-    assert not (repo / "tickets" / STEM / "checks.json").exists()
-    assert not (repo / "tickets" / STEM / SHAKEOUT_REPORT).exists()
-    assert f"tempo({STEM}): checks" not in subjects(repo)
-
-
-@pytest.mark.parametrize("path", [SHAKEOUT_REPORT, f"x/{SHAKEOUT_REPORT}"])
-@pytest.mark.parametrize("body", [_report_bytes(), '{"invalid":true}'])
-def test_implement_report_is_not_lifted_and_stale_report_is_purged(repo, path, body):
-    result, _, config = run(repo, [_write_outbox_report(path, body), verdict()])
-    assert outcomes(result)["check"] == "ok"
-    assert not list((repo / "tickets" / STEM).rglob(SHAKEOUT_REPORT))
-    assert not list((config.worktree_root / STEM / "tickets" / STEM).rglob(SHAKEOUT_REPORT))
-    assert SHAKEOUT_REPORT not in git(repo, "show", "--format=", "--name-only", "main~2")
-
-
-@pytest.mark.parametrize("flag", ["--out", "--out="])
-def test_named_missing_report_fails_even_when_other_commands_pass(repo, monkeypatch, flag):
-    target = f"tickets/{STEM}/{SHAKEOUT_REPORT}"
-    command = f"true {flag} {target}" if flag == "--out" else f"true {flag}{target}"
-    _report_ticket(monkeypatch, command)
-    result, _, _ = run(repo, [agent({"tempo/thing.py": "ok\n"})])
-    assert outcomes(result)["check"] == "gate_failed"
-    assert [f.code for f in result.last[1].findings] == ["verification"]
-
-
-# --- transitions --------------------------------------------------------------------------------
-
-
-def test_implement_renders_numeric_plan_contract_section(repo):
-    (repo / "TEMPO_PLAN.md").write_text("# Plan\n\n## 11. Failure spine\n\nSpine prose.\n")
-    git(repo, "commit", "-am", "plan section 11")
-
-    result, llm, _ = run(repo, [agent({"tempo/thing.py": "ok\n"}), verdict()],
-                         plan_contract="## Plan contract\n- section 11\n\n")
-
-    assert outcomes(result) == {"implement": "ok", "check": "ok", "review": "ok"}
-    assert "## 11. Failure spine\n\nSpine prose." in llm.requests[0].rendered
-
-
-def test_bare_numeric_plan_contract_bullet_is_refused_at_intake(repo):
-    (repo / "TEMPO_PLAN.md").write_text("# Plan\n\n## 11. Failure spine\n")
-    author(repo, plan_contract="## Plan contract\n- 11\n\n")
-
-    with pytest.raises(TicketInvalid) as e:
-        validate_ticket(STEM, (repo / "tickets" / STEM / "ticket.md").read_text(), repo)
-    assert any("Plan contract" in finding.message for finding in e.value.findings)
 
 
 def test_implement_check_review_all_ok_with_artifacts_and_provenance(repo):
@@ -350,7 +227,7 @@ def test_implement_check_review_all_ok_with_artifacts_and_provenance(repo):
     assert isinstance(slip, PackingSlip) and slip.produced_at_sha == head and slip.produced_by_spec_version == 1
     assert isinstance(invoice, Invoice) and invoice.passed and invoice.changed_files == ["tempo/thing.py"]
     assert invoice.produced_at_sha == head
-    assert isinstance(review, ApprovedInvoice) and review.reviewed_sha == head and review.spec_version == "1.0"
+    assert isinstance(review, ApprovedInvoice) and review.reviewed_sha == head and review.spec_version == "1.1"
     assert (review.provider, review.model) == ("fake", "fake")
 
     # One ticket-plane commit per stage terminal, on main, never on the branch.
@@ -359,7 +236,7 @@ def test_implement_check_review_all_ok_with_artifacts_and_provenance(repo):
     assert read_review((canonical / "review.md").read_text()) == review
     assert Invoice.model_validate_json((canonical / "checks.json").read_text()) == invoice
     run_md = (canonical / "run.md").read_text()
-    assert "## Outcome\n\nok\n" in run_md and "- provider: fake\n- model: fake\n- spec: implement 1.4" in run_md
+    assert "## Outcome\n\nok\n" in run_md and "- provider: fake\n- model: fake\n- spec: implement 1.5" in run_md
     assert git(repo, "diff", "--name-only", f"main...{STEM}").split() == ["tempo/thing.py"]
     outbox = config.worktree_root / STEM / "tickets" / STEM
     assert sorted(p.name for p in outbox.iterdir()) == ["ticket.md"]  # lifted and unlinked
@@ -371,34 +248,22 @@ def test_implement_check_review_all_ok_with_artifacts_and_provenance(repo):
     assert "+ok" in review_req.rendered  # the reviewer sees `git diff main...<stem>`
 
 
-def test_non_seeding_ticket_ignores_an_untracked_foreign_ticket(repo):
+def test_an_untracked_foreign_ticket_is_ignored(repo):
     def act(req: LLMRequest) -> str:
         assert req.worktree is not None
         (req.worktree / "tempo/thing.py").write_text("ok\n")
         git(req.worktree, "add", "tempo/thing.py")
         git(req.worktree, "commit", "-m", "work")
-        foreign = req.worktree / "tickets" / "foreign-seed" / "ticket.md"
+        foreign = req.worktree / "tickets" / "foreign" / "ticket.md"
         foreign.parent.mkdir(parents=True)
-        foreign.write_text("untracked seed\n")
+        foreign.write_text("untracked ticket\n")
         return implement_reply()
 
     result, llm, _ = run(repo, [act, verdict()])
 
     assert outcomes(result) == {"implement": "ok", "check": "ok", "review": "ok"}
-    assert result.results["check"].artifact.seeds == []
     assert all(req.surface != "requisition_review" for req in llm.requests)
-    assert not (repo / "tickets" / "foreign-seed" / "ticket.md").exists()
-    assert f"tempo({STEM}): seeds" not in subjects(repo)
-
-
-def test_old_checks_json_without_seeds_still_parses(repo):
-    result, _, _ = run(repo, [agent({"tempo/thing.py": "ok\n"}), verdict()])
-    old = json.loads((repo / "tickets" / STEM / "checks.json").read_text())
-    del old["seeds"]
-
-    parsed = Invoice.model_validate(old)
-
-    assert parsed.seeds == [] and parsed.passed == result.results["check"].artifact.passed
+    assert not (repo / "tickets" / "foreign" / "ticket.md").exists()
 
 
 def test_old_checks_json_without_verification_still_feeds_prior_findings(repo):
@@ -539,19 +404,6 @@ def evidence(**kw) -> Evidence:
     return Evidence(**{**base, **kw})
 
 
-UNIT_MAIN = "## 19. P\n\n### 19.P3 Phase\n\nreg\n\n### 19.P4 Next\n\nn\n"
-UNIT_HEAD = UNIT_MAIN.replace("### 19.P4 Next", "### 19.P3.row Row\n\n- **Owner:** o\n\n### 19.P4 Next")
-
-
-def test_scope_fence_admits_a_plan_edit_confined_to_its_anchored_unit(tmp_path):
-    gate = ScopeFenceGate()
-    anchored = dict(scope_fence=["TEMPO_PLAN.md#19.P3.row"], changed_files=["TEMPO_PLAN.md"])
-    assert gate.check(evidence(**anchored, plan_main=UNIT_MAIN, plan_head=UNIT_HEAD), tmp_path).verdict == "pass"
-    escaped = UNIT_HEAD.replace("reg\n", "reg edited\n")
-    assert gate.check(evidence(**anchored, plan_main=UNIT_MAIN, plan_head=escaped), tmp_path).verdict == "fail"
-    other = dict(anchored, scope_fence=["TEMPO_PLAN.md#19.P3.other"])
-    assert gate.check(evidence(**other, plan_main=UNIT_MAIN, plan_head=UNIT_HEAD), tmp_path).verdict == "fail"
-    assert gate.check(evidence(changed_files=["TEMPO_PLAN.md"]), tmp_path).verdict == "fail"
 
 
 def test_diff_budget_caps_files_and_inserted_lines(tmp_path):
@@ -577,17 +429,13 @@ def test_gather_safety_evidence_runs_no_verification(repo, monkeypatch):
     author(repo)
     ctx = context(repo, [])
     ticket = validate_ticket(STEM, (repo / "tickets" / STEM / "ticket.md").read_text(), repo)
-    ticket = dataclasses.replace(ticket, scope_fence=("tempo/thing.py", "TEMPO_PLAN.md#19.P3.row"))
+    ticket = dataclasses.replace(ticket, scope_fence=("tempo/thing.py",))
 
     async def scenario():
-        ctx.fs.write(repo / "TEMPO_PLAN.md", UNIT_MAIN.encode())
-        await ctx.git.add(repo, ["TEMPO_PLAN.md"])
-        await ctx.git.commit(repo, "plan")
         ctx.fs.write(repo / "tickets" / STEM / "run.md", b"lifted run record")
         await ctx.git.worktree_add(repo, ctx.worktree(STEM), STEM, "main")
         (ctx.worktree(STEM) / "tempo/thing.py").write_text("ok\n")
-        ctx.fs.write(ctx.worktree(STEM) / "TEMPO_PLAN.md", UNIT_HEAD.encode())
-        await ctx.git.add(ctx.worktree(STEM), ["tempo/thing.py", "TEMPO_PLAN.md"])
+        await ctx.git.add(ctx.worktree(STEM), ["tempo/thing.py"])
         await ctx.git.commit(ctx.worktree(STEM), "work")
         original = ctx.exec_.run
         calls = []
@@ -597,7 +445,6 @@ def test_gather_safety_evidence_runs_no_verification(repo, monkeypatch):
         monkeypatch.setattr(ctx.exec_, "run", recording)
         safety = await stages.gather_safety_evidence(ctx, ticket, "ok")
         assert safety.verification == []
-        assert safety.plan_main == UNIT_MAIN and safety.plan_head == UNIT_HEAD
         assert safety.run_record == "lifted run record" and safety.inserted_lines > 0
         assert all(argv[0] == "git" and "worktree" not in argv for argv, _ in calls)
         full = await stages.gather_evidence(ctx, ticket, "ok", attempt=0)
@@ -635,231 +482,3 @@ def test_full_gather_evidence_reuses_safety_gatherer(repo, monkeypatch):
     asyncio.run(scenario())
 
 
-def test_scope_fence_admits_a_plan_edit_confined_to_all_anchored_units(tmp_path):
-    gate = ScopeFenceGate()
-    main = UNIT_HEAD.replace("### 19.P4 Next", "### 19.P3.other Other\n\nold\n\n### 19.P4 Next")
-    head = main.replace("- **Owner:** o", "- **Owner:** changed").replace("old\n", "new\n")
-    anchored = dict(scope_fence=["TEMPO_PLAN.md#19.P3.row", "TEMPO_PLAN.md#19.P3.other"],
-                    changed_files=["TEMPO_PLAN.md"], plan_main=main)
-    assert gate.check(evidence(**anchored, plan_head=head), tmp_path).verdict == "pass"
-    assert gate.check(evidence(**anchored, plan_head=head.replace("reg\n", "escaped\n")), tmp_path).verdict == "fail"
-    inserted = main.replace("### 19.P4 Next", "### 19.P3.missing Missing\n\nadded\n\n### 19.P4 Next")
-    anchored["scope_fence"].append("TEMPO_PLAN.md#19.P3.missing")
-    assert gate.check(evidence(**anchored, plan_head=inserted.replace("old\n", "new\n")), tmp_path).verdict == "pass"
-
-
-async def report_context(repo, *, verification=None, source=None, script=None):
-    """A disposable producer whose report is written by real Verification, never by its agent."""
-    from tests.test_merge import context
-    ctx = context(repo, script if script is not None else [agent({}), verdict()])
-    ctx.fs.write(repo / "tempo/thing.py", b"ok\n")
-    ctx.fs.write(repo / "source.json", (source if source is not None else _report_bytes()).encode())
-    command = verification if verification is not None else f"cp source.json tickets/{STEM}/{SHAKEOUT_REPORT}"
-    raw = TICKET.format(bypass="").replace("grep -q ok tempo/thing.py\nenv", command)
-    ctx.fs.write(repo / f"tickets/{STEM}/ticket.md", raw.encode())
-    await ctx.git.add(repo, ["tempo/thing.py", "source.json", f"tickets/{STEM}/ticket.md"])
-    await ctx.git.commit(repo, "producer fixture")
-    ticket = validate_ticket(STEM, raw, repo)
-    return ctx, ticket
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("nested", [False, True])
-async def test_outbox_only_check_accepts_registered_report(repo, nested):
-    from tempo.journal import EventType
-    name = f"nested/{SHAKEOUT_REPORT}" if nested else SHAKEOUT_REPORT
-    commands = (f"mkdir -p tickets/{STEM}/nested\n" if nested else "") + f"cp source.json tickets/{STEM}/{name}"
-    ctx, ticket = await report_context(repo, verification=commands)
-    run = await run_stages(ctx, ticket)
-    assert outcomes(run) == {"implement": "ok", "check": "ok", "review": "ok"}
-    assert await ctx.git.diff_names(repo, "main", STEM) == []
-    assert run.results["check"].artifact.changed_files == []
-    assert run.results["review"].artifact.reviewed_sha == run.results["implement"].artifact.produced_at_sha
-    completions = [e for e in ctx.driver.journal.read() if e.type == EventType.EFFECT_COMPLETION]
-    [checks] = [e for e in completions if e.key == f"ticket-plane/{STEM}/0/checks"]
-    rel = f"tickets/{STEM}/{name}"
-    assert checks.body["result"]["paths"] == [f"tickets/{STEM}/checks.json", rel]
-    assert checks.body["result"]["kind"] == "checks"
-    data = await ctx.git._run(repo, "show", f"{checks.body['result']['commit']}:{rel}")
-    assert ShakeoutReport.model_validate_json(data).model_dump_json() == _report_bytes()
-    assert all(rel not in e.body["result"].get("paths", []) for e in completions if e is not checks)
-    assert not (ctx.worktree(STEM) / rel).exists()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["none", "records", "unknown", "foreign", "malformed", "implement",
-                                  "inherited", "equal-copy", "dirty-tracked", "dirty-untracked"])
-async def test_outbox_only_check_requires_current_report(repo, case):
-    commands = {
-        "records": f"cp source.json tickets/{STEM}/review.md",
-        "unknown": f"cp source.json tickets/{STEM}/unknown.json",
-        "foreign": f"mkdir -p tickets/foreign\ncp source.json tickets/foreign/{SHAKEOUT_REPORT}",
-        "malformed": f"cp source.json tickets/{STEM}/{SHAKEOUT_REPORT}",
-        "equal-copy": f"cp source.json tickets/{STEM}/{SHAKEOUT_REPORT}",
-        "dirty-tracked": f"cp source.json tickets/{STEM}/{SHAKEOUT_REPORT}",
-        "dirty-untracked": f"cp source.json tickets/{STEM}/{SHAKEOUT_REPORT}",
-    }
-    def act(req):
-        if case == "implement":
-            (req.worktree / f"tickets/{STEM}/{SHAKEOUT_REPORT}").write_text(_report_bytes())
-        if case.startswith("dirty"):
-            path = "tempo/thing.py" if case == "dirty-tracked" else "tempo/untracked.py"
-            (req.worktree / path).write_text("uncommitted\n")
-        return implement_reply()
-    ctx, ticket = await report_context(repo, verification=commands.get(case, "true"), script=[act],
-                                       source='{"invalid":true}' if case == "malformed" else None)
-    if case in {"inherited", "equal-copy"}:
-        rel = f"tickets/{STEM}/{SHAKEOUT_REPORT}"
-        ctx.fs.write(repo / rel, _report_bytes().encode())
-        await ctx.git.add(repo, [rel])
-        await ctx.git.commit(repo, "inherited report rejection fixture")
-    run = await run_stages(ctx, ticket)
-    assert outcomes(run) == {"implement": "ok", "check": "gate_failed"}
-    assert not run.results["check"].artifact.passed
-    assert run.last[1].findings and all(f.paved_road for f in run.last[1].findings)
-    assert len(ctx.driver.llm.requests) == 1
-    if case in {"implement", "inherited"}:
-        assert not list((ctx.worktree(STEM) / f"tickets/{STEM}").rglob(SHAKEOUT_REPORT))
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["red", "missing", "invalid", "lift"])
-async def test_outbox_only_check_failure_never_admits(repo, monkeypatch, failure):
-    from tempo.git import GitError
-    from tempo.journal import EventType
-    commands = f"cp source.json tickets/{STEM}/{SHAKEOUT_REPORT}"
-    if failure == "red":
-        commands += "\nfalse"
-    elif failure == "missing":
-        commands = f"true --out=tickets/{STEM}/{SHAKEOUT_REPORT}"
-    ctx, ticket = await report_context(repo, verification=commands, script=[agent({})],
-                                      source='{"invalid":true}' if failure == "invalid" else None)
-    if failure == "lift":
-        commit = ctx.git.commit
-        async def failing(root, message, **kwargs):
-            if message == f"tempo({STEM}): checks":
-                raise GitError(["git", "commit"], 1, "", "injected checks failure")
-            await commit(root, message, **kwargs)
-        monkeypatch.setattr(ctx.git, "commit", failing)
-    run = await run_stages(ctx, ticket)
-    assert outcomes(run) == {"implement": "ok", "check": "gate_failed"}
-    assert not run.last[1].artifact.passed
-    assert all(f.code == "verification" and f.paved_road for f in run.last[1].findings)
-    events = ctx.driver.journal.read()
-    assert not any(e.type == EventType.STATE_TRANSITION and e.body.get("to") == "merged" for e in events)
-    assert not any((e.key or "").startswith("merge/") for e in events)
-
-    if failure in {"invalid", "lift"}:
-        assert not any(e.type == EventType.EFFECT_COMPLETION and e.key == f"ticket-plane/{STEM}/0/checks"
-                       for e in events)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["valid", "purge", "missing", "invalid", "machinery"])
-async def test_review_baseline_report_registered_checks_lift(repo, tmp_path, case):
-    from tempo.artifacts import REVIEW_BASELINE_REPORT, ReviewBaselineReport
-    from tempo.journal import EventType
-    from tempo import stages
-    from eval import harness
-    from tests.test_eval_harness import report_fixture
-    data_dir = tmp_path / "grade"
-    data_dir.mkdir()
-    report, _, _ = report_fixture(data_dir)
-    source = data_dir / "canonical.json"
-    harness.write_report(source, report, fs=LocalFileSystem())
-    assert ReviewBaselineReport.model_validate_json(source.read_bytes()) == report
-    assert stages.KNOWN_ARTIFACTS[REVIEW_BASELINE_REPORT] is ReviewBaselineReport
-    target = f"tickets/{STEM}/{REVIEW_BASELINE_REPORT}"
-    verification = (f"cp source.json {target}" if case in {"valid", "purge", "invalid"}
-                    else f"true --out={target}" if case == "missing" else "true")
-    captured = []
-    def act(req):
-        if case in {"purge", "machinery"}:
-            path = req.worktree / target
-            path.write_text('{"stale":true}')
-            captured.append(path)
-        return implement_reply()
-    ctx, ticket = await report_context(repo, verification=verification,
-        source='{"invalid":true}' if case == "invalid" else source.read_text(), script=[act, verdict()])
-    if case == "purge":
-        execute = ctx.exec_.run
-        async def observe(argv, **kwargs):
-            if argv[0] == "cp":
-                assert not (ctx.worktree(STEM) / target).exists()
-            return await execute(argv, **kwargs)
-        ctx.exec_.run = observe
-    result = await run_stages(ctx, ticket)
-    expected = "gate_failed" if case in {"missing", "invalid", "machinery"} else "ok"
-    assert result.results["check"].outcome == expected
-    events = ctx.driver.journal.read()
-    lifts = [e for e in events if e.type == EventType.EFFECT_COMPLETION
-             and target in e.body.get("result", {}).get("paths", [])]
-    if expected == "ok":
-        [lift] = lifts
-        assert lift.key == f"ticket-plane/{STEM}/0/checks"
-        assert lift.body["result"]["kind"] == "checks"
-        data = await ctx.git._run(repo, "show", f"{lift.body['result']['commit']}:{target}")
-        assert ReviewBaselineReport.model_validate_json(data) == report
-        assert not (ctx.worktree(STEM) / target).exists()
-    else:
-        assert not lifts and not (repo / target).exists()
-    if captured:
-        assert not captured[0].exists()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["host-loop-report.json", "exit-receipt.json"])
-@pytest.mark.parametrize("case", ["valid", "purge", "missing", "invalid", "machinery"])
-async def test_host_loop_and_receipt_registered_checks_lift(repo, tmp_path, name, case):
-    from tempo.artifacts import HOST_LOOP_REPORT, EXIT_RECEIPT, HostLoopReport, ExitReceipt
-    from tempo import stages
-    from tempo.journal import EventType
-    from eval import host_loop
-    from tests.test_host_loop import loop_report
-    from tests.test_eval_harness import report_fixture
-    data_dir = tmp_path / "receipt-data"
-    data_dir.mkdir()
-    baseline, _, _ = report_fixture(data_dir)
-    source = data_dir / name
-    if name == HOST_LOOP_REPORT:
-        host_loop.write_report(source, loop_report(), fs=LocalFileSystem())
-        model = HostLoopReport
-    else:
-        host_loop.write_receipt(source, host_loop.canonical(loop_report()), host_loop.canonical(baseline),
-                               fs=LocalFileSystem())
-        model = ExitReceipt
-    assert stages.KNOWN_ARTIFACTS[HOST_LOOP_REPORT] is HostLoopReport
-    assert stages.KNOWN_ARTIFACTS[EXIT_RECEIPT] is ExitReceipt
-    target = f"tickets/{STEM}/{name}"
-    verification = (f"cp source.json {target}" if case in {"valid", "purge", "invalid"}
-                    else f"true --out={target}" if case == "missing" else "true")
-    captured = []
-    def act(req):
-        if case in {"purge", "machinery"}:
-            path = req.worktree / target
-            path.write_text('{"stale":true}')
-            captured.append(path)
-        return implement_reply()
-    ctx, ticket = await report_context(repo, verification=verification,
-        source='{"invalid":true}' if case == "invalid" else source.read_text(), script=[act, verdict()])
-    if case == "purge":
-        execute = ctx.exec_.run
-        async def observe(argv, **kwargs):
-            if argv[0] == "cp":
-                assert not (ctx.worktree(STEM) / target).exists()
-            return await execute(argv, **kwargs)
-        ctx.exec_.run = observe
-    result = await run_stages(ctx, ticket)
-    expected = "gate_failed" if case in {"missing", "invalid", "machinery"} else "ok"
-    assert result.results["check"].outcome == expected
-    lifts = [e for e in ctx.driver.journal.read() if e.type == EventType.EFFECT_COMPLETION
-             and target in e.body.get("result", {}).get("paths", [])]
-    if expected == "ok":
-        [lift] = lifts
-        assert lift.key == f"ticket-plane/{STEM}/0/checks" and lift.body["result"]["kind"] == "checks"
-        committed = await ctx.git._run(repo, "show", f"{lift.body['result']['commit']}:{target}")
-        assert model.model_validate_json(committed) == model.model_validate_json(source.read_bytes())
-    else:
-        assert not lifts and not (repo / target).exists()
-    assert not (ctx.worktree(STEM) / target).exists()
-    assert all(not p.exists() for p in captured)

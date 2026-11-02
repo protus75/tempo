@@ -1,4 +1,4 @@
-"""Inline merge and explicit serve admission (TEMPO_PLAN.md sections 7, 9, 10; 19.P3.serve-merge-admission).
+"""Inline merge and explicit serve admission (TEMPO_PLAN.md sections 7, 9, 10).
 
 Per admission, all before main moves: restore the worktree's ticket plane -> rebase onto main ->
 re-run the mechanical hard set on the rebased candidate -> require the pinned review approval ->
@@ -13,7 +13,6 @@ import asyncio
 import re
 from collections.abc import Callable
 from contextlib import nullcontext
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,22 +20,19 @@ if TYPE_CHECKING:
     from tempo.daemon import PauseConsumer
     from tempo.mergequeue import ConflictHandoff, MergeQueue
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict
 
-from tempo.artifacts import Artifact, Cost, Finding, NonBlank, StageResult
+from tempo.artifacts import Artifact, Finding, NonBlank, StageResult
 from tempo.gates import GateReport, run_gates
-from tempo.git import GitError, RebaseRefused
+from tempo.git import RebaseRefused
 from tempo.journal import Event, EventType
 from tempo.stages import (
     CHECK_GATES,
     MAIN,
-    KNOWN_ARTIFACTS,
     ApprovedInvoice,
-    Invoice,
     StageContext,
     check_severity,
     gather_evidence,
-    dirty_code,
     read_review,
 )
 from tempo.tickets import TICKETS_DIR, Ticket, TicketInvalid, ticket_path, validate_ticket
@@ -45,16 +41,9 @@ from tempo.tickets import TICKETS_DIR, Ticket, TicketInvalid, ticket_path, valid
 MERGE_SPEC_VERSION = 1
 
 
-@dataclass(frozen=True)
-class Held:
-    stem: str
-    attempt: int
-    hold_id: str
-
-
 def compose_pipeline(ctx: StageContext, *, escalate: Callable[[Event], None],
                      control: "PauseConsumer | None") -> "MergeQueue":
-    """Compose admission without running it; bootstrap dispatch still merges inline."""
+    """Compose admission without running it; CLI run dispatch still merges inline."""
     # The queue's priority helpers import drain, which imports runner and this module.
     from tempo.mergequeue import MergeQueue
 
@@ -76,26 +65,14 @@ class Candidate(BaseModel):
     changed_files: list[str]
     ticket_text: str
     review_text: str | None  # main's `review.md`, None when absent
-    seeds: list["SeedOnMain"] = []
-    seed_checks_text: str | None = None
     provenance_findings: list[Finding] = []
 
 
-class SeedOnMain(BaseModel):
-    """A journaled seed's blob as committed on main before the admission rebase."""
-
-    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
-
-    stem: NonBlank
-    ticket_sha: str | None
-    ticket_text: str | None
-
-
 class Admission(Artifact):
-    """The admitted code commit (null for a report producer) and its pinned approval."""
+    """The admitted code commit and its pinned approval."""
 
     stem: NonBlank
-    commit: NonBlank | None
+    commit: NonBlank
     reviewed_sha: NonBlank
 
 
@@ -157,52 +134,11 @@ class ApprovalGate:
                           findings=[Finding(code=self.code, path=path, message=message, paved_road=road)])
 
 
-class SeedSafetyGate:
-    """MERGE-SAFETY: every journaled seed still has an approval for main's exact committed blob."""
-
-    code = "requisition_review"
-
-    def check(self, artifact: Candidate, workspace: Path) -> GateReport:
-        if not artifact.seeds:
-            return GateReport(code=self.code, verdict="pass")
-        path = f"{TICKETS_DIR}/{artifact.stem}/checks.json"
-        road = f"re-run `run {artifact.stem}` so Check records approvals for the committed seeds"
-        findings = []
-        if artifact.seed_checks_text is None:
-            findings.append(Finding(code=self.code, path=path, message="checks.json is missing on main",
-                                    paved_road=road))
-            reviews = []
-        else:
-            try:
-                reviews = Invoice.model_validate_json(artifact.seed_checks_text).seeds
-            except ValidationError as exc:
-                findings.append(Finding(code=self.code, path=path,
-                                        message=f"checks.json does not parse: {exc.error_count()} schema error(s)",
-                                        paved_road=road))
-                reviews = []
-        for seed in artifact.seeds:
-            seed_path = ticket_path(seed.stem)
-            if seed.ticket_sha is None or seed.ticket_text is None:
-                findings.append(Finding(code=self.code, path=seed_path, message="seed is missing on main",
-                                        paved_road=road))
-                continue
-            if not any(r.stem == seed.stem and r.verdict == "approve" and r.ticket_sha == seed.ticket_sha
-                       for r in reviews):
-                findings.append(Finding(code=self.code, path=seed_path,
-                                        message="no approve verdict pins the committed seed ticket.md blob",
-                                        paved_road=road))
-            try:
-                validate_ticket(seed.stem, seed.ticket_text, workspace)
-            except TicketInvalid as exc:
-                findings.extend(f.model_copy(update={"code": self.code}) for f in exc.findings)
-        return GateReport(code=self.code, verdict="fail" if findings else "pass", findings=findings)
-
-
-MERGE_GATES = (TicketSchemaGate(), PostRebaseGate(), ApprovalGate(), SeedSafetyGate())
+MERGE_GATES = (TicketSchemaGate(), PostRebaseGate(), ApprovalGate())
 
 
 class AdmissionBoundary:
-    """Explicit, idle composition and memory-only delivery (19.P3.serve-merge-admission)."""
+    """Explicit, idle composition and memory-only delivery."""
 
     def __init__(self, ctx: StageContext, *, mode: str = "inline",
                  queue: "MergeQueue | None" = None, waiting=nullcontext) -> None:
@@ -214,22 +150,18 @@ class AdmissionBoundary:
         self.ctx, self.mode, self.queue, self.waiting = ctx, mode, queue, waiting
         self.results: dict[tuple[str, int], asyncio.Future] = {}
 
-    async def __call__(self, ticket: Ticket, *, attempt: int) -> "StageResult | ConflictHandoff | Held":
+    async def __call__(self, ticket: Ticket, *, attempt: int) -> "StageResult | ConflictHandoff":
         ctx = self.ctx
         if self.mode == "inline":
             return await merge(ctx, ticket, attempt=attempt)
-        started = ctx.driver.clock()
         if findings := retro_bridge_findings(ctx, ticket):
-            return _refused(findings, Cost(seconds=(ctx.driver.clock() - started).total_seconds()))
+            return _refused(findings)
         reviewed = await ctx.git.rev_parse(ctx.repo, ticket.stem)
         paths = await ctx.git.diff_names(ctx.repo, MAIN, ticket.stem)
-        seeds, checks = await gather_seeds(ctx, ticket)
-        candidate = read_candidate(ctx, ticket, reviewed, paths, seeds, checks)
-        reports = run_gates((PostRebaseGate(), SeedSafetyGate()), candidate, ctx.repo,
-                           severity={"post_rebase_regate": "hard", "requisition_review": "hard"})
+        candidate = read_candidate(ctx, ticket, reviewed, paths)
+        reports = run_gates((PostRebaseGate(),), candidate, ctx.repo, severity={"post_rebase_regate": "hard"})
         if reports.hard_failures:
-            return _refused([f for r in reports.hard_failures for f in r.findings],
-                            Cost(seconds=(ctx.driver.clock() - started).total_seconds()))
+            return _refused([f for r in reports.hard_failures for f in r.findings])
         assert self.queue is not None
         key = ticket.stem, attempt
         result = asyncio.get_running_loop().create_future()
@@ -243,7 +175,7 @@ class AdmissionBoundary:
         finally:
             self.results.pop(key, None)
 
-    def deliver(self, ticket: Ticket, attempt: int, result: "StageResult | ConflictHandoff | Held") -> bool:
+    def deliver(self, ticket: Ticket, attempt: int, result: "StageResult | ConflictHandoff") -> bool:
         future = self.results.get((ticket.stem, attempt))
         if future is None:
             return False
@@ -258,44 +190,17 @@ def squash_message(ticket: Ticket, reviewed_sha: str) -> str:
     return f"tempo({ticket.stem}): {goal}\n\ntempo-ticket: {ticket.stem}\ntempo-reviewed-sha: {reviewed_sha}\n"
 
 
-def _refused(findings: list[Finding], cost: Cost) -> StageResult:
-    return StageResult(outcome="gate_failed", artifact=None, findings=findings, cost=cost)
+def _refused(findings: list[Finding]) -> StageResult:
+    return StageResult(outcome="gate_failed", artifact=None, findings=findings)
 
 
-async def gather_seeds(ctx: StageContext, ticket: Ticket) -> tuple[list[SeedOnMain], str | None]:
-    """Pin seed approval custody to main's committed blobs before the admission rebase."""
-    stem = ticket.stem
-    seeded_stems = sorted({e.ticket for e in ctx.driver.journal.read()
-                           if e.type == EventType.SIGNAL and e.ticket is not None
-                           and e.body.get("signal") == "ticket_intake" and e.body.get("seeded_by") == stem})
-    seeds = []
-    for seed_stem in seeded_stems:
-        path = ticket_path(seed_stem)
-        try:
-            sha = await ctx.git.rev_parse(ctx.repo, f"{MAIN}:{path}")
-            text = await ctx.git._run(ctx.repo, "show", f"{MAIN}:{path}")
-        except GitError:
-            sha, text = None, None
-        seeds.append(SeedOnMain(stem=seed_stem, ticket_sha=sha, ticket_text=text))
-    checks_text = None
-    if seeds:
-        try:
-            checks_text = await ctx.git._run(ctx.repo, "show", f"{MAIN}:{TICKETS_DIR}/{stem}/checks.json")
-        except GitError:
-            pass
-
-    return seeds, checks_text
-
-
-def read_candidate(ctx: StageContext, ticket: Ticket, reviewed: str, changed_files: list[str],
-                   seeds: list[SeedOnMain], checks_text: str | None) -> Candidate:
+def read_candidate(ctx: StageContext, ticket: Ticket, reviewed: str, changed_files: list[str]) -> Candidate:
     stem = ticket.stem
     review_md = ctx.repo / TICKETS_DIR / stem / "review.md"
     return Candidate(
         stem=stem, reviewed_sha=reviewed, changed_files=changed_files,
         ticket_text=(ctx.repo / ticket_path(stem)).read_text(),
         review_text=review_md.read_text() if review_md.is_file() else None,
-        seeds=seeds, seed_checks_text=checks_text,
         provenance_findings=retro_bridge_findings(ctx, ticket),
     )
 
@@ -333,10 +238,8 @@ def retro_bridge_findings(ctx: StageContext, ticket: Ticket) -> list[Finding]:
 async def merge(ctx: StageContext, ticket: Ticket, *, attempt: int) -> StageResult:
     """Admit one reviewed branch to main, or refuse it with findings and main untouched."""
     stem = ticket.stem
-    started = ctx.driver.clock()
     worktree = ctx.worktree(stem)
     reviewed = await ctx.git.rev_parse(ctx.repo, stem)
-    seeds, checks_text = await gather_seeds(ctx, ticket)
 
     # Lifted outbox copies show as tracked deletions in a worktree born from a main that already held
     # them, and a dirty tree refuses the rebase. Restoring to the branch's committed ticket plane (which
@@ -346,26 +249,21 @@ async def merge(ctx: StageContext, ticket: Ticket, *, attempt: int) -> StageResu
     try:
         await ctx.git.rebase(worktree, MAIN)
     except RebaseRefused as e:
-        cost = Cost(seconds=(ctx.driver.clock() - started).total_seconds())
         return _refused([Finding(code="post_rebase_regate", message=f"rebase onto main refused: {e.err.strip()}",
-                                 paved_road=f"re-run `run {stem}` so Implement re-branches from current main")],
-                        cost)
+                                 paved_road=f"re-run `run {stem}` so Implement re-branches from current main")])
 
     evidence = await gather_evidence(ctx, ticket, "ok", attempt=attempt, stage="merge")
-    candidate = read_candidate(ctx, ticket, reviewed, evidence.changed_files, seeds, checks_text)
+    candidate = read_candidate(ctx, ticket, reviewed, evidence.changed_files)
     severity = check_severity(ctx, ticket)
-    if candidate.seeds:
-        severity["requisition_review"] = "hard"  # a seeded branch needs an exact committed approval
     gated = [run_gates(CHECK_GATES, evidence, worktree, severity=severity),
              run_gates(MERGE_GATES, candidate, ctx.repo, severity=severity)]
     if hard := [f for g in gated for r in g.hard_failures for f in r.findings]:
-        return _refused(hard, Cost(seconds=(ctx.driver.clock() - started).total_seconds()))
+        return _refused(hard)
 
     admission = await write_squash(ctx, ticket, reviewed, attempt=attempt)
     await retire(ctx, stem)
     soft = [f for g in gated for f in g.findings]
-    return StageResult(outcome="ok", artifact=admission, findings=soft,
-                       cost=Cost(seconds=(ctx.driver.clock() - started).total_seconds()))
+    return StageResult(outcome="ok", artifact=admission, findings=soft)
 
 
 async def write_squash(ctx: StageContext, ticket: Ticket, reviewed: str, *, attempt: int) -> Admission:
@@ -376,17 +274,12 @@ async def write_squash(ctx: StageContext, ticket: Ticket, reviewed: str, *, atte
                     if bridge is not None and ctx.worktree(stem).exists() else None)
 
     async def squash() -> dict:
-        if not await ctx.git.diff_names(ctx.repo, MAIN, stem):
-            if not await lifted_report_paths(ctx, stem, attempt) or await dirty_code(ctx, stem):
-                raise ValueError("report admission requires current checks-lift custody and a clean code tree;"
-                                 " rerun Check with a registered Verification report")
-            return {"commit": None}
         await ctx.git.merge_squash(ctx.repo, stem)
         await ctx.git.commit(ctx.repo, squash_message(ticket, reviewed))
         return {"commit": await ctx.git.rev_parse(ctx.repo, MAIN)}
 
     commit = (await ctx.driver.effects.run(squash, key="/".join(("merge", stem, str(attempt))), ticket=stem))["commit"]
-    if (bridge is not None and commit is not None and
+    if (bridge is not None and
             (checked_tree is None or await ctx.git.rev_parse(ctx.repo, "main^{tree}") == checked_tree)):
         paths = sorted(p for p in (await ctx.git._run(ctx.repo, "diff-tree", "--no-commit-id", "--name-only",
                                                      "-r", commit)).splitlines()
@@ -406,43 +299,8 @@ async def write_squash(ctx: StageContext, ticket: Ticket, reviewed: str, *, atte
                for e in ctx.driver.journal.read()):
         ctx.driver.journal.append(EventType.STATE_TRANSITION, body, ticket=stem)
     return Admission(produced_by_spec_version=MERGE_SPEC_VERSION,
-                     produced_at_sha=commit or await ctx.git.rev_parse(ctx.repo, MAIN),
+                     produced_at_sha=commit,
                      stem=stem, commit=commit, reviewed_sha=reviewed)
-
-
-async def lifted_report_paths(ctx: StageContext, stem: str, attempt: int) -> list[str]:
-    """Read this run's checks completion and matching committed blobs, never checkout copies."""
-    key = f"ticket-plane/{stem}/{attempt}/checks"
-    completed = [e for e in ctx.driver.journal.read()
-                 if e.type == EventType.EFFECT_COMPLETION and e.key == key and e.ticket == stem]
-    if not completed:
-        return []
-    result = completed[-1].body.get("result")
-    if (not isinstance(result, dict) or result.get("kind") != "checks"
-            or not isinstance(result.get("commit"), str) or not result["commit"].strip()
-            or not isinstance(result.get("paths"), list)):
-        return []
-    paths = []
-    try:
-        if await ctx.git.merge_base(ctx.repo, MAIN, result["commit"]) != result["commit"]:
-            return []
-        for rel in result["paths"]:
-            if not isinstance(rel, str):
-                continue
-            path = Path(rel)
-            if (path.as_posix() != rel or ".." in path.parts
-                    or not rel.startswith(f"{TICKETS_DIR}/{stem}/")
-                    or path.name == "run.md" or path.name not in KNOWN_ARTIFACTS):
-                continue
-            lifted = await ctx.git.rev_parse(ctx.repo, f"{result['commit']}:{rel}")
-            if await ctx.git.rev_parse(ctx.repo, f"{MAIN}:{rel}") != lifted:
-                continue
-            text = await ctx.git._run(ctx.repo, "show", f"{MAIN}:{rel}")
-            KNOWN_ARTIFACTS[path.name].model_validate_json(text)
-            paths.append(rel)
-    except (GitError, ValidationError):
-        return []
-    return paths
 
 
 async def retire(ctx: StageContext, stem: str) -> None:

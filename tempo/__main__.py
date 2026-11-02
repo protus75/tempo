@@ -25,7 +25,7 @@ from tempo.notify import NOTIFY_TIMEOUT_S, NotificationReconciler
 from tempo.providers import ProviderLLM, ProviderSession, ProviderSetupError, routed_conduct_paths, child_env
 from tempo.redact import Redactor
 from tempo.restart import Restart
-from tempo.seams import Clock, ExecutableNotFound, LocalFileSystem, ProcessExec, SubprocessExec
+from tempo.seams import Clock, ExecutableNotFound, LocalFileSystem, SubprocessExec
 from tempo.seams import CommandNotifications
 from tempo.status import project, render
 from tempo.storm import StormLedger
@@ -58,7 +58,7 @@ def build_control(checkout: runner.Checkout) -> PauseConsumer:
 
 
 def build_daemon_core(
-    checkout: runner.Checkout, *, config_path: Path | None = None, plan: str | None,
+    checkout: runner.Checkout, *, config_path: Path | None = None,
     read: Callable[[str], str | None], debounce: float,
     quarantined: Callable[[], Set[str]], drought_parked: Callable[[], Set[str]],
     completed_unmerged: Callable[[], int],
@@ -93,7 +93,7 @@ def build_daemon_core(
 
     core = daemon_core(
         checkout.repo, journal=checkout.journal,
-        load=lambda: load_config(config_path, cwd=checkout.repo), bind=bind, plan=plan, read=read,
+        load=lambda: load_config(config_path, cwd=checkout.repo), bind=bind, read=read,
         clock=checkout.clock, sleep=checkout.sleep, debounce=debounce,
         quarantined=quarantined, drought_parked=drought_parked,
         completed_unmerged=completed_unmerged, max_unmerged=checkout.config.scheduler.max_unmerged,
@@ -120,19 +120,19 @@ def build_daemon_core(
     return core
 
 
-def build_serve(checkout: runner.Checkout, *, config_path=None, plan=None, read=None,
+def build_serve(checkout: runner.Checkout, *, config_path=None, read=None,
                 stems=None, prepare=runner.prepare_pipeline, signals=None, failure=None) -> serve.Serve:
     """Compose filesystem delivery at the same root as every other real seam."""
     def read_ticket(stem):
         path = checkout.repo / ticket_path(stem)
         return path.read_text() if path.is_file() else None
-    return serve.Serve(checkout, config_path=config_path, plan=plan, read=read or read_ticket,
+    return serve.Serve(checkout, config_path=config_path, read=read or read_ticket,
         stems=stems or (lambda: (p.parent.name for p in (checkout.repo / "tickets").glob("*/ticket.md"))),
         prepare=prepare, signals=signals, failure=failure)
 
 
 def build_notifications(checkout: runner.Checkout, *, config_path: Path | None, log) -> NotificationReconciler:
-    executor = SubprocessExec()  # Never alias active work or the self-upgrade handoff.
+    executor = SubprocessExec()  # Never alias active work.
     def compose(config):
         return CommandNotifications(executor, cwd=checkout.repo,
             env=child_env(checkout.env, config, serving=None), timeout=NOTIFY_TIMEOUT_S,
@@ -140,21 +140,6 @@ def build_notifications(checkout: runner.Checkout, *, config_path: Path | None, 
     return NotificationReconciler(journal=checkout.journal, clock=checkout.clock,
         config_path=config_path or checkout.repo / "config.yaml",
         load=lambda: load_config(config_path, cwd=checkout.repo), compose=compose, log=log)
-
-
-def watchdog_observation(workspace: Path, fence):
-    from tempo.watchdog import ScopeObservation
-
-    def snapshot():
-        files = {}
-        for prefix in fence:
-            path = workspace / prefix.partition('#')[0]
-            paths = path.rglob('*') if path.is_dir() else (path,)
-            for candidate in paths:
-                if candidate.is_file():
-                    files[candidate.relative_to(workspace).as_posix()] = candidate.read_bytes()
-        return files
-    return ScopeObservation(fence, snapshot)
 
 
 def watchdog_notifications(config, env, effects, log, *, redactor, cwd, **context):
@@ -185,9 +170,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("stem")
     for verb in ("confirm", "reject"):
         sub.add_parser(verb, help=f"{verb} a draft or Reject item under the lock").add_argument("stem")
-    dr = sub.add_parser("drain", help="run every eligible ticket to quiescence under the lock")
-    dr.add_argument("--parked", action="append", default=[], metavar="STEM",
-                    help="a stem the handing-off parent drain parked (set by the self-upgrade re-exec)")
+    sub.add_parser("drain", help="run every eligible ticket to quiescence under the lock")
     sub.add_parser("serve", help="run the foreground daemon until kill or a signal stops it")
     return ap
 
@@ -199,7 +182,6 @@ def main(
     env: Mapping[str, str] | None = None,
     clock: Clock = _clock,
     pipeline: runner.Pipeline = runner.pipeline,
-    reexec: ProcessExec | None = None,
 ) -> int:
     args = _parser().parse_args(argv)
     repo = Path(cwd) if cwd is not None else Path.cwd()
@@ -258,9 +240,7 @@ def main(
             print("\n".join(line for _, line in lines) if lines else "no pending suggestions")
             return 0
         if args.verb == "serve":
-            plan_path = repo / "TEMPO_PLAN.md"
-            return asyncio.run(serve.serve(checkout, config_path=args.config,
-                plan=plan_path.read_text() if plan_path.is_file() else None, signals=_serve_signals))
+            return asyncio.run(serve.serve(checkout, config_path=args.config, signals=_serve_signals))
         checkout = replace(checkout, control=build_control(checkout))
         checkout.control.load_config = lambda: load_config(args.config, cwd=repo)
         dispatch = pipeline(checkout)
@@ -276,11 +256,8 @@ def main(
 
                 def __getattr__(self, name):
                     return getattr(dispatch, name)
-            # The handoff's own seam instance, never shared with active work (section 15).
-            report = asyncio.run(drain.drain(checkout, DrainDispatch(), reexec=reexec or SubprocessExec(),
-                                             parked=args.parked))
-            if report.handoff is None:
-                print(report.render(), end="")
+            report = asyncio.run(drain.drain(checkout, DrainDispatch()))
+            print(report.render(), end="")
             return report.exit_code
         return asyncio.run(runner.run_ticket(args.stem, checkout, dispatch))
     except (ConfigError, runner.Refusal, LockHeld, IntakeRefused, JournalCorruption, ProviderSetupError,
@@ -382,26 +359,21 @@ async def _control(checkout: runner.Checkout, verb: str) -> int:
 
 
 async def _verdict(checkout, stem, verb):
-    from tempo.mergequeue import held_admissions
-
     if findings := stem_findings(stem):
         raise runner.Refusal(findings[0].message, findings[0].paved_road)
-    held = held_admissions(checkout.journal.read()).get(stem)
-    if held is None:
-        try:
-            return await runner.verdict(stem, checkout, kill=verb == "reject")
-        except LockHeld:
-            if verb != "confirm" or not runner.committed_draft(checkout, stem):
-                raise
-            text = await checkout.git._run(checkout.repo, "show", f"main:{ticket_path(stem)}")
-            if validate_ticket(stem, text, checkout.repo).frontmatter.state != "draft":
-                raise runner.Refusal("no committed draft", "restore the committed draft before confirming")
+    try:
+        return await runner.verdict(stem, checkout, kill=verb == "reject")
+    except LockHeld:
+        if verb != "confirm" or not runner.committed_draft(checkout, stem):
+            raise
+        text = await checkout.git._run(checkout.repo, "show", f"main:{ticket_path(stem)}")
+        if validate_ticket(stem, text, checkout.repo).frontmatter.state != "draft":
+            raise runner.Refusal("no committed draft", "restore the committed draft before confirming")
     try:
         lifecycle, _ = control.read_active(checkout.config.state_dir, Path.read_bytes)
     except ValueError as exc:
         raise runner.Refusal("current control identity unavailable", str(exc)) from exc
-    request = control.AdmissionRequest(uuid4().hex, lifecycle, verb, stem,
-                                       held[0] if held else None, "operator")
+    request = control.AdmissionRequest(uuid4().hex, lifecycle, "confirm", stem, "operator")
     control.publish_request(checkout.config.state_dir, request, checkout.fs)
     print(f"{verb} submitted: {request.request_id}")
     return 0

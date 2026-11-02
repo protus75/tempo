@@ -31,14 +31,14 @@ class EventType(StrEnum):
     CHECKPOINT = "checkpoint"
 
 
-Dispatch = Literal["retry", "escalate", "reject_queue", "spec_gap_hold"]
+Dispatch = Literal["retry", "escalate", "reject_queue"]
 
 SIGNAL_NAMES: frozenset[str] = frozenset({
     "author_invoked", "checkpoint_push_failed", "control_decision", "dead_dependency",
-    "diagnose_eval_start", "diagnosis", "draft_confirmed", "drain_halted", "drain_handoff",
-    "flake_detected", "flake_released", "hardening_round", "harvest_failed", "kill_applied",
+    "diagnosis", "draft_confirmed", "drain_halted",
+    "flake_detected", "flake_released", "harvest_failed", "kill_applied",
     "merge_conflict_facts", "merge_red_streak", "merge_tree_mismatch", "provider_call_outcome",
-    "provider_cap_wait", "recovery_alert", "reject_arrival", "reject_verdict", "requisition_verdict", "review_baseline",
+    "provider_cap_wait", "recovery_alert", "reject_arrival", "reject_verdict", "requisition_verdict",
     "retro_failed", "retro_ticket_authored", "retro_prompt_spec_change_merged", "tombstone_auto_reopened",
     "rework_order", "storm_breaker_trip", "storm_occurrence", "supersedes", "ticket_intake",
     "triage_pass", "watcher_parse_failure",
@@ -116,18 +116,11 @@ class Journal:
         self._clock = clock
         self._fs = LocalFileSystem()
         self._tail_repaired = False
-        self._closed = False
-
-    def close(self) -> None:
-        """End this handle's writes: the drain's self-upgrade handoff closes it before its child takes the lock."""
-        self._closed = True
 
     def append(
         self, type: str, body: dict[str, Any], *, ticket: str | None = None, key: str | None = None
     ) -> Event:
         """Write one event and fsync it before returning (write-ahead)."""
-        if self._closed:
-            raise RuntimeError(f"{self.dir} handle is closed: a handed-off drain never writes after its spawn")
         if type not in EVENT_VERSIONS or type in _NOT_EMITTED:
             emittable = sorted(set(EVENT_VERSIONS) - _NOT_EMITTED)
             raise ValueError(f"event type {type!r} is not emittable; use one of {emittable}")

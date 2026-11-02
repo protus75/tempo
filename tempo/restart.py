@@ -1,4 +1,4 @@
-"""Lock-held startup and idle recovery (TEMPO_PLAN.md 19.P3.restart-timers)."""
+"""Lock-held startup and idle recovery."""
 
 import asyncio
 from collections.abc import Callable
@@ -16,7 +16,6 @@ class Restart:
         self.ready = False
         self._slot = asyncio.Lock()
         self._failure: BaseException | None = None
-        self.admissions = None
 
     async def _reconcile(self) -> list[str]:
         checkout = self.checkout
@@ -34,8 +33,6 @@ class Restart:
             if self.owned():
                 raise ValueError("startup requires no live run or admission; finish and await its cleanup first")
             try:
-                if self.admissions is not None:
-                    await self.admissions()
                 await self._reconcile()
                 self.timers.reconstruct()
                 self.timers.fire_due()

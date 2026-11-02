@@ -13,110 +13,45 @@ from tempo.seams import LocalFileSystem
 from tests.test_cli import Clock, ENV, Stages, root, ticket, write
 
 
-@pytest.mark.parametrize("dirless", [False, True, "draft", "Reject"])
-def test_confirm_held_without_writer_lock(tmp_path, monkeypatch, capsys, dirless):
+@pytest.mark.parametrize("case", ["draft", "Reject"])
+def test_confirm_without_writer_lock(tmp_path, case):
     import asyncio
     from tests.test_mergequeue import ctx as context_fixture, ready, commit, admission_control
-    from tests.test_supervised_merge_hold import hold
     from tempo import runner
     from tempo.journal import EventType
     from tempo.tickets import stamp
     ctx = context_fixture.__wrapped__(tmp_path)
     async def exercise():
-        if dirless in ("draft", "Reject"):
-            ticket = await ready(ctx)
-            path = ctx.repo / f"tickets/{ticket.stem}/ticket.md"
-            if dirless == "Reject":
-                ctx.driver.journal.append(EventType.STATE_TRANSITION, {"to": "running"}, ticket=ticket.stem)
-                ctx.driver.journal.append(EventType.STATE_TRANSITION, {"to": "gate_failed", "routed": "reject_queue"}, ticket=ticket.stem)
-                assert await asyncio.to_thread(entry.main, ["confirm", ticket.stem], cwd=ctx.repo, env=ctx.env, clock=ctx.driver.clock) == 0
-                assert await asyncio.to_thread(entry.main, ["confirm", ticket.stem], cwd=ctx.repo, env=ctx.env, clock=ctx.driver.clock) == 2
-                assert [e.body["verdict"] for e in ctx.driver.journal.read() if e.body.get("signal") == "reject_verdict"] == ["keep"]
-                return
-            ctx.fs.write(path, stamp(path.read_text(), "state", "draft").encode())
-            await commit(ctx, ctx.repo, [f"tickets/{ticket.stem}/ticket.md"])
-            ctx.driver.journal.append(EventType.SIGNAL, {"signal": "ticket_intake", "state": "draft"}, ticket=ticket.stem)
-            consumer = admission_control(ctx)
-            checkout = runner.Checkout(ctx.repo, ctx.config, ctx.env, ctx.exec_, ctx.git, ctx.driver.journal, ctx.fs, ctx.driver.clock, ctx.driver.sleep)
-            consumer.inbox.draft = lambda stem: runner.committed_draft(checkout, stem)
-            lock = Lockfile(ctx.config.state_dir, instance_id="live", clock=ctx.driver.clock)
-            lock.acquire()
-            control.write_active(ctx.config.state_dir, consumer.projection, ctx.fs, hold_id=None)
-            try:
-                assert await asyncio.to_thread(entry.main, ["confirm", ticket.stem], cwd=ctx.repo, env=ctx.env, clock=ctx.driver.clock) == 0
-                consumer.inbox.consume()
-                async def confirmed(stem, request_id): await runner.confirm_draft(stem, request_id, ctx)
-                await consumer.inbox.settle_admissions(confirmed)
-                events = ctx.driver.journal.read()
-                await consumer.inbox.settle_admissions(confirmed)
-                assert ctx.driver.journal.read() == events
-                assert "state: confirmed" in path.read_text()
-                assert sum(e.body.get("signal") == "draft_confirmed" for e in events) == 1
-                assert not control.releases(events)
-            finally:
-                lock.release()
-            return
-        ticket, queue, held = await hold(ctx)
-        writer = Lockfile(ctx.config.state_dir, instance_id="daemon", clock=ctx.driver.clock)
-        writer.acquire()
-        control.write_active(ctx.config.state_dir, queue.control.projection, ctx.fs, hold_id=None)
+        ticket = await ready(ctx)
         path = ctx.repo / f"tickets/{ticket.stem}/ticket.md"
-        before = path.read_bytes()
-        if dirless:
-            path.unlink()
-        def forbidden(*_a, **_k):
-            pytest.fail("held publisher took writer role, rebuilt work, or rearmed Reject")
-        try:
-            with monkeypatch.context() as patch:
-                patch.setattr(Lockfile, "acquire", forbidden)
-                patch.setattr(Journal, "append", forbidden)
-                for _ in range(2):
-                    assert await asyncio.to_thread(entry.main, ["confirm", ticket.stem], cwd=ctx.repo,
-                        env=ctx.env, clock=ctx.driver.clock, pipeline=forbidden) == 0
-            files = list((ctx.config.state_dir / "control/inbox").glob("*.json"))
-            assert len(files) == 2
-            assert all(json.loads(p.read_bytes())["hold_id"] == held.hold_id for p in files)
-            assert all(json.loads(p.read_bytes())["actor"] == "operator" for p in files)
-        finally:
-            ctx.fs.write(path, before)
-            writer.release()
-        queue.control.inbox.consume()
-        [result] = await queue.process()
-        assert result.outcome == "ok" and not ctx.worktree(ticket.stem).exists()
-        assert not any(e.body.get("signal") == "reject_verdict" or e.type == "cap_consumed" for e in ctx.driver.journal.read())
-    asyncio.run(exercise())
-
-
-def test_reject_held_candidate(tmp_path):
-    import asyncio
-    from tests.test_mergequeue import ctx as context_fixture, ready
-    from tests.test_supervised_merge_hold import hold
-    ctx = context_fixture.__wrapped__(tmp_path)
-    async def exercise():
-        ticket, queue, held = await hold(ctx)
-        await ready(ctx, "dependent", fence=("tempo/dependent.py",), changes={"tempo/dependent.py": "ok\n"})
-        path = ctx.repo / "tickets/dependent/ticket.md"
-        raw = path.read_text().replace("## Depends on\nnone", f"## Depends on\n- {ticket.stem}")
-        ctx.fs.write(path, raw.encode())
-        await ctx.git.add(ctx.repo, ["tickets/dependent/ticket.md"])
-        await ctx.git.commit(ctx.repo, "dependent edge")
-        lock = Lockfile(ctx.config.state_dir, instance_id="daemon", clock=ctx.driver.clock)
+        if case == "Reject":
+            ctx.driver.journal.append(EventType.STATE_TRANSITION, {"to": "running"}, ticket=ticket.stem)
+            ctx.driver.journal.append(EventType.STATE_TRANSITION, {"to": "gate_failed", "routed": "reject_queue"}, ticket=ticket.stem)
+            assert await asyncio.to_thread(entry.main, ["confirm", ticket.stem], cwd=ctx.repo, env=ctx.env, clock=ctx.driver.clock) == 0
+            assert await asyncio.to_thread(entry.main, ["confirm", ticket.stem], cwd=ctx.repo, env=ctx.env, clock=ctx.driver.clock) == 2
+            assert [e.body["verdict"] for e in ctx.driver.journal.read() if e.body.get("signal") == "reject_verdict"] == ["keep"]
+            return
+        ctx.fs.write(path, stamp(path.read_text(), "state", "draft").encode())
+        await commit(ctx, ctx.repo, [f"tickets/{ticket.stem}/ticket.md"])
+        ctx.driver.journal.append(EventType.SIGNAL, {"signal": "ticket_intake", "state": "draft"}, ticket=ticket.stem)
+        consumer = admission_control(ctx)
+        checkout = runner.Checkout(ctx.repo, ctx.config, ctx.env, ctx.exec_, ctx.git, ctx.driver.journal, ctx.fs, ctx.driver.clock, ctx.driver.sleep)
+        consumer.inbox.draft = lambda stem: runner.committed_draft(checkout, stem)
+        lock = Lockfile(ctx.config.state_dir, instance_id="live", clock=ctx.driver.clock)
         lock.acquire()
-        control.write_active(ctx.config.state_dir, queue.control.projection, ctx.fs, hold_id=None)
-        before = await ctx.git.rev_parse(ctx.repo, "main")
+        control.write_active(ctx.config.state_dir, consumer.projection, ctx.fs, hold_id=None)
         try:
-            assert await asyncio.to_thread(entry.main, ["reject", ticket.stem], cwd=ctx.repo,
-                env=ctx.env, clock=ctx.driver.clock) == 0
-            queue.control.inbox.consume()
-            [result] = await queue.process()
+            assert await asyncio.to_thread(entry.main, ["confirm", ticket.stem], cwd=ctx.repo, env=ctx.env, clock=ctx.driver.clock) == 0
+            consumer.inbox.consume()
+            async def confirmed(stem, request_id): await runner.confirm_draft(stem, request_id, ctx)
+            await consumer.inbox.settle_admissions(confirmed)
+            events = ctx.driver.journal.read()
+            await consumer.inbox.settle_admissions(confirmed)
+            assert ctx.driver.journal.read() == events
+            assert "state: confirmed" in path.read_text()
+            assert sum(e.body.get("signal") == "draft_confirmed" for e in events) == 1
         finally:
             lock.release()
-        assert result.outcome == "ok" and await ctx.git.rev_parse(ctx.repo, "main") == before
-        events = ctx.driver.journal.read()
-        assert [e.body["to"] for e in events if e.ticket == ticket.stem and e.type == "state_transition"] == ["running", "rejected"]
-        assert any(e.ticket == "dependent" and e.body.get("signal") == "dead_dependency" for e in events)
-        assert not any(e.type == "cap_consumed" or e.body.get("verdict") == "keep" for e in events)
-        assert not ctx.worktree(ticket.stem).exists()
     asyncio.run(exercise())
 
 

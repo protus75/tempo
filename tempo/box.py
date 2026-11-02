@@ -1,9 +1,7 @@
 """Durable Suggestion Box and decision registry formats (plan section 12)."""
 
-import asyncio
 import hashlib
 import json
-import os
 import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -12,17 +10,13 @@ from typing import Annotated, Literal, get_args
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from tempo.config import load_config
-from tempo.git import Git
 from tempo.journal import EventType, Journal
 from tempo.inbox import CAPS, EvidencePaths, ReportDescriptor, SelfReport, bounded
-from tempo.seams import Clock, FileSystem, LocalFileSystem, SubprocessExec
+from tempo.seams import FileSystem
 
 BOX_DIR = "box"
 MessageClass = Literal["suggestion", "failure_report", "override_report", "retro_finding", "bug_report"]
 MESSAGE_CLASSES = get_args(MessageClass)
-BOOTSTRAP_ORIGIN = "bootstrap-ingest"
-BOOTSTRAP_FILE = "bootstrap/suggestions.md"
 DECISIONS_DIR = "tickets/decisions"
 
 
@@ -375,41 +369,3 @@ def read_registry(repo: Path) -> list[tuple[DecisionRecord, str]]:
         except (OSError, BoxError) as exc:
             raise BoxError(f"invalid decision record {path}: {exc}") from exc
     return sorted(records, key=lambda item: item[0].id)
-
-
-def ingest_bootstrap(box: Box, text: str) -> list[str]:
-    from tempo.storm import arrival_id
-
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    return [
-        box.enqueue(message_class="suggestion", origin=BOOTSTRAP_ORIGIN, summary=line.strip(),
-                    occurrence_id=arrival_id("bootstrap-ingest", digest, n))[0]
-        for n, line in enumerate(text.splitlines(), 1) if line.strip()
-    ]
-
-
-async def ingest_main_checkout(cwd: Path, git: Git, fs: FileSystem, *,
-                               journal: Journal | None = None, clock: Clock | None = None) -> int:
-    root = (await git.git_common_dir(cwd)).parent
-    config = load_config(None, cwd=root)
-    source = root / BOOTSTRAP_FILE
-    if not source.exists():
-        return 0
-    if journal is None:
-        box = Box(config.state_dir / BOX_DIR, fs)
-    else:
-        from tempo.daemon import storm_producer
-
-        if clock is None:
-            raise BoxError("journal-holding ingest requires the checkout clock; supply its injected clock")
-        box = storm_producer(root=config.state_dir / BOX_DIR, fs=fs, journal=journal, clock=clock)
-        box.recover()
-    before = len(box.messages())
-    ingest_bootstrap(box, source.read_text())
-    return len(box.messages()) - before
-
-
-if __name__ == "__main__":
-    git = Git(SubprocessExec(), env=os.environ, timeout=30.0)
-    count = asyncio.run(ingest_main_checkout(Path.cwd(), git, LocalFileSystem()))
-    print(f"ingested {count} new suggestion messages")

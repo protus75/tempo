@@ -50,7 +50,7 @@ class Rig:
             "providers": [{"name": name, "kind": "cli", "package": "fixture",
                            "models_by_tier": dict.fromkeys(("low", "medium", "high", "max"), name + "-model"),
                            "limits": {"concurrency": cap if name == "a" else 1,
-                                      "est_cost_per_call_usd": 1.0, "quota_window_minutes": 60}}
+                                      "quota_window_minutes": 60}}
                           for name in ("a", "b", "c")],
             "routing": [{"tier": "medium", "surface": "implement",
                          "candidates": [{"provider": "a"}, {"provider": "b", "model": "pinned"}, {"provider": "c"}]}],
@@ -95,10 +95,10 @@ class Rig:
                 await gate.wait()
             if error is not None:
                 raise error
-            return {"provider": served.provider.name, "model": served.model, "usd": 1.0}
+            return {"provider": served.provider.name, "model": served.model}
 
         async def effect(action):
-            return await self.effects.run(action, key=call_key, ticket=ticket, cost=lambda r: {"usd": r["usd"]})
+            return await self.effects.run(action, key=call_key, ticket=ticket, served=lambda r: {"provider": r["provider"], "model": r["model"]})
 
         return await self.thresh.run(self.route if route is None else route, ticket=ticket, call_key=call_key,
                                      projected_wait_seconds=estimate, effect=effect, operation=operation)
@@ -495,7 +495,7 @@ def test_effect_replay_does_not_record_another_provider_outcome(tmp_path):
                                 "call_key": "llm/t/0/implement/1/1", "failure_class": None, "open_until": None}
         assert outcome.key is None and outcome.ticket == "t"
         assert [e.type for e in before] == [EventType.EFFECT_INTENT, EventType.SIGNAL, EventType.EFFECT_COMPLETION]
-        assert before[-1].body["cost"] == {"usd": 1.0}
+        assert before[-1].body["served"] == {"provider": "a", "model": "a-model"}
         clean(r)
     asyncio.run(scenario())
 

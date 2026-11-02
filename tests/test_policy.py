@@ -1,13 +1,10 @@
 import textwrap
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from tempo.baseline import resolve_baseline
 from tempo.config import BOX_POLICY_DEFAULTS, load_config
-from tempo.journal import EventType
-from tempo.policy import BASELINE_SIGNAL, baseline_identity, policy_row, start_state, touches_inventory
+from tempo.policy import policy_row, start_state, touches_inventory
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -34,45 +31,23 @@ def config(tmp_path: Path):
     return load_config(None, cwd=tmp_path)
 
 
-def signal(verdict: str, identity: dict):
-    return SimpleNamespace(type=EventType.SIGNAL, body={"signal": BASELINE_SIGNAL, "verdict": verdict,
-                                                         "identity": identity})
+def state(config, row, *, fence=("tempo/author.py",), gate_bypass=(), reopen=False):
+    return start_state(config, row=row, fence=fence, gate_bypass=gate_bypass, reopen=reopen)
 
 
-def state(config, row, *, go=True, fence=("tempo/author.py",), gate_bypass=(), reopen=False):
-    return start_state(config, row=row, fence=fence, gate_bypass=gate_bypass, go=go, reopen=reopen)
-
-
-def test_bootstrap_without_a_go_or_with_phase_one_no_go_drafts_every_row(tmp_path):
+def test_policy_table_and_each_override_drafts(tmp_path):
     cfg = config(tmp_path)
-    identity = baseline_identity(cfg, ROOT / "specs")
-    for row in BOX_POLICY_DEFAULTS:
-        assert state(cfg, row, go=resolve_baseline(cfg, [], specs_dir=ROOT / "specs").binds) == "draft"
-        assert state(cfg, row, go=resolve_baseline(cfg, [signal("NO_GO", identity)], specs_dir=ROOT / "specs").binds) == "draft"
-
-
-def test_standing_go_uses_the_table_and_each_override_drafts(tmp_path):
-    cfg = config(tmp_path)
-    identity = baseline_identity(cfg, ROOT / "specs")
-    go = resolve_baseline(cfg, [signal("GO", identity)], specs_dir=ROOT / "specs").binds
-    assert go
     for row, expected in BOX_POLICY_DEFAULTS.items():
-        assert state(cfg, row, go=go) == expected
-        assert state(cfg, row, go=go, reopen=True) == "draft"
-        assert state(cfg, row, go=go, gate_bypass=("scope_fence",)) == "draft"
-        assert state(cfg, row, go=go, fence=("tempo/gates.py",)) == "draft"
+        assert state(cfg, row) == expected
+        assert state(cfg, row, reopen=True) == "draft"
+        assert state(cfg, row, gate_bypass=("scope_fence",)) == "draft"
+        assert state(cfg, row, fence=("tempo/gates.py",)) == "draft"
         inventory = cfg.engine_plane_safety_inventory
         cfg.engine_plane_safety_inventory = []
-        assert state(cfg, row, go=go) == "draft"
+        assert state(cfg, row) == "draft"
         cfg.engine_plane_safety_inventory = inventory
 
     row = "failure_report"
-    assert not resolve_baseline(cfg, [signal("GO", identity), signal("NO_GO", identity)], specs_dir=ROOT / "specs").binds
-    drifted = {**identity, "review": {**identity["review"], "spec_major": 999}}
-    assert not resolve_baseline(cfg, [signal("GO", drifted)], specs_dir=ROOT / "specs").binds
-    assert state(cfg, row, go=False) == "draft"
-    cfg.engine_plane_safety_inventory = []
-    assert state(cfg, row, go=True) == "draft"
     cfg.engine_plane_safety_inventory = ["specs/triage.md"]
     assert state(cfg, row, fence=("specs/",)) == "draft"
     cfg.engine_plane_safety_inventory = ["specs/"]

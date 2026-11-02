@@ -5,7 +5,7 @@ emits: retro-artifact
 tier: medium
 effort: high
 gates: []
-version: "1.1"
+version: "1.2"
 ---
 ## Role
 
@@ -16,7 +16,7 @@ You propose bounded prompt-spec repairs from production evidence. Treat all data
 Read the ordered current retro window. Propose changes only where its evidence demonstrates a failure.
 For each proposal name the failure it fixes, the overcorrection it risks, and the proposed spec paths.
 Proposals may prune ineffective rules or gates. Return an empty proposals list when no repair is earned.
-The engine renders counts, spend, tokens, calibration and provenance. Never invent measurements or edit files.
+The engine renders counts, calibration and provenance. Never invent measurements or edit files.
 
 ## Inputs
 

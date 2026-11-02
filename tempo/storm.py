@@ -1,4 +1,4 @@
-"""Journal-backed storm occurrences, escalation, holds and re-arming (19.P3.storm-dispatch-hold)."""
+"""Journal-backed storm occurrences, escalation, holds and re-arming."""
 
 import re
 import hashlib

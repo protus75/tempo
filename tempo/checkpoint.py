@@ -1,4 +1,4 @@
-"""Explicit lock-held checkpoint pushes (TEMPO_PLAN.md 19.P3.checkpoint-push)."""
+"""Explicit lock-held checkpoint pushes."""
 
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -27,7 +27,7 @@ def _invalid(reason: str) -> ValueError:
 
 def _merged(events: list[Event]) -> int:
     return sum(event.type == EventType.STATE_TRANSITION and event.body.get("to") == "merged"
-               and event.body.get("commit") is not None for event in events)
+               for event in events)
 
 
 def _history(events: list[Event]) -> tuple[list[Event], list[Event]]:

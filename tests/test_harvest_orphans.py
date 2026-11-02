@@ -52,7 +52,7 @@ def test_run_harvests_orphan_before_reap_and_rerenders_its_reason(repo):
     saved = repo / "tickets" / STEM / "attempts" / "1" / "harvest.json"
     harvest = Harvest.model_validate_json(saved.read_text())
     assert harvest.attempt == 1 and harvest.terminal == "abandoned" and harvest.stage is None
-    assert harvest.findings == [] and harvest.wall_seconds is None and harvest.usd is None
+    assert harvest.findings == [] and harvest.wall_seconds is None
     assert "tempo/thing.py" in harvest.diff_stat
     assert "provider died with useful detail" in harvest.reason
     assert f"tempo({STEM}): harvest" in git(repo, "log", "--format=%s", "main")

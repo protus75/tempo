@@ -20,7 +20,6 @@ from tempo.tickets import INTAKE_SIGNAL, ticket_path
 from tests.test_cli import ENV
 from tests.test_daemon_composition import CoreRig
 from tests.test_drain import Script, commit_ticket, confirmed, make_root, pause_checkout
-from tests.test_drain_reentry import NoChild
 from tests.test_journal import FakeClock, T0
 from tests.test_storm import SIG, snapshot
 from tests.test_storm_notification_activation import digest, occurrences, six, trips
@@ -109,7 +108,7 @@ class LiveStorm:
 
             async def abort_current(self):
                 await rig.abort()
-        task = asyncio.create_task(drain(self.c, Dispatch(), reexec=NoChild(),
+        task = asyncio.create_task(drain(self.c, Dispatch(),
                                          before_dispatch=before_dispatch))
         self.tasks.append(task)
         return task
@@ -165,7 +164,7 @@ def test_live_drain_holds_only_emitting_stem(tmp_path, monkeypatch, stage):
         return consumer
     monkeypatch.setattr(cli, "build_control", build)
     monkeypatch.setattr("tempo.triage.triage_pass", Mock(side_effect=AssertionError("consumed Box")))
-    assert cli.main(["drain"], cwd=root, env=ENV, clock=clock, pipeline=script, reexec=NoChild()) == 0
+    assert cli.main(["drain"], cwd=root, env=ENV, clock=clock, pipeline=script) == 0
     assert script.calls == ["urgent", "zzz-old", "aaa-new", "one", "child"]
     assert script.lock_held == [True] * 5
     assert consumers[0].storm_holds() == {} and len(trips(journal)) == 1
@@ -345,7 +344,6 @@ async def test_storm_hold_survives_restart_roll_and_expiry(live, monkeypatch):
     commit_ticket(live.root, "one", confirmed())
     identity = live.trip()
     old_lifecycle = live.consumer.inbox.lifecycle_id
-    live.c.journal.close()
     live.clock.advance(7200)
     live.rebuild()
     assert live.consumer.inbox.lifecycle_id != old_lifecycle
@@ -357,7 +355,6 @@ async def test_storm_hold_survives_restart_roll_and_expiry(live, monkeypatch):
     live.request("new-release", hold=identity)
     assert (await task).merged == ["one"]
     before = live.c.journal.read()
-    live.c.journal.close()
     live.clock.advance(7200)
     live.rebuild()
     assert live.holds == {}
@@ -381,7 +378,6 @@ async def test_storm_release_rearms_on_new_arrivals_only(live, monkeypatch):
     await live.consumer.checkpoint()
     assert live.holds == {}
     monkeypatch.setattr(journal_module, "ROLL_BYTES", 1)
-    live.c.journal.close()
     live.rebuild()
     for n in range(12):
         live.box.enqueue(**ARRIVAL, occurrence_id=f"arrival/{n}")
@@ -462,7 +458,6 @@ async def test_storm_hold_crash_and_corrupt_evidence(live, monkeypatch, point, a
         assert read_active(live.c.config.state_dir, Path.read_bytes)[1] is None
         assert len(live.decisions) == decision_count
     same_lifecycle = live.consumer.inbox.lifecycle_id
-    live.c.journal.close()
     live.clock.advance(7200)
     live.rebuild()
     if point == "trip":
@@ -665,7 +660,7 @@ async def test_corrupt_release_evidence_refuses_without_dispatch(live, damage, m
         body["decision"] = []
     else:
         monkeypatch.setattr(journal_module, "ROLL_BYTES", 1)
-        live.c.journal.append(EventType.SIGNAL, {"kind": "drain_handoff"})
+        live.c.journal.append(EventType.SIGNAL, {"kind": "drain_halted"})
         path = sorted(live.c.journal.dir.glob("*.jsonl"))[0]
         path.write_bytes(path.read_bytes() + b"{torn")
     if damage != "rolled":

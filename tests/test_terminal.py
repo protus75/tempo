@@ -30,7 +30,6 @@ def repo(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
     (root / "tempo").mkdir(parents=True)
     (root / "tempo" / "thing.py").write_text("")
-    (root / "TEMPO_PLAN.md").write_text("# Plan\n")
     (root / "config.yaml").write_text(CONFIG)
     (root / ".gitignore").write_text(".tempo/\n")
     adopt_conduct(root)

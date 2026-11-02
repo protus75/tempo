@@ -22,7 +22,7 @@ CONFIG = textwrap.dedent(
         kind: cli
         package: test-cli
         models_by_tier: {low: fake, medium: fake, high: fake, max: fake}
-        limits: {concurrency: 1, est_cost_per_call_usd: 0.0}
+        limits: {concurrency: 1}
     routing:
       - {tier: medium, surface: echo, candidates: [{provider: fake, model: fake}]}
     review: {}
@@ -91,8 +91,7 @@ def run_echo(tmp_path: Path, llm: FakeLLM, consumed: Stub):
             workspace=tmp_path,
             tier="medium",
             effort="medium",
-            stuck_budget=600.0,
-            expected_budget=300.0, scope_fence=())
+            stuck_budget=600.0)
     )
     return result, config.state_dir
 
@@ -107,7 +106,7 @@ def test_echo_stage_runs_end_to_end(tmp_path):
     assert result.outcome == "ok"
     assert result.artifact == Echo(produced_by_spec_version=1, produced_at_sha="abc123", echoed="hello")
     assert result.findings == []
-    assert result.cost.attempts == 1
+    assert len(llm.requests) == 1
     assert llm.requests[0].worktree is None  # echo is not a writing surface
     call = state / "spools" / "t-echo" / "1" / "echo" / "call-01"
     assert (call / "prompt.md").read_text() == llm.requests[0].rendered

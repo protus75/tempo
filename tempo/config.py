@@ -70,7 +70,6 @@ class ModelsByTier(_Strict):
 
 class Limits(_Strict):
     concurrency: Count
-    est_cost_per_call_usd: Annotated[float, Field(ge=0)] | None = None
     quota_window_minutes: Count = 60
 
 
@@ -146,14 +145,9 @@ class Caps(_Strict):
     diagnosis: Count = 6
     retry: Count = 6
     premise_bounce: Count = 2
-    hardening: Count = 3  # held spec-gap terminals per lineage (section 11.4)
     infra: Count = 6
     quarantine: Count = 5
     poison: Count = 2
-
-
-class Seeding(_Strict):
-    max_seeds_per_admission: Count = 3
 
 
 class CircuitBreaker(_Strict):
@@ -177,7 +171,6 @@ class Config(_Strict):
     merge: Merge
     scheduler: Scheduler = Scheduler()
     caps: Caps = Caps()
-    seeding: Seeding = Seeding()
     circuit_breaker: CircuitBreaker = CircuitBreaker()
     drain: Drain = Drain()
     engine_plane_safety_inventory: list[str]  # no shipped default: absence fails closed (section 12)
@@ -210,7 +203,7 @@ class Config(_Strict):
 
 @dataclass(frozen=True, slots=True)
 class ConfigSnapshot:
-    """Detached field-attribute view of a validated config record (19.P3.dispatch-config-snapshot)."""
+    """Detached field-attribute view of a validated config record."""
 
     _fields: Mapping[str, Any]
 

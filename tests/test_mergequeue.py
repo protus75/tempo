@@ -21,7 +21,7 @@ from tempo.llm import FakeLLM
 from tempo.mergequeue import CONFLICT_FACTS, RED_STREAK, TREE_MISMATCH, ConflictHandoff, MergeQueue, TreeMismatch
 from tempo.providers import child_env
 from tempo.seams import ExecutableNotFound, LocalFileSystem, SubprocessExec
-from tempo.stages import ApprovedInvoice, CommandResult, Invoice, SeedReview, StageContext, render_review
+from tempo.stages import ApprovedInvoice, CommandResult, StageContext, render_review
 from tempo.tickets import validate_ticket
 from tests.test_stages import adopt_conduct, CONFIG, ENV, SECRET, SPECS, STEM, TICKET
 
@@ -34,7 +34,6 @@ def ctx(tmp_path):
     (repo / "tempo").mkdir(parents=True)
     (repo / "tempo/thing.py").write_text("ok base\n")
     (repo / "tempo/other.py").write_text("")
-    (repo / "TEMPO_PLAN.md").write_text("# Plan\n")
     (repo / ".gitignore").write_text(".tempo/\n")
     (repo / "config.yaml").write_text(CONFIG)
     conduct = adopt_conduct(repo)
@@ -47,7 +46,7 @@ def ctx(tmp_path):
                            LocalFileSystem(), driver, SPECS)
     async def init():
         await context.git.init(repo, branch="main")
-        await context.git.add(repo, [".gitignore", "config.yaml", "TEMPO_PLAN.md", "tempo", *conduct])
+        await context.git.add(repo, [".gitignore", "config.yaml", "tempo", *conduct])
         await context.git.commit(repo, "base")
     run(init())
     return context
@@ -95,61 +94,6 @@ async def admission(ctx, ticket, *, queue=None, attempt=0):
     queue.offer(ticket, attempt=attempt)
     [result] = await queue.process()
     return result
-
-
-@pytest.mark.parametrize("case", ["unchanged", "ticket-plane", "code", "two", "red", "conflict"])
-def test_supervised_confirm_regates_moved_main(ctx, monkeypatch, case):
-    from tests.test_supervised_merge_hold import hold, confirm, served
-    from tempo.mergequeue import regate_receipts
-    async def exercise():
-        ticket, queue, held = await hold(ctx)
-        original = regate_receipts(ctx.driver.journal.read())[held.hold_id]
-        second = None
-        if case == "two":
-            second = await ready(ctx, "second", changes={"tempo/second.py": "ok\n"}, fence=("tempo/second.py",))
-            await served(ctx, second)
-            ctx.driver.journal.append(EventType.STATE_TRANSITION, {"to": "running"}, ticket=second.stem)
-            queue.offer(second, attempt=0)
-            [other] = await queue.process()
-            assert isinstance(other, merge.Held)
-        elif case != "unchanged":
-            path = ("tickets/unrelated.txt" if case == "ticket-plane" else
-                    "tempo/thing.py" if case == "conflict" else "tempo/other.py")
-            ctx.fs.write(ctx.repo / path, b"conflict\n" if case == "conflict" else b"moved\n")
-            await commit(ctx, ctx.repo, [path], "intervening main")
-        if case == "red":
-            ctx.config.review.mechanical = [host("semantic", argv=["false"])]
-        calls = []
-        for name in ("gather_evidence", "gather_safety_evidence"):
-            real = getattr(stages, name)
-            async def called(*args, _real=real, _name=name, **kwargs):
-                calls.append(_name)
-                return await _real(*args, **kwargs)
-            monkeypatch.setattr(stages, name, called)
-        before = await ctx.git.rev_parse(ctx.repo, "main")
-        confirm(queue, held)
-        [result] = await queue.process()
-        if case in ("red", "conflict"):
-            assert await ctx.git.rev_parse(ctx.repo, "main") == before
-            assert not await ctx.git.conflicted_paths(ctx.worktree(ticket.stem))
-            assert result.approval_invalidated if case == "conflict" else result.outcome == "gate_failed"
-            assert len(regate_receipts(ctx.driver.journal.read())) == 1
-        else:
-            assert result.outcome == "ok" and result.artifact.reviewed_sha == original["reviewed_sha"]
-            receipts = regate_receipts(ctx.driver.journal.read())
-            assert receipts[held.hold_id] == original
-            assert calls == ([] if case == "unchanged" else ["gather_safety_evidence", "gather_evidence", "gather_safety_evidence"])
-            latest = list(receipts.values())[-1]
-            assert latest["checked_tree"] == await ctx.git.rev_parse(ctx.repo, "main^{tree}")
-            if case != "unchanged":
-                assert latest["admission"] == "READY" and latest["reason"] == "confirmed" and latest["candidate_base_sha"] == before
-            if second:
-                calls.clear()
-                confirm(queue, other, request_id="second-confirmation")
-                [result] = await queue.process()
-                assert result.outcome == "ok" and calls == ["gather_safety_evidence", "gather_evidence", "gather_safety_evidence"]
-                assert list(regate_receipts(ctx.driver.journal.read()).values())[-1]["checked_tree"] == await ctx.git.rev_parse(ctx.repo, "main^{tree}")
-    run(exercise())
 
 
 def facts(ctx):
@@ -271,7 +215,7 @@ def test_restore_rebase_safety_integration_order(ctx, monkeypatch):
 
 
 @pytest.mark.parametrize("failure", ["scope_fence", "run_record", "post_rebase_regate", "correctness_review",
-                                    "ticket_schema", "requisition_review", "fast", "rebase"])
+                                    "ticket_schema", "fast", "rebase"])
 def test_safety_failure_skips_integration(ctx, monkeypatch, failure):
     async def scenario():
         ticket = await ready(ctx, verification=(("no-verification-allowed",),))
@@ -289,9 +233,6 @@ def test_safety_failure_skips_integration(ctx, monkeypatch, failure):
             name = "review.md" if failure == "correctness_review" else "ticket.md"
             ctx.fs.write(ctx.repo / "tickets" / ticket.stem / name, b"invalid")
             await commit(ctx, ctx.repo, [f"tickets/{ticket.stem}/{name}"])
-        elif failure == "requisition_review":
-            ctx.driver.journal.append(EventType.SIGNAL, {"signal": "ticket_intake", "seeded_by": ticket.stem},
-                                      ticket="missing-seed")
         else:
             ctx.config.review.mechanical = [host("fast")]
             ctx.config.merge.safety_checks = ["fast"]
@@ -520,36 +461,6 @@ def test_clean_rebase_carries_pinned_approval(ctx, approval):
     run(scenario())
 
 
-@pytest.mark.parametrize("changed", [False, True])
-def test_committed_seed_approval_preserved(ctx, changed):
-    async def scenario():
-        ticket = await ready(ctx)
-        seed_path = "tickets/seed/ticket.md"
-        ctx.fs.write(ctx.repo / seed_path, TICKET.format(bypass="").encode())
-        await commit(ctx, ctx.repo, [seed_path])
-        sha = await ctx.git.rev_parse(ctx.repo, f"main:{seed_path}")
-        invoice = Invoice(produced_by_spec_version=1, produced_at_sha="approved", stem=ticket.stem, passed=True,
-                          changed_files=["tempo/thing.py"], inserted_lines=1, bypassed=[], reports=[],
-                          seeds=[SeedReview(stem="seed", ticket_sha=sha, verdict="approve", findings=[], mechanical=None)])
-        checks = f"tickets/{ticket.stem}/checks.json"
-        ctx.fs.write(ctx.repo / checks, invoice.model_dump_json().encode())
-        await commit(ctx, ctx.repo, [checks])
-        ctx.driver.journal.append(EventType.SIGNAL, {"signal": "ticket_intake", "seeded_by": ticket.stem}, ticket="seed")
-        if changed:
-            ctx.fs.write(ctx.repo / seed_path, (TICKET.format(bypass="") + "\n").encode())
-            await commit(ctx, ctx.repo, [seed_path])
-        # Dirty checkout cannot replace seed/check custody.
-        ctx.fs.write(ctx.repo / seed_path, b"invalid uncommitted seed")
-        ctx.fs.write(ctx.repo / checks, b"invalid uncommitted checks")
-        before = await ctx.git.rev_parse(ctx.repo, "main")
-        result = await admission(ctx, ticket)
-        if changed:
-            await unchanged(ctx, ticket, before, result, "requisition_review")
-        else:
-            assert result.outcome == "ok", result.findings
-    run(scenario())
-
-
 def test_squash_tree_trailers_and_retirement(ctx, monkeypatch):
     async def scenario():
         ticket = await ready(ctx, lifted=True)
@@ -748,9 +659,9 @@ def test_strategy_resolution_still_regates(ctx, monkeypatch):
         result = await admission(ctx, ticket)
         await unchanged(ctx, ticket, before, result, "combined")
         assert gates == ["scope_fence", "run_record", "ticket_schema", "post_rebase_regate",
-                         "correctness_review", "requisition_review", "scope_fence", "verification",
+                         "correctness_review", "scope_fence", "verification",
                          "run_record", "diff_budget", "core_drift", "bug_evidence", "ticket_schema", "post_rebase_regate",
-                         "correctness_review", "requisition_review"]
+                         "correctness_review"]
         spool = ctx.config.state_dir / "spools" / ticket.stem / "0/merge-integration/verify-01.txt"
         assert spool.is_file() and "exit 0" in spool.read_text()
         assert facts(ctx)[0].body == {"kind": CONFLICT_FACTS, "conflicted_paths": [path],

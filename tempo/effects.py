@@ -3,7 +3,7 @@
 Once is COMPLETION-keyed: a key with a journaled completion replays its recorded
 result. An intent with no completion (crash mid-effect) re-executes here on
 purpose -- that window belongs to reconcile-on-entry (section 11), not this
-primitive. A completion may carry a `cost` body field: the ledger folds it (D3).
+primitive. A completion may carry a `served` body field naming the provider and model that served it.
 """
 
 import functools
@@ -28,7 +28,7 @@ class Effects:
         *,
         key: str,
         ticket: str | None,
-        cost: Callable[[Any], dict[str, Any]] | None = None,
+        served: Callable[[Any], dict[str, Any]] | None = None,
     ) -> Any:
         if not isinstance(key, str) or not key:
             raise ValueError(f"effect key must be a non-empty string, got {key!r}; join components with '/'")
@@ -45,7 +45,7 @@ class Effects:
             ) from exc
         # Return the decoded record, not `result`, so executing and replaying yield identical values.
         recorded = json.loads(encoded)
-        body = {"result": recorded} if cost is None else {"result": recorded, "cost": cost(recorded)}
+        body = {"result": recorded} if served is None else {"result": recorded, "served": served(recorded)}
         self._journal.append(EventType.EFFECT_COMPLETION, body, ticket=ticket, key=key)
         self._completed.add(key)
         return recorded
@@ -58,7 +58,7 @@ class Effects:
 
 
 def effect(
-    key: str | Callable[..., str], *, cost: Callable[[Any], dict[str, Any]] | None = None
+    key: str | Callable[..., str]
 ) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
     """`@effect(key=...)` sugar over `Effects.run`.
 
@@ -70,7 +70,7 @@ def effect(
         @functools.wraps(fn)
         async def run(effects: Effects, *args: Any, ticket: str | None, **kwargs: Any) -> Any:
             k = key if isinstance(key, str) else key(*args, **kwargs)
-            return await effects.run(lambda: fn(*args, **kwargs), key=k, ticket=ticket, cost=cost)
+            return await effects.run(lambda: fn(*args, **kwargs), key=k, ticket=ticket)
 
         return run
 

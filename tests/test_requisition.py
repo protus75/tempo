@@ -68,7 +68,7 @@ providers:
     package: test-cli
     auth: FAKE_KEY
     models_by_tier: {low: m, medium: m, high: m, max: m}
-    limits: {concurrency: 1, est_cost_per_call_usd: 0.5}
+    limits: {concurrency: 1}
 routing:
   - {tier: high, surface: review, candidates: [{provider: fake}]}
 review: {}
@@ -86,9 +86,9 @@ engine_plane_safety_inventory: [context.txt]
 
 
 def run(driver: Driver, repo: Path, text: str = TICKET, stem: str = "one-thing") -> RequisitionVerdict:
-    return asyncio.run(review_ticket(driver, repo=repo, plan="", stem=stem, text=text,
+    return asyncio.run(review_ticket(driver, repo=repo, stem=stem, text=text,
                                      specs_dir=SPECS, tier="high", stem_slot="s", run_seq=0,
-                                     attempt=1, call_seq=1, expected_budget='surface'))
+                                     attempt=1, call_seq=1))
 
 
 def reply(verdict: str, findings: list | None = None) -> str:
@@ -103,89 +103,15 @@ def test_spec_loads_and_names_finding_keys():
     assert lint_spec(source) == []
     spec = load_spec(source)
     assert spec.meta.llm_surface == "requisition_review"
-    assert spec.inputs == ("ticket", "plan_contract", "context", "render", "prior_review", "retry_findings")
-    assert all(key in source for key in ("`code`", "`message`", "`paved_road`", "`kind`", "`unit`"))
+    assert spec.inputs == ("ticket", "context", "render", "retry_findings")
+    assert all(key in source for key in ("`code`", "`message`", "`paved_road`", "`kind`"))
 
 
-@pytest.mark.parametrize("unit,valid", [(None, False), ("19.P3.other", False), ("19.P3.governing", True)])
-def test_spec_gap_finding_unit_is_validated(tmp_path, unit, valid):
+def test_spec_gap_finding_is_accepted(tmp_path):
     finding = {**FINDING, "kind": "spec_gap"}
-    if unit is not None:
-        finding["unit"] = unit
     repo, driver, _ = setup(tmp_path, [reply("snag", [finding])])
-    plan = """### 19.P3 Phase 3
-```yaml
-# BEGIN_REGISTRY_P3
-seeds:
-  governing: {}
-  other: {}
-# END_REGISTRY_P3
-```
-### 19.P3.governing Governing
-- **Owner:** o
-- **Records:** r
-- **Observable:** b
-- **Tests:** t
-"""
-    (repo / "TEMPO_PLAN.md").write_text(plan)
-    text = TICKET.replace("## Goal / Why", "## Plan contract\n- 19.P3.governing\n\n## Goal / Why")
-    verdict = asyncio.run(review_ticket(driver, repo=repo, plan=plan, stem="one-thing", text=text,
-                                       specs_dir=SPECS, tier="high", stem_slot="s", run_seq=0,
-                                       attempt=1, call_seq=1, expected_budget='surface'))
-    assert verdict.mechanical == (None if valid else "invalid reply")
-    if valid:
-        assert verdict.findings == [Finding(**finding)]
-
-
-@pytest.mark.parametrize("unit,valid", [(None, True), ("19.P3.governing", False)])
-def test_spec_gap_without_hardenable_units_requires_null(tmp_path, unit, valid):
-    repo, driver, _ = setup(tmp_path, [reply("snag", [{**FINDING, "kind": "spec_gap", "unit": unit}])])
-    assert run(driver, repo).mechanical == (None if valid else "invalid reply")
-
-
-@pytest.mark.parametrize("kind", [None, "authoring_error"])
-def test_a_unit_requires_spec_gap_kind(kind):
-    with pytest.raises(ValueError, match="unit is non-null only for kind spec_gap"):
-        Finding(**{**FINDING, "kind": kind, "unit": "19.P3.governing"})
-
-
-@pytest.mark.parametrize("unit", [None, "19.P3.other"])
-def test_invalid_implement_spec_gap_unit_is_reprompted(tmp_path, unit):
-    from tests.test_stages import implement_reply
-
-    valid = {"code": "premise", "message": "missing governing fact", "paved_road": "state it",
-             "kind": "spec_gap", "unit": "19.P3.governing"}
-    repo, driver, llm = setup(tmp_path, [implement_reply("premise_failed", [{**valid, "unit": unit}]),
-                                       implement_reply("premise_failed", [valid])])
-    plan = """### 19.P3 Phase 3
-```yaml
-# BEGIN_REGISTRY_P3
-seeds:
-  governing: {}
-  other: {}
-# END_REGISTRY_P3
-```
-### 19.P3.governing Governing
-- **Owner:** o
-- **Records:** r
-- **Observable:** b
-- **Tests:** t
-"""
-    (repo / "TEMPO_PLAN.md").write_text(plan)
-    text = TICKET.replace("## Goal / Why", "## Plan contract\n- 19.P3.governing\n\n## Goal / Why")
-    path = repo / "tickets/one-thing/ticket.md"
-    path.parent.mkdir(parents=True)
-    path.write_text(text)
-    ticket = review_target(repo, "one-thing", text)
-    ctx = StageContext(repo=repo, config=load_config(None, cwd=repo), env={}, exec_=None,
-                       git=None, fs=None, driver=driver, specs_dir=SPECS)
-    stage, _ = implement_stage(ctx, ticket, repo)
-    result = asyncio.run(driver.run(stage, ticket, ticket=ticket.stem, attempt=0, workspace=repo,
-                                   tier="high", effort="high", stuck_budget=60, expected_budget=300.0, scope_fence=()))
-    assert result.outcome == "ok"
-    assert result.artifact.findings == [Finding(**valid)]
-    assert len(llm.requests) == 2
-    assert "spec_gap unit must be one of" in llm.requests[1].rendered
+    verdict = run(driver, repo)
+    assert verdict.mechanical is None and verdict.findings == [Finding(**finding)]
 
 
 def test_approve_and_effect_key(tmp_path):
@@ -202,9 +128,9 @@ def test_snag_and_invalid_reply(tmp_path):
     repo, driver, llm = setup(tmp_path, [reply("snag", [FINDING]), reply("wrong")])
     assert run(driver, repo).findings[0].paved_road == "add it to the fence"
     # A new call identity avoids replaying the first completion.
-    invalid = asyncio.run(review_ticket(driver, repo=repo, plan="", stem="one-thing", text=TICKET,
+    invalid = asyncio.run(review_ticket(driver, repo=repo, stem="one-thing", text=TICKET,
                                         specs_dir=SPECS, tier="high", stem_slot="s", run_seq=0,
-                                        attempt=1, call_seq=2, expected_budget='surface'))
+                                        attempt=1, call_seq=2))
     assert invalid.verdict == "snag" and invalid.mechanical == "invalid reply"
     assert len(llm.requests) == 2
     with pytest.raises(Exception):
@@ -270,7 +196,7 @@ def test_review_render_over_bound_is_mechanical_snag(tmp_path, monkeypatch):
     import tempo.requisition as requisition
     import tempo.specs as specs
     # The base Implement render fits the bound; the review render, which embeds it, does not.
-    base = base_render_chars(repo, "", review_target(repo, "one-thing", TICKET), TICKET, SPECS)
+    base = base_render_chars(repo, review_target(repo, "one-thing", TICKET), TICKET, SPECS)
     monkeypatch.setattr(specs, "RENDER_BOUND_CHARS", base + 1)
     monkeypatch.setattr(requisition, "RENDER_BOUND_CHARS", 2 * base)
     verdict = run(driver, repo)
@@ -283,9 +209,9 @@ def test_base_render_matches_implement_and_gate(tmp_path):
     repo, driver, _ = setup(tmp_path, [reply("approve")])
     ticket = review_target(repo, "one-thing", TICKET)
     spec = load_spec((SPECS / "implement.md").read_text())
-    production = render(spec, {**implement_inputs(repo, "", TICKET, ticket, ()),
+    production = render(spec, {**implement_inputs(repo, TICKET, ticket, ()),
                                "retry_findings": "none"})
-    assert base_render_chars(repo, "", ticket, TICKET, SPECS) == len(production)
+    assert base_render_chars(repo, ticket, TICKET, SPECS) == len(production)
     approved = run(driver, repo)
     snag = approved.model_copy(update={"verdict": "snag", "findings": [Finding(**FINDING)]})
     gate = RequisitionGate()

@@ -20,19 +20,12 @@ from tests.test_stages import ENV, SNAG, STEM, agent, git, verdict
 from tests.test_terminal import author, clock, diagnosis_reply, repo, transitions  # noqa: F401 -- `repo` is the fixture
 
 
-class NoChild:
-    """The merge admits `tempo/thing.py`, a self-upgrade: the handoff's re-exec is faked to a quiescent child."""
-
-    async def run(self, argv, *, cwd, env, timeout, stdin_path=None):
-        return 0, "", ""
-
-
 def drain(repo: Path, script: list, *, green_base: bool = True) -> tuple[int, FakeLLM]:
     if green_base:
         (repo / "tempo" / "thing.py").write_text("ok base\n")
         git(repo, "commit", "-am", "green verification base")
     llm = FakeLLM(script)
-    code = main(["drain"], cwd=repo, env=ENV, clock=clock, pipeline=lambda c: runner.bind(c, llm), reexec=NoChild())
+    code = main(["drain"], cwd=repo, env=ENV, clock=clock, pipeline=lambda c: runner.bind(c, llm))
     return code, llm
 
 
@@ -90,7 +83,8 @@ def test_a_reoffer_after_a_red_check_renders_the_failing_checks(repo):
 
 def test_a_base_red_check_merges_without_retry_and_files_one_report(repo):
     author(repo)
-    code, llm = drain(repo, [agent({"tempo/thing.py": "changed\n"}), verdict()], green_base=False)
+    # The quiescence retro follows the merge.
+    code, llm = drain(repo, [agent({"tempo/thing.py": "changed\n"}), verdict(), '{"proposals": []}'], green_base=False)
 
     assert code == 0
     assert len(implements(llm)) == 1

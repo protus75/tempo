@@ -1,12 +1,12 @@
-"""Ticket contract and runner intake (TEMPO_PLAN.md section 13, 19.P1).
+"""Ticket contract and runner intake (TEMPO_PLAN.md section 13).
 
-Intake stands in for the Phase 3 watcher: at invocation it lints every pending hand-authored
+Intake on the CLI run path: at invocation it lints every pending hand-authored
 `tickets/<stem>/ticket.md` and ticket-plane-commits the clean ones, one commit per stem.
 """
 
 import re
 import shlex
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
@@ -17,20 +17,18 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, Validation
 from tempo.artifacts import Finding, NonBlank
 from tempo.gates import ENGINE_GATE_CODES
 from tempo.git import Git
-from tempo.journal import EVENT_VERSIONS, EventType, Journal
+from tempo.journal import EventType, Journal
 from tempo.seams import FileSystem
-from tempo.specs import PlanContractError, plan_id, registry_rows, resolve_plan_contract
 
 TICKETS_DIR = "tickets"
 TICKET_FILE = "ticket.md"
-PLAN_FILE = "TEMPO_PLAN.md"
 STEM = re.compile(r"^[a-z0-9][a-z0-9-]{1,63}$")
 RESERVED_STEMS = frozenset({"decisions", "retro"})  # sibling dirs that match the stem regex (sections 14, 15)
 INTAKE_SIGNAL = "ticket_intake"
 CODE = "ticket_schema"
 
 Level = Literal["low", "medium", "high", "max"]
-Source = Annotated[str, StringConstraints(pattern=r"^(human|seed|box:[a-z][a-z0-9_]*)$")]
+Source = Annotated[str, StringConstraints(pattern=r"^(human|box:[a-z][a-z0-9_]*)$")]
 
 
 class GateBypass(BaseModel):
@@ -72,16 +70,13 @@ REQUIRED_SECTIONS = (
     "Definition of rejected",
     "Time budget",
 )
-OPTIONAL_SECTIONS = ("On-demand", "Plan contract", "Regression", "Exit-read window")
+OPTIONAL_SECTIONS = ("On-demand", "Regression")
 SECTIONS = REQUIRED_SECTIONS + OPTIONAL_SECTIONS
-SEED_REFUSED_SECTIONS = frozenset({"0", "19", "21", "22"})
 BANNED_ADJECTIVES = re.compile(r"\b(improved|better|cleaner)\b", re.IGNORECASE)
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 _HEADING = re.compile(r"^## (.+?)\s*$")
 _ITEM = re.compile(r"^(?:-|\d+\.)\s+(.*)$")
 _BUDGET = re.compile(r"^(expected|stuck):\s*(\d+)m$")
-_WINDOW = re.compile(r"^([a-z_]+):\s*(\S.*)$")
-_EXIT_WINDOW_EVENTS = frozenset(EVENT_VERSIONS)
 
 
 @dataclass(frozen=True)
@@ -92,7 +87,6 @@ class Ticket:
     depends: tuple[str, ...]
     context: tuple[str, ...]
     on_demand: tuple[str, ...]
-    plan_contract: tuple[str, ...]
     scope_fence: tuple[str, ...]
     verification: tuple[tuple[str, ...], ...]
     expected_minutes: int
@@ -222,36 +216,6 @@ def _repo_path(value: str, name: str, path: str) -> list[Finding]:
     return []
 
 
-def _seed_cites(stem: str, plan_ids: list[str], plan: str, path: str) -> list[Finding]:
-    """The section 13 seed cite law, by role: each seed cites exactly the plan bytes it works from."""
-    out: list[Finding] = []
-    rows = registry_rows(plan)
-    cited = set(plan_ids)
-    if stem in rows and not rows[stem][1].get("exit"):
-        phase, row = rows[stem]
-        row_cites = {str(c) for c in row.get("cite", []) or []}
-        need = {"19.I", f"19.P{phase}.{stem}"} | row_cites
-        road = "a seed implementing a registry row cites `19.I`, its own entry unit, and its row's `cite`"
-        if f"19.P{phase}" in cited or ("19.L" in cited and "19.L" not in row_cites):
-            out.append(_f("a seed implementing a registry row never cites its phase unit, nor `19.L` unless its"
-                          " row cites it", road, path))
-    elif stem in rows:
-        need = {"19.L", "19.I", f"19.P{rows[stem][0]}"}
-        road = "an exit seed cites `19.L`, `19.I`, its phase unit, and the entry units of the seeds it authors"
-    else:
-        road = "a seeding seed cites `19.L` and its phase unit"
-        need = {"19.L"}
-        if not any(re.fullmatch(r"19\.P[0-6]", p) for p in cited):
-            out.append(_f("a `source: seed` ticket's `## Plan contract` must cite `19.L` and its phase unit",
-                          road, path))
-    if missing := sorted(need - cited):
-        out.append(_f(f"a `source: seed` ticket's `## Plan contract` must also cite {', '.join(missing)}",
-                      road, path))
-    if bad := sorted(cited & SEED_REFUSED_SECTIONS, key=int):
-        out.append(_f(f"a seed never cites section(s) {', '.join(bad)}", road, path))
-    return out
-
-
 def _criteria(text: str) -> list[str]:
     items: list[str] = []
     for line in text.splitlines():
@@ -264,11 +228,10 @@ def _criteria(text: str) -> list[str]:
     return items
 
 
-def parse_ticket(stem: str, text: str, repo: Path, *, plan: str | None, siblings: Collection[str] = ()) -> Ticket:
+def parse_ticket(stem: str, text: str, repo: Path) -> Ticket:
     """Validate one ticket against the full section 13 grammar; raise TicketInvalid with every finding.
 
     `repo` resolves `Context` / `On-demand` existence and `Depends on` stems (existing ticket dirs).
-    `plan` is the plan text `Plan contract` ids resolve against (None: the plan file is absent).
     """
     path = ticket_path(stem)
     findings = stem_findings(stem)
@@ -308,7 +271,7 @@ def parse_ticket(stem: str, text: str, repo: Path, *, plan: str | None, siblings
                 if dep == stem:
                     findings.append(_f(f"`## Depends on` names the ticket itself ({dep!r})",
                                        "drop the self-edge", path))
-                elif not STEM.fullmatch(dep) or not ((tickets_root / dep / TICKET_FILE).is_file() or dep in siblings):
+                elif not STEM.fullmatch(dep) or not (tickets_root / dep / TICKET_FILE).is_file():
                     findings.append(_f(f"`## Depends on` stem {dep!r} does not resolve to an existing ticket",
                                        f"name an existing `{TICKETS_DIR}/<stem>/` dir, or `none`", path))
                 else:
@@ -321,13 +284,9 @@ def parse_ticket(stem: str, text: str, repo: Path, *, plan: str | None, siblings
         for item in items:
             if errs := _repo_path(item, "Context", path):
                 findings += errs
-            elif Path(item) == Path(PLAN_FILE):
-                findings.append(_f(f"`## Context` cites the plan file {PLAN_FILE}; plan prose is never Context",
-                                   "drop it from Context and cite the governing plan ids under `## Plan contract`"
-                                   " (`section N`, `19.L`, `19.P<n>`)", path))
             elif Path(item).parent == Path("specs") and item.endswith(".md"):
                 findings.append(_f(f"`## Context` cites the prompt spec {item}; prompt-spec files are never Context",
-                                   "cite the plan section that governs the surface under `## Plan contract`", path))
+                                   "drop it from Context; the engine renders its own prompt spec", path))
             elif not (repo / item).exists():
                 findings.append(_f(f"`## Context` path {item!r} does not exist",
                                    "Context lists EXISTING read-first files; name a file this ticket creates in"
@@ -340,17 +299,9 @@ def parse_ticket(stem: str, text: str, repo: Path, *, plan: str | None, siblings
         items, errs = _bullets(text_, "Scope fence", path)
         findings += errs
         for item in items:
-            if "#" in item:  # `TEMPO_PLAN.md#<unit id>`: plan edits confined to one unit (section 9)
-                file, _, unit = item.partition("#")
-                if file != PLAN_FILE or not re.fullmatch(r"19\.P[0-6]\.[a-z0-9][a-z0-9-]*", unit):
-                    findings.append(_f(f"`## Scope fence` anchor {item!r} is not `{PLAN_FILE}#19.P<n>.<stem>`",
-                                       "anchor only the plan file, to one entry unit", path))
-                    continue
-            else:
-                findings += (errs := _repo_path(item, "Scope fence", path))
-                if errs:
-                    continue
-            fence.append(item)
+            findings += (errs := _repo_path(item, "Scope fence", path))
+            if not errs:
+                fence.append(item)
 
     on_demand: list[str] = []
     if text_ := sections.get("On-demand"):
@@ -370,25 +321,6 @@ def parse_ticket(stem: str, text: str, repo: Path, *, plan: str | None, siblings
                                    "keep it in exactly one of the two sections", path))
             else:
                 on_demand.append(item)
-
-    plan_ids: list[str] = []
-    if text_ := sections.get("Plan contract"):
-        items, errs = _bullets(text_, "Plan contract", path)
-        findings += errs
-        for item in items:
-            try:
-                pid = plan_id(item)
-                if plan is None:
-                    raise PlanContractError(_f(f"`## Plan contract` cites {item!r} but {PLAN_FILE} is absent",
-                                               f"restore {PLAN_FILE} at the repo root"))
-                resolve_plan_contract(plan, [pid])
-            except PlanContractError as e:
-                findings.append(e.finding.model_copy(update={"code": CODE, "path": path,
-                                                             "message": f"`## Plan contract`: {e.finding.message}"}))
-                continue
-            plan_ids.append(pid)
-    if fm is not None and fm.source == "seed":
-        findings += _seed_cites(stem, plan_ids, plan or "", path)
 
     if text_ := sections.get("Acceptance criteria"):
         if m := BANNED_ADJECTIVES.search(text_):
@@ -436,20 +368,10 @@ def parse_ticket(stem: str, text: str, repo: Path, *, plan: str | None, siblings
                                    "set stuck greater than expected (the stage deadline is the stuck budget)",
                                    path))
 
-    if text_ := sections.get("Exit-read window"):
-        items, errs = _bullets(text_, "Exit-read window", path)
-        findings += errs
-        for item in items:
-            m = _WINDOW.match(item)
-            if m is None or m.group(1) not in _EXIT_WINDOW_EVENTS:
-                findings.append(_f(f"`## Exit-read window` declaration {item!r} does not parse",
-                                   f"write `- <event type>: <bounding criterion>`, event type one of"
-                                   f" {sorted(_EXIT_WINDOW_EVENTS)}", path))
-
     if findings or fm is None:
         raise TicketInvalid(findings)
     return Ticket(stem=stem, frontmatter=fm, sections=sections, depends=tuple(depends), context=tuple(context),
-                  on_demand=tuple(on_demand), plan_contract=tuple(plan_ids), scope_fence=tuple(fence),
+                  on_demand=tuple(on_demand), scope_fence=tuple(fence),
                   verification=tuple(commands), expected_minutes=expected, stuck_minutes=stuck,
                   regression=regression, carries=carries)
 
@@ -499,14 +421,9 @@ def _graph(repo: Path) -> dict[str, list[str]]:
     return edges
 
 
-def validate_ticket(stem: str, text: str, repo: Path, siblings: Collection[str] = ()) -> Ticket:
-    """The full intake lint: grammar, plan ids resolved against the repo's plan file, and acyclicity.
-
-    `siblings` are the other seeds of a seeding batch: a seed may depend on one before the batch lifts (19.L).
-    """
-    plan_file = repo / PLAN_FILE
-    ticket = parse_ticket(stem, text, repo, plan=plan_file.read_text() if plan_file.is_file() else None,
-                          siblings=siblings)
+def validate_ticket(stem: str, text: str, repo: Path) -> Ticket:
+    """The full intake lint: grammar and acyclicity."""
+    ticket = parse_ticket(stem, text, repo)
     edges = _graph(repo)
     edges[stem] = list(ticket.depends)
     if cycle := depends_cycle(stem, edges):
@@ -586,9 +503,9 @@ def _intake_claims(stem: str, text: str, new: bool) -> tuple[str, list[Finding]]
         return text, []
     source = data.get("source", "human")
     if source != "human":
-        return text, [_f(f"new stem claims `source: {source}`; only the machine writes `seed` or `box:<class>`",
+        return text, [_f(f"new stem claims `source: {source}`; only the machine writes `box:<class>`",
                          "drop the `source:` line (intake stamps `source: human`) -- machine-originated work"
-                         " enters through the Suggestion Box or phase seeding", path)]
+                         " enters through the Suggestion Box", path)]
     state = data.get("state", "draft")
     if state not in ("draft", "confirmed"):
         return text, [_f(f"new stem is authored `state: {state}`",

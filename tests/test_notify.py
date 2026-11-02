@@ -63,14 +63,7 @@ async def test_notify_effect_once_and_conservative_resend(tmp_path, monkeypatch)
 
 def test_notify_key_domains():
     for kind in ("ordinary", "stuck-past-threshold"):
-        assert notification_key("stem", kind, "identity", run_sequence=0) == (
-            notification_key("stem", kind, "identity", run_sequence=9)) == f"notify/stem/{kind}/identity"
-    assert notification_key("stem", "spiral-warning", "first", run_sequence=2) == (
-        notification_key("stem", "spiral-warning", "retry", run_sequence=2)) == "notify/stem/spiral-warning/2"
-    assert notification_key("stem", "spiral-warning", "first", run_sequence=3) != (
-        notification_key("stem", "spiral-warning", "first", run_sequence=2))
-    with pytest.raises(ValueError, match="run sequence"):
-        notification_key("stem", "spiral-warning", "first")
+        assert notification_key("stem", kind, "identity") == f"notify/stem/{kind}/identity"
 
 
 @pytest.mark.asyncio
@@ -81,13 +74,13 @@ async def test_notify_seam_uses_argv_and_secret_free_env(tmp_path):
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "TEST_KEY": secret, "KEEP": "ambient"}
     clock = Time()
     journal = Journal(tmp_path / "state", clock)
-    work, reexec = SubprocessExec(), SubprocessExec()
+    work = SubprocessExec()
     checkout = SimpleNamespace(config=config, repo=tmp_path, env=env, exec_=work, journal=journal, clock=clock)
     log = EngineLog(tmp_path / "engine.log", Redactor.from_config(config, env), clock)
     reconciler = cli.build_notifications(checkout, config_path=None, log=log)
     seam = reconciler.compose(config)
     assert isinstance(seam, CommandNotifications)
-    assert seam.exec_ is not work and seam.exec_ is not reexec
+    assert seam.exec_ is not work
     assert seam.cwd == tmp_path and seam.timeout == 30
     script = ("import os,sys,json; from pathlib import Path; "
               "print(json.dumps([sys.argv[1:],str(Path.cwd()),dict(os.environ)])); "

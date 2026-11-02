@@ -7,7 +7,7 @@ import pytest
 from tempo import journal as journal_module, runner, stages as stage_module
 from tempo.audit import audit_journal
 from tempo.git import Git
-from tempo.journal import EVENT_VERSIONS, SIGNAL_NAMES, TERMINAL_STATES, EventType, Journal, render_ts, run_seq
+from tempo.journal import EVENT_VERSIONS, SIGNAL_NAMES, EventType, Journal, render_ts, run_seq
 from tempo.llm import FakeLLM
 from tempo.reconcile import RECOVERY_ALERT, orphans, reconcile
 from tempo.seams import SubprocessExec
@@ -15,31 +15,6 @@ from tempo.status import last_states
 from tests.test_cli import ENV, Clock, Stages, cli, git_out, journal, root, ticket, write  # noqa: F401
 
 STATE = Path(".tempo") / "state"
-
-
-@pytest.mark.parametrize("release", [False, True])
-def test_live_hold_is_not_an_orphan(tmp_path, release):
-    from tests.test_mergequeue import ctx as context_fixture
-    from tests.test_supervised_merge_hold import hold, confirm
-    ctx = context_fixture.__wrapped__(tmp_path)
-    async def exercise():
-        ticket, queue, held = await hold(ctx)
-        if release:
-            confirm(queue, held)
-            await queue.control.inbox.settle_admissions(queue.confirm_draft)
-        ctx.driver.journal.append(EventType.STATE_TRANSITION, {"to": "running"}, ticket="ordinary")
-        ctx.driver.journal.append(EventType.EFFECT_INTENT, {}, ticket="incomplete", key="merge-regate/incomplete/0/unfinished")
-        harvested = []
-        async def harvest(stem, attempt): harvested.append((stem, attempt))
-        before = ctx.driver.journal.read()
-        assert orphans(before) == ["incomplete", "ordinary"]
-        assert await reconcile(ctx.driver.journal, ctx.git, ctx.repo, ctx.config.worktree_root, harvest) == ["incomplete", "ordinary"]
-        assert harvested == [] and ctx.worktree(ticket.stem).exists()
-        assert not any(e.ticket == ticket.stem and e.body.get("to") in TERMINAL_STATES for e in ctx.driver.journal.read())
-        settled = ctx.driver.journal.read()
-        assert await reconcile(ctx.driver.journal, ctx.git, ctx.repo, ctx.config.worktree_root, harvest) == []
-        assert ctx.driver.journal.read() == settled and queue.held[ticket.stem][2] == held.hold_id
-    asyncio.run(exercise())
 
 
 def git() -> Git:
@@ -251,7 +226,6 @@ def test_recovery_alert_is_once_per_reaped_run(root):
     assert recover(j) == ["dead"]
     closed = j.read()
     assert recover(j) == [] and j.read() == closed
-    j.close()
     recovered = journal(root)
     assert recover(recovered) == [] and recovered.read() == closed
     recovered.append(EventType.STATE_TRANSITION, {"to": "running"}, ticket="dead")

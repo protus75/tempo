@@ -19,7 +19,6 @@ class Status:
     in_flight: tuple[str, ...]
     blocked: tuple[tuple[str, str], ...]  # (stem, the non-merged terminal its last run ended in)
     intake: tuple[tuple[str, str, str, str], ...]  # (stem, source, state, commit) per intake commit
-    spend_usd: float
     reject: tuple[tuple[str, Mapping], ...] = ()
     tombstones: tuple[tuple[str, str, int], ...] = ()
     reopens: tuple[Mapping, ...] = ()
@@ -61,14 +60,11 @@ def project(events: Iterable[Event], *, box=None, policy=None,
         (e.ticket, e.body["source"], e.body["state"], e.body["commit"]) for e in events
         if e.type == EventType.SIGNAL and e.body.get("signal") == INTAKE_SIGNAL and e.ticket is not None
     )
-    spend = sum(e.body["cost"].get("usd", 0.0) for e in events
-                if e.type == EventType.EFFECT_COMPLETION and isinstance(e.body.get("cost"), dict))
     return Status(
         merged=tuple(sorted(s for s, to in last.items() if to == "merged")),
         in_flight=tuple(sorted(s for s, to in last.items() if to == "running")),
         blocked=tuple(sorted((s, to) for s, to in last.items() if to not in ("merged", "running"))),
         intake=intake,
-        spend_usd=spend,
         reject=tuple(sorted(reject_queue(events).items())),
         tombstones=tuple((m.id, m.message_class, m.reports) for m in
                          box.confirmed_tombstones(policy)) if box is not None else (),
@@ -84,10 +80,7 @@ def render(status: Status) -> str:
         return f"{name}:\n" + ("\n".join(f"- {line}" for line in lines) or "(none)")
 
     card = status.scorecard
-    totals = [f"boundary: {card.boundary}", f"merged tickets: {card.merged_ticket_count}",
-              f"spend: ${card.spend_usd:.2f}"]
-    for direction, tokens in card.tokens.items():
-        totals.append(f"{direction} tokens: {tokens['known']} known, {tokens['unknown_calls']} unknown calls")
+    totals = [f"boundary: {card.boundary}", f"merged tickets: {card.merged_ticket_count}"]
     totals.extend(f"{kind}: {count}" for kind, count in sorted(card.signal_counts.items()))
     totals.append(f"gate failures: {card.gate_failure_count}")
     table = ["## Surface scorecard",
@@ -104,7 +97,6 @@ def render(status: Status) -> str:
         block("blocked", (f"{stem}: {to}" for stem, to in status.blocked)),
         block("intake", (f"{stem}: source: {source}, state: {state}, commit {commit[:12]}"
                          for stem, source, state, commit in status.intake)),
-        f"spend:\n${status.spend_usd:.2f}",
         block("Reject queue", (f"{stem}: {body['to']} at {body.get('stage', 'unknown')} -- "
                                f"confirm {stem} after editing, or reject {stem}"
                                for stem, body in status.reject)),

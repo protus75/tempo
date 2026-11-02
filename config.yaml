@@ -1,5 +1,5 @@
 # Instance config (host plane, TEMPO_PLAN.md section 15). Operator-owned: edit between runs.
-# Provider values from bootstrap/operator-setup.md. Both providers are kind: cli on ambient CLI
+# Both providers are kind: cli on ambient CLI
 # login, so no `auth` and no key export. IMPLEMENT/AUTHOR inherit models_by_tier[tier]; REVIEW pins
 # claude's strongest model at every tier (diversity from codex IMPLEMENT is a preference, not a gate).
 schema_version: 1
@@ -9,12 +9,12 @@ providers:
     kind: cli
     package: "@anthropic-ai/claude-code"
     models_by_tier: {low: claude-sonnet-5-5, medium: claude-sonnet-5-5, high: claude-opus-5-5, max: claude-opus-5-5}
-    limits: {concurrency: 1}  # stream reports total_cost_usd: no estimate needed
+    limits: {concurrency: 1}
   - name: codex
     kind: cli
     package: "@openai/codex"
     models_by_tier: {low: gpt-6-luna, medium: gpt-6.1-sol, high: gpt-6.1-sol, max: gpt-6-astra}
-    limits: {concurrency: 1, est_cost_per_call_usd: 1.00}  # stream reports no cost; flat subscription
+    limits: {concurrency: 1}
 routing:
   - {tier: low, surface: implement, candidates: [{provider: codex}]}
   - {tier: low, surface: author, candidates: [{provider: claude}]}
@@ -31,5 +31,5 @@ routing:
 review: {}
 merge: {}
 drain:
-  max_ticket_minutes: 180  # raised from the shipped 90 to admit the Phase 2 seeds' largest stuck budget (section 18)
+  max_ticket_minutes: 180  # raised from the shipped 90 to admit longer ticket stuck budgets (section 18)
 engine_plane_safety_inventory: [specs/, tempo/gates.py, tempo/config.py, tempo/providers.py, config.yaml]

@@ -83,7 +83,7 @@ class Timer:
 def invoke(driver, stage=ECHO, *, attempt=1):
     return driver.run(stage, Stub(text="hi"), ticket="t-echo", attempt=attempt,
                       workspace=driver.spool.root.parent, tier="medium", effort="low",
-                      stuck_budget=600, expected_budget=300.0, scope_fence=())
+                      stuck_budget=600)
 
 
 async def active(tmp_path, *, held=False):

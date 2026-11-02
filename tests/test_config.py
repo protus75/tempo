@@ -14,7 +14,7 @@ VALID = textwrap.dedent(
         kind: cli
         package: test-cli
         models_by_tier: {low: haiku, medium: sonnet, high: opus, max: opus}
-        limits: {concurrency: 1, est_cost_per_call_usd: 0.25}
+        limits: {concurrency: 1}
     routing:
       - {tier: medium, surface: implement, candidates: [{provider: claude, model: sonnet}]}
     review:
@@ -67,9 +67,8 @@ def test_valid_config_loads_from_cwd_with_shipped_defaults(tmp_path):
     assert cfg.merge.strategies[0].argv == ["uv", "lock"]
     assert cfg.scheduler.max_unmerged == 2
     assert cfg.caps.model_dump() == {
-        "diagnosis": 6, "retry": 6, "premise_bounce": 2, "hardening": 3, "infra": 6, "quarantine": 5, "poison": 2,
+        "diagnosis": 6, "retry": 6, "premise_bounce": 2, "infra": 6, "quarantine": 5, "poison": 2,
     }
-    assert cfg.seeding.max_seeds_per_admission == 3
     assert cfg.circuit_breaker.k == 3
     assert cfg.circuit_breaker.cooldown_minutes == 10
     assert cfg.drain.max_runtime_hours == 12
@@ -132,8 +131,7 @@ def test_missing_required_top_level_key_is_refused_naming_it(tmp_path, key):
 
 
 def test_missing_nested_required_key_names_full_path(tmp_path):
-    err = refusal(tmp_path, edit(VALID, "limits: {concurrency: 1, est_cost_per_call_usd: 0.25}",
-                                 "limits: {est_cost_per_call_usd: 0.25}"))
+    err = refusal(tmp_path, edit(VALID, "limits: {concurrency: 1}", "limits: {}"))
     assert err.key == "providers.0.limits.concurrency"
     assert "providers.0.limits.concurrency" in str(err)
 
@@ -252,27 +250,6 @@ class MigrationFS:
     def write(self, path, data):
         self.writes.append((path, data))
         self.local.write(path, data)
-
-
-def test_migrate_config_entry_unit():
-    import re
-    from tempo.specs import entry_unit_gap, required_units, resolve_plan_contract
-    from tempo.tickets import parse_ticket
-
-    repo = Path(__file__).resolve().parents[1]
-    plan = (repo / "TEMPO_PLAN.md").read_text()
-    uid = "19.P6.migrate-config"
-    ticket = parse_ticket("migrate-config", (repo / "tickets/migrate-config/ticket.md").read_text(),
-                          repo, plan=plan)
-    assert required_units(plan, ticket.stem, ticket.plan_contract) == (uid,)
-    assert required_units(plan, "continuation", (uid,)) == (uid,)
-    resolved = resolve_plan_contract(plan, (*ticket.plan_contract, uid))
-    assert resolved.count(f"### {uid} ") == 1
-    assert entry_unit_gap(plan, uid) is None
-    for part in ("Owner", "Records", "Observable", "Tests"):
-        for replacement in ("", f"- **{part}:**"):
-            broken = re.sub(rf"^- \*\*{part}:\*\*.*$", replacement, plan, flags=re.M)
-            assert part in entry_unit_gap(broken, uid)
 
 
 @pytest.mark.parametrize("declaration, migrated", [

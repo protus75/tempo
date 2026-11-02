@@ -21,7 +21,6 @@ from tests.test_cli import ENV, Clock, Stages, root, write
 from tests.test_control_cli import acquire, discovery, invoke, requests
 from tests.test_daemon_composition import CoreRig, LiveDrain, assert_core_wiring
 from tests.test_drain import confirmed, offer_events
-from tests.test_drain_reentry import NoChild
 from tests.test_kill_executor_abort import Timer, Writer, turn
 from tests.test_kill_signal_journal import decision
 from tests.test_stages import agent, implement_reply, verdict
@@ -234,8 +233,7 @@ def exercise_live_cli_kill(root, monkeypatch):
         return writer
     monkeypatch.setattr(runner, "ProviderLLM", lambda *args, **kwargs: llm)
     monkeypatch.setattr(runner, "bind", composed_bind)
-    assert entry.main(["drain"], cwd=root, env=ENV, clock=Clock(), pipeline=runner.pipeline,
-                      reexec=NoChild()) == runner.EXIT_TICKET
+    assert entry.main(["drain"], cwd=root, env=ENV, clock=Clock(), pipeline=runner.pipeline) == runner.EXIT_TICKET
     assert len(controls) == len(composed) == 1
     assert llm.calls == llm.aborts == llm.cancels == 1
     assert dispatch_cancelled == [False], "dispatch cancelled before composed executor abort"
@@ -274,10 +272,10 @@ def test_live_drain_kill_reaches_production_driver(root, monkeypatch, capsys, bi
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["fresh", "retry", "machine-keep", "premise", "spec-gap", "preparation",
-                                 "stage-preparation", "verification", "between-calls", "upgrade"])
+@pytest.mark.parametrize("kind", ["fresh", "retry", "machine-keep", "premise", "preparation",
+                                 "stage-preparation", "verification", "between-calls"])
 async def test_kill_stops_before_all_offer_accounting(root, monkeypatch, kind):
-    if kind in {"stage-preparation", "verification", "between-calls", "upgrade"}:
+    if kind in {"stage-preparation", "verification", "between-calls"}:
         await kill_between_calls(root, monkeypatch, kind)
         return
     baseline = asyncio.all_tasks()
@@ -286,12 +284,9 @@ async def test_kill_stops_before_all_offer_accounting(root, monkeypatch, kind):
     write(root, "work", confirmed())
     await c.git.add(root, ["tickets/work/ticket.md"])
     await c.git.commit(root, "ticket")
-    if kind in {"retry", "machine-keep", "premise", "spec-gap"}:
+    if kind in {"retry", "machine-keep", "premise"}:
         c.journal.append(EventType.STATE_TRANSITION, {"to": "running", "ticket_sha": "older"}, ticket="work")
-        body = {"to": "premise_failed" if kind in {"premise", "spec-gap"} else "gate_failed"}
-        if kind == "spec-gap":
-            c.journal.append(EventType.SIGNAL, {"signal": "drain_handoff", "awaits": []}, ticket="work")
-            body["dispatch"] = runner.SPEC_GAP_HOLD
+        body = {"to": "premise_failed" if kind == "premise" else "gate_failed"}
         c.journal.append(EventType.STATE_TRANSITION, body, ticket="work")
     if kind == "machine-keep":
         c.journal.append(EventType.SIGNAL, {"signal": "reject_arrival"}, ticket="work")
@@ -309,7 +304,7 @@ async def test_kill_stops_before_all_offer_accounting(root, monkeypatch, kind):
     live.request("kill", "kill")
     release.set()
     report = await task
-    assert report.killed and report.exit_code == 1 and report.halted is report.handoff is None
+    assert report.killed and report.exit_code == 1 and report.halted is None
     assert offer_events(root) == before and writer.ctx.driver.llm.requests == []
     assert applications(c.journal) == [applied("kill", live.consumer.inbox.lifecycle_id)]
     assert live.trace[-2:] == [("discovery", None), "unlock"]
@@ -354,41 +349,28 @@ async def kill_between_calls(root, monkeypatch, kind):
                 await barrier()
             return await original(argv, **kwargs)
         monkeypatch.setattr(c.exec_, "run", held)
-    elif kind == "between-calls":
+    else:
         original = stages.review
         async def held(*args, **kwargs):
             await barrier()
             return await original(*args, **kwargs)
         monkeypatch.setattr(stages, "review", held)
-    else:
-        original = c.git.diff_names
-        async def upgrade(repo, base, stem):
-            paths = await original(repo, base, stem)
-            if base == stem + "^":
-                live.request("kill", "kill")
-            return paths
-        monkeypatch.setattr(c.git, "diff_names", upgrade)
     task = asyncio.create_task(live.run(writer))
     try:
-        if kind != "upgrade":
-            await entered.wait()
-            assert writer.ctx.driver._active is None
-            live.request("kill", "kill")
+        await entered.wait()
+        assert writer.ctx.driver._active is None
+        live.request("kill", "kill")
         report = await task
-        assert report.killed and report.exit_code == 1 and report.handoff is report.halted is None
+        assert report.killed and report.exit_code == 1 and report.halted is None
         assert llm.aborted == 0
-        assert len(llm.requests) == (0 if kind == "stage-preparation" else 2 if kind == "upgrade" else 1)
+        assert len(llm.requests) == (0 if kind == "stage-preparation" else 1)
         assert applications(c.journal) == [applied("kill", live.consumer.inbox.lifecycle_id)]
         events = c.journal.read()
         accepted = next(i for i, e in enumerate(events) if e.body.get("kind") == control.CONTROL_DECISION)
         assert all(e.body.get("kind") == daemon.KILL_APPLIED for e in events[accepted + 1:])
         assert audit_journal(c.journal) == []
-        if kind == "upgrade":
-            assert last_states(events)["work"] == "merged" and report.merged == ["work"]
-            assert not orphans(events)
-        else:
-            assert cleaned == [True] and orphans(events) == ["work"]
-            assert writer.ctx.worktree("work").exists()
+        assert cleaned == [True] and orphans(events) == ["work"]
+        assert writer.ctx.worktree("work").exists()
         assert live.trace[-2:] == [("discovery", None), "unlock"]
     finally:
         never.set()

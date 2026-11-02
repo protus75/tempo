@@ -1,4 +1,4 @@
-"""Effect-backed escalation delivery and journal-derived replay (19.P4.notify-transport)."""
+"""Effect-backed escalation delivery and journal-derived replay."""
 
 import asyncio
 import json
@@ -15,28 +15,24 @@ NOTIFY_TIMEOUT_S = 30.0
 NOTIFY_RETRY_S = 60.0
 
 
-def notification_key(owner: str, escalation: str, identity: str, *, run_sequence: int | None = None) -> str:
-    if escalation == "spiral-warning":
-        if run_sequence is None:
-            raise ValueError("spiral-warning needs its run sequence")
-        identity = str(run_sequence)
+def notification_key(owner: str, escalation: str, identity: str) -> str:
     return f"notify/{owner}/{escalation}/{identity}"
 
 
 async def send(effects: Effects, notifications: Notifications, argv: Sequence[str], *,
                owner: str, escalation: str, identity: str, message: str,
-               ticket: str | None, run_sequence: int | None = None):
+               ticket: str | None):
     return await effects.run(lambda: notifications.notify([*argv, message]), ticket=ticket,
-        key=notification_key(owner, escalation, identity, run_sequence=run_sequence))
+        key=notification_key(owner, escalation, identity))
 
 
 class WatchdogNotifications:
     """Run-bound producer; transport alone owns the Effects and notification keys."""
 
     def __init__(self, *, effects: Effects, notifications: Notifications, argv: Sequence[str] | None,
-                 owner: str, ticket: str | None, run_sequence: int, identity: str, log) -> None:
+                 owner: str, ticket: str | None, identity: str, log) -> None:
         self.effects, self.notifications, self.argv = effects, notifications, argv
-        self.owner, self.ticket, self.run_sequence, self.identity = owner, ticket, run_sequence, identity
+        self.owner, self.ticket, self.identity = owner, ticket, identity
         self.log = log
 
     async def __call__(self, escalation: str) -> None:
@@ -47,7 +43,7 @@ class WatchdogNotifications:
             return
         try:
             await send(self.effects, self.notifications, self.argv, owner=self.owner, escalation=escalation,
-                       identity=self.identity, message=message, ticket=self.ticket, run_sequence=self.run_sequence)
+                       identity=self.identity, message=message, ticket=self.ticket)
         except NotificationFailed as exc:
             self.log.event('notify_failed', owner=self.owner, escalation=escalation, error=str(exc))
 

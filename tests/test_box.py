@@ -7,9 +7,18 @@ from pathlib import Path
 import pytest
 
 from tempo.box import (
-    BOOTSTRAP_ORIGIN, Box, BoxError, DecisionRecord, Message, Resolution, Verdict,
-    ingest_bootstrap, ingest_main_checkout, normalize, parse_record, read_registry,
-    record_path, render_record, signature,
+    Box,
+    BoxError,
+    DecisionRecord,
+    Message,
+    Resolution,
+    Verdict,
+    normalize,
+    parse_record,
+    read_registry,
+    record_path,
+    render_record,
+    signature,
 )
 from tempo.git import Git
 from tempo.seams import LocalFileSystem, SubprocessExec
@@ -29,8 +38,8 @@ def test_signature_recipe():
     ]:
         assert signature(*fields, reason="failed") != base
     line = "line 42 /tmp/a failed"
-    compact = json.dumps(["suggestion", BOOTSTRAP_ORIGIN, normalize(line)], separators=(",", ":"))
-    assert signature("suggestion", BOOTSTRAP_ORIGIN, reason=line) == hashlib.sha256(compact.encode()).hexdigest()
+    compact = json.dumps(["suggestion", "origin", normalize(line)], separators=(",", ":"))
+    assert signature("suggestion", "origin", reason=line) == hashlib.sha256(compact.encode()).hexdigest()
 
 
 def test_host_report_signature(tmp_path):
@@ -129,48 +138,6 @@ def test_registry_format(tmp_path):
     (folder / "b.md").write_text(render_record(record, "B"))
     (folder / "a.md").write_text(render_record(DecisionRecord(id="a", kind="tombstone", link="b", reopen_after_days=7), "A"))
     assert [item[0].id for item in read_registry(tmp_path)] == ["a", "b"]
-
-
-def test_bootstrap_ingest_uses_main_checkout(tmp_path):
-    main = tmp_path / "main"
-    linked = tmp_path / "linked"
-    main.mkdir()
-    (main / "config.yaml").write_text(
-        "schema_version: 1\nstate_dir: .tempo\nproviders:\n"
-        "  - {name: test, kind: cli, package: test-cli, models_by_tier: {low: a, medium: b, high: c, max: d}, limits: {concurrency: 1}}\n"
-        "routing:\n  - {tier: medium, surface: implement, candidates: [{provider: test}]}\n"
-        "review: {}\nmerge: {}\nengine_plane_safety_inventory: []\n"
-    )
-    source = main / "bootstrap" / "suggestions.md"
-    source.parent.mkdir()
-    source.write_text("  first line  \n\n second line\n")
-    env = {
-        **os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
-    }
-    git = Git(SubprocessExec(), env=env, timeout=30.0)
-    fs = LocalFileSystem()
-
-    async def scenario():
-        await git.init(main, branch="main")
-        await git.add(main, ["config.yaml", "bootstrap/suggestions.md"])
-        await git.commit(main, "base")
-        await git.worktree_add(main, linked, "linked", "main")
-        (linked / "bootstrap" / "suggestions.md").unlink()
-        assert await ingest_main_checkout(linked, git, fs) == 2
-        assert await ingest_main_checkout(linked, git, fs) == 0
-        source.unlink()
-        assert await ingest_main_checkout(linked, git, fs) == 0
-
-    asyncio.run(scenario())
-    box = Box(main / ".tempo" / "box", fs)
-    assert [(m.message_class, m.origin, m.summary) for m in box.messages()] == [
-        ("suggestion", BOOTSTRAP_ORIGIN, "first line"),
-        ("suggestion", BOOTSTRAP_ORIGIN, "second line"),
-    ]
-    assert not (linked / ".tempo").exists()
-    assert ingest_bootstrap(box, "first line\nsecond line\n") == [m.id for m in box.messages()]
 
 
 def test_tombstone_rereports_reopen_at_threshold(tmp_path, monkeypatch):

@@ -26,27 +26,6 @@ ENV = {
     "GIT_COMMITTER_EMAIL": "t@t",
 }
 
-PLAN = """# Plan
-
-## 11. Failure spine
-
-Spine prose.
-
-## 19. Implementation phases
-
-### 19.L Build laws
-
-Laws.
-
-### 19.P2 Phase 2 -- Failure spine
-
-Phase two.
-
-## 22. Appendix: rationale
-
-Never cited.
-"""
-
 FRONT = "---\npriority: P2\nkind: feature\n---\n"
 
 BODY = """
@@ -55,9 +34,6 @@ none
 
 ## Context
 - tempo/thing.py
-
-## Plan contract
-- section 11
 
 ## Goal / Why
 `tempo thing` prints ok. Operators need it.
@@ -106,11 +82,10 @@ def repo(tmp_path: Path):
     (root / "specs").mkdir()
     (root / "tempo" / "thing.py").write_text("")
     (root / "specs" / "review.md").write_text("spec\n")
-    (root / "TEMPO_PLAN.md").write_text(PLAN)
 
     async def seed():
         await g.init(root, branch="main")
-        await g.add(root, ["tempo", "specs", "TEMPO_PLAN.md"])
+        await g.add(root, ["tempo", "specs"])
         await g.commit(root, "base")
 
     run(seed())
@@ -153,7 +128,6 @@ def test_valid_ticket_validates_and_commits(repo):
     path = write(root, "t-one", VALID)
     ticket = validate_ticket("t-one", VALID.replace("---\npriority", "---\nstate: draft\nsource: human\npriority"),
                              root)
-    assert ticket.plan_contract == ("11",)
     assert ticket.verification == (("uv", "run", "pytest", "tests/test_thing.py"),)
     assert (ticket.expected_minutes, ticket.stuck_minutes) == (20, 40)
     assert ticket.frontmatter.agent_tier == ticket.frontmatter.agent_effort == "medium"
@@ -192,26 +166,6 @@ def test_bad_schema_ticket_is_refused_with_paved_road(repo):
     assert journal.read() == []
 
 
-def test_context_citing_the_plan_is_refused_naming_plan_contract(repo):
-    root, g, journal = repo
-    findings = refusal(root, VALID.replace("- tempo/thing.py\n\n## Plan", "- tempo/thing.py\n- TEMPO_PLAN.md\n\n## Plan"))
-    [f] = findings
-    assert "TEMPO_PLAN.md" in f.message
-    assert "## Plan contract" in f.paved_road
-    assert do_intake(root, g, journal).refused["t-one"] == findings
-
-
-def test_unresolvable_plan_contract_section_is_refused(repo):
-    root, g, journal = repo
-    for bad in ("section 99", "section 22", "19.P5", "chapter 3"):
-        findings = refusal(root, VALID.replace("- section 11", f"- {bad}"))
-        assert len(findings) == 1 and "Plan contract" in findings[0].message, bad
-    assert do_intake(root, g, journal).committed == ()
-
-
-# --- the rest of the section 13 grammar ------------------------------------------------------
-
-
 @pytest.mark.parametrize("stuck", [19, 20, 21])
 def test_time_budget_stuck_must_exceed_expected(repo, stuck):
     root, _, _ = repo
@@ -232,9 +186,9 @@ def test_time_budget_stuck_must_exceed_expected(repo, stuck):
 @pytest.mark.parametrize(
     ("old", "new", "needle"),
     [
-        ("- tempo/thing.py\n\n## Plan", "- specs/review.md\n\n## Plan", "prompt spec"),
-        ("- tempo/thing.py\n\n## Plan", "- tempo/later.py\n\n## Plan", "does not exist"),
-        ("- tempo/thing.py\n\n## Plan", "- ../etc/passwd\n\n## Plan", "repo-relative"),
+        ("- tempo/thing.py\n\n## Goal", "- specs/review.md\n\n## Goal", "prompt spec"),
+        ("- tempo/thing.py\n\n## Goal", "- tempo/later.py\n\n## Goal", "does not exist"),
+        ("- tempo/thing.py\n\n## Goal", "- ../etc/passwd\n\n## Goal", "repo-relative"),
         ("## Depends on\nnone", "## Depends on\n- ghost", "does not resolve"),
         ("## Depends on\nnone", "## Depends on\n- t-one", "self-edge"),
         ("## Definition of rejected\nThe verb needs a new dependency.\n", "", "Definition of rejected"),
@@ -246,7 +200,6 @@ def test_time_budget_stuck_must_exceed_expected(repo, stuck):
         ("2. `tempo/thing.py` exposes `thing()`.", "2. The thing works.", "names no check"),
         ("kind: feature", "kind: bug", "no `## Regression`"),
         ("## Time budget", "## Regression\n```\npytest\n```\n- carries: tests/\n\n## Time budget", "non-bug"),
-        ("## Time budget", "## Exit-read window\n- nonsense\n\n## Time budget", "Exit-read window"),
         ("kind: feature", "kind: feature\ngate_bypass: [{code: vibes, reason: x}]", "gate_bypass"),
     ],
 )
@@ -286,7 +239,7 @@ def test_regression_grammar_is_closed(repo, regression):
 
 def test_on_demand_must_be_fenced_existing_and_not_context(repo):
     root, _, _ = repo
-    base = VALID.replace("## Plan contract", "## On-demand\n- {}\n\n## Plan contract")
+    base = VALID.replace("## Goal / Why", "## On-demand\n- {}\n\n## Goal / Why")
     (root / "tempo" / "big.py").write_text("")
     assert "not covered" in messages(refusal(root, base.format("tempo/big.py")))
     fenced = base.replace("- tests/test_thing.py", "- tests/test_thing.py\n- tempo/big.py")
@@ -294,66 +247,6 @@ def test_on_demand_must_be_fenced_existing_and_not_context(repo):
     ok = fenced.format("tempo/big.py").replace("---\npriority", "---\nstate: draft\nsource: human\npriority")
     write(root, "t-one", ok)
     assert validate_ticket("t-one", ok, root).on_demand == ("tempo/big.py",)
-
-
-def test_seed_must_cite_build_laws_and_phase_unit_never_refused_sections(repo):
-    root, _, _ = repo
-    seed = VALID.replace("---\npriority", "---\nstate: confirmed\nsource: seed\npriority")
-    assert "must cite `19.L`" in messages(refusal(root, seed))
-    cited = seed.replace("- section 11", "- 19.L\n- 19.P2\n- section 11")
-    write(root, "t-one", cited)
-    assert validate_ticket("t-one", cited, root).plan_contract == ("19.L", "19.P2", "11")
-    assert "never cites section(s) 19" in messages(refusal(root, cited.replace("- section 11", "- section 19")))
-
-
-ROW_PLAN = PLAN.replace("## 22. Appendix", """### 19.P3 Phase 3
-
-```yaml
-# BEGIN_REGISTRY_P3
-phase: 3
-admissions:
-  - [t-row]
-  - [t-exit]
-seeds:
-  t-row: {cite: ["11.4"], fence: [tempo/thing.py]}
-  t-exit: {exit: true, fence: [tickets]}
-# END_REGISTRY_P3
-```
-
-### 19.P3.t-row Row
-
-- **Owner:** o
-- **Records:** r
-- **Observable:** b
-- **Tests:** t
-
-## 22. Appendix""").replace("Spine prose.", "Spine prose.\n\n### 11.4 Dispatch\n\nDispatch.")
-
-
-def seed_citing(*ids: str) -> str:
-    seed = VALID.replace("---\npriority", "---\nstate: confirmed\nsource: seed\npriority")
-    return seed.replace("- section 11", "\n".join(f"- {i}" for i in ids))
-
-
-def test_row_seed_cites_its_entry_unit_never_its_phase(repo):
-    root, _, _ = repo
-    (root / "TEMPO_PLAN.md").write_text(ROW_PLAN)
-    good = seed_citing("19.I", "19.P3.t-row", "section 11.4")
-    write(root, "t-row", good)
-    (root / "TEMPO_PLAN.md").write_text(ROW_PLAN.replace("### 19.L Build laws", "### 19.I Impl\n\nI.\n\n### 19.L Build laws"))
-    assert validate_ticket("t-row", good, root).plan_contract == ("19.I", "19.P3.t-row", "11.4")
-    assert "never cites its phase unit" in messages(refusal(root, seed_citing("19.I", "19.P3", "19.P3.t-row",
-                                                                             "section 11.4"), stem="t-row"))
-    assert "also cite 11.4" in messages(refusal(root, seed_citing("19.I", "19.P3.t-row"), stem="t-row"))
-
-
-def test_fence_anchor_names_one_entry_unit_of_the_plan(repo):
-    root, _, _ = repo
-    anchored = VALID.replace("- tests/test_thing.py", "- tests/test_thing.py\n- TEMPO_PLAN.md#19.P3.t-row")
-    write(root, "t-one", anchored)
-    assert "TEMPO_PLAN.md#19.P3.t-row" in validate_ticket("t-one", complete(anchored), root).scope_fence
-    for bad in ("README.md#19.P3.t-row", "TEMPO_PLAN.md#19.L", "TEMPO_PLAN.md#section 11"):
-        assert "anchor" in messages(refusal(root, VALID.replace("- tests/test_thing.py", f"- {bad}")))
 
 
 def test_reserved_and_malformed_stems_are_refused(repo):
@@ -381,7 +274,7 @@ def test_dependency_cycle_is_refused(repo):
 
 def test_new_stem_claiming_a_machine_source_is_refused(repo):
     root, g, journal = repo
-    for source in ("seed", "box:bug_report"):
+    for source in ("box:bug_report",):
         write(root, "t-one", VALID.replace("---\npriority", f"---\nsource: {source}\npriority"))
         [f] = do_intake(root, g, journal).refused["t-one"]
         assert "only the machine writes" in f.message and "intake stamps `source: human`" in f.paved_road
@@ -393,22 +286,21 @@ def test_new_stem_authored_rejected_is_refused(repo):
     assert "state: rejected" in messages(do_intake(root, g, journal).refused["t-one"])
 
 
-def test_established_seed_keeps_its_source_across_an_edit(repo):
+def test_established_machine_ticket_keeps_its_source_across_an_edit(repo):
     root, g, journal = repo
-    seed = VALID.replace("---\npriority", "---\nstate: confirmed\nsource: seed\npriority").replace(
-        "- section 11", "- 19.L\n- 19.P2")
-    write(root, "t-seed", seed)
-    run(g.add(root, ["tickets/t-seed/ticket.md"]))
-    run(g.commit(root, "conductor seed"))
-    edited = seed.replace("Out: everything else.", "Out: everything else, still.")
-    path = write(root, "t-seed", edited)
+    machine = VALID.replace("---\npriority", "---\nstate: confirmed\nsource: box:failure_report\npriority")
+    write(root, "t-machine", machine)
+    run(g.add(root, ["tickets/t-machine/ticket.md"]))
+    run(g.commit(root, "machine ticket"))
+    edited = machine.replace("Out: everything else.", "Out: everything else, still.")
+    path = write(root, "t-machine", edited)
 
     result = do_intake(root, g, journal)
 
-    assert result.committed == ("t-seed",)
+    assert result.committed == ("t-machine",)
     assert path.read_text() == edited  # never restamped human
     [event] = journal.read()
-    assert event.body["source"] == "seed" and event.body["new"] is False
+    assert event.body["source"] == "box:failure_report" and event.body["new"] is False
 
 
 def test_staged_change_outside_ticket_files_refuses_intake(repo):

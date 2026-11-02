@@ -1,4 +1,4 @@
-"""Pure journal-window surface accounting (19.P5.scorecard-reporting)."""
+"""Pure journal-window surface accounting."""
 
 from dataclasses import dataclass
 from collections.abc import Mapping
@@ -29,8 +29,6 @@ class SurfaceScorecardRow:
 class Scorecard:
     boundary: str
     merged_ticket_count: int
-    spend_usd: float
-    tokens: Mapping[str, Mapping[str, int]]
     signal_counts: Mapping[str, int]
     gate_failure_count: int
     surfaces: tuple[SurfaceScorecardRow, ...]
@@ -73,7 +71,7 @@ def project_scorecard(window: Window) -> Scorecard:
                 try:
                     verdict = ReviewVerdict.model_validate_json(unwrap_fence(body["result"]["text"]))
                 except (KeyError, ValidationError):
-                    continue  # Schema-invalid calls are spend, not a review verdict.
+                    continue  # A schema-invalid call is not a review verdict.
                 observe("review", stem, verdict.verdict in {"snag", "rma"})
         elif event.type == EventType.STATE_TRANSITION and stem:
             state = body.get("to")
@@ -93,8 +91,6 @@ def project_scorecard(window: Window) -> Scorecard:
         rows.append(SurfaceScorecardRow(surface, count, catches, escaped, bypasses.get(surface, 0),
             catches / count if count else 0, escaped / count if count else 0,
             count >= 25 and catches == escaped == 0))
-    tokens = MappingProxyType({direction: MappingProxyType(dict(evidence[f"{direction}_tokens"]))
-                              for direction in ("input", "output")})
     signals = MappingProxyType(dict(evidence["spikes"]))
-    return Scorecard(window.boundary, evidence["merged_count"], evidence["usd"], tokens,
+    return Scorecard(window.boundary, evidence["merged_count"],
                      signals, signals["gate-failure"], tuple(rows))

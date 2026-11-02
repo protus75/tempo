@@ -3,7 +3,7 @@
 import pytest
 
 from tempo import runner
-from tempo.artifacts import Cost, StageResult
+from tempo.artifacts import StageResult
 from tempo.__main__ import main
 from tempo.caps import CAPS, capability, consume, draws, remaining, spent, spent_reason
 from tempo.config import Caps
@@ -100,7 +100,7 @@ def test_other_terminals_draw_only_when_infra(repo, monkeypatch, outcome, expect
 
     async def stage_seam(ctx, ticket):
         return StagesRun(attempt=0, results={"implement": StageResult(
-            outcome=outcome, artifact=None, findings=[], cost=Cost())})
+            outcome=outcome, artifact=None, findings=[])})
 
     monkeypatch.setattr(runner, "run_stages", stage_seam)
     assert main(["run", STEM], cwd=repo, env=ENV, clock=clock,

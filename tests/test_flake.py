@@ -159,7 +159,7 @@ def test_quarantine_reconstructs_across_segments(rig):
     second = detect(rig, reason="a different failure")
     assert len(second.active) == 2 and second.tests == {identity.test_id}
     release(rig, identity)
-    rig.journal.append(EventType.SIGNAL, {"kind": "drain_handoff"}, ticket="a-ticket")
+    rig.journal.append(EventType.SIGNAL, {"kind": "drain_halted"}, ticket="a-ticket")
     restart = Flake(journal=Journal(rig.journal.dir.parent, Clock()), box=rig.box,
                     cap=5, escalate=rig.escalations.append)
     assert len(restart.quarantine().active) == 1
@@ -175,7 +175,7 @@ def test_quarantine_reconstructs_across_segments(rig):
 
 
 @pytest.mark.parametrize("change", [
-    {"kind": "drain_handoff"}, {"test_id": " "}, {"signature": "A" * 64},
+    {"kind": "drain_halted"}, {"test_id": " "}, {"signature": "A" * 64},
     {"signature": 123}, {"box_id": ""}, {"extra": "field"},
 ])
 def test_projection_refuses_malformed_records(rig, change):

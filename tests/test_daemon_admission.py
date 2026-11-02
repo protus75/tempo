@@ -10,7 +10,7 @@ from tempo.__main__ import main
 from tempo.daemon import DaemonAdmission
 from tempo.journal import EventType
 from tempo.tickets import parse_ticket
-from tests.test_cli import ENV, PLAN, Clock, root, ticket, write, with_retro_driver
+from tests.test_cli import ENV, Clock, root, ticket, write, with_retro_driver
 
 
 @pytest.fixture
@@ -18,7 +18,7 @@ def tickets(tmp_path):
     (tmp_path / "tempo").mkdir()
     (tmp_path / "tempo/thing.py").write_text("")
     text = ticket().replace("priority: P2", "state: confirmed\nsource: human\npriority: P2", 1)
-    return tuple(parse_ticket(stem, text, tmp_path, plan=PLAN) for stem in ("first", "second"))
+    return tuple(parse_ticket(stem, text, tmp_path) for stem in ("first", "second"))
 
 
 async def turn():

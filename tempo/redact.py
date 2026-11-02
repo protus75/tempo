@@ -6,7 +6,6 @@ Writer-site checklist (extend in the same change that adds a writer of a capture
 - attempt-spool writer: tempo/providers.py `CliAdapter.invoke` (prompt, cli event stream, stderr)
 - journal writer: tempo/journal.py -- NOT YET WIRED; its one secret-bearing producer, the LLM effect
   result, is scrubbed before it becomes the completion record (tempo/llmeffect.py `llm_call`)
-- harvest serialization: not built (Phase 2)
 """
 
 from collections.abc import Mapping

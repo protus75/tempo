@@ -1,12 +1,11 @@
-"""Read-only authored-ticket feasibility review (TEMPO_PLAN.md sections 7, 8, 19.L)."""
+"""Read-only authored-ticket feasibility review (TEMPO_PLAN.md sections 7, 8)."""
 
 import hashlib
 import re
-from collections.abc import Collection
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from tempo.artifacts import Artifact, Finding, NonBlank
 from tempo.driver import Driver, _StuckBudget, unwrap_fence
@@ -14,19 +13,11 @@ from tempo.gates import GateReport
 from tempo.llm import AgentTier, LLMRequest, LLMResult
 from tempo.llmeffect import llm_call
 from tempo.providers import ProviderCallError, ProviderDrought
-from tempo.specs import REQ_RENDER_HEADROOM, RENDER_BOUND_CHARS, RenderOverBound, hardenable_units, load_spec, render
+from tempo.specs import REQ_RENDER_HEADROOM, RENDER_BOUND_CHARS, RenderOverBound, load_spec, render
 from tempo.stages import implement_inputs
 from tempo.tickets import Ticket, validate_ticket
 
 REQUISITION_STUCK_S = 600.0
-
-
-def validate_finding_units(findings: list[Finding], units: Collection[str]) -> None:
-    """Surface schema rule: a spec gap names one of the judged ticket's hardenable units."""
-    for finding in findings:
-        if finding.kind == "spec_gap" and (finding.unit not in units if units else finding.unit is not None):
-            raise ValueError(f"spec_gap unit must be one of {sorted(units)}" if units
-                             else "spec_gap unit must be null when the ticket has no hardenable units")
 
 
 class RequisitionReply(BaseModel):
@@ -37,12 +28,11 @@ class RequisitionReply(BaseModel):
     findings: list[Finding]
 
     @model_validator(mode="after")
-    def _findings_match_verdict(self, info: ValidationInfo) -> "RequisitionReply":
+    def _findings_match_verdict(self) -> "RequisitionReply":
         if bool(self.findings) == (self.verdict == "approve"):
             raise ValueError("findings must be empty exactly for approve")
         if any(f.kind is None for f in self.findings):
             raise ValueError("every finding needs a kind: spec_gap or authoring_error")
-        validate_finding_units(self.findings, (info.context or {}).get("hardenable_units", ()))
         return self
 
 
@@ -59,38 +49,35 @@ class RequisitionVerdict(Artifact):
     model: str | None
 
 
-def review_target(repo: Path, stem: str, text: str, siblings: Collection[str] = ()) -> Ticket:
+def review_target(repo: Path, stem: str, text: str) -> Ticket:
     """Use the complete ticket admission predicate, including reserved stems."""
-    return validate_ticket(stem, text, repo, siblings)
+    return validate_ticket(stem, text, repo)
 
 
-def _base_render(repo: Path, plan: str, ticket: Ticket, text: str, specs_dir: Path) -> str:
+def _base_render(repo: Path, ticket: Ticket, text: str, specs_dir: Path) -> str:
     spec = load_spec((specs_dir / "implement.md").read_text())
-    inputs = implement_inputs(repo, plan, text, ticket, ())
+    inputs = implement_inputs(repo, text, ticket, ())
     return render(spec, {**inputs, "retry_findings": "none"})
 
 
-def base_render_chars(repo: Path, plan: str, ticket: Ticket, text: str, specs_dir: Path) -> int:
+def base_render_chars(repo: Path, ticket: Ticket, text: str, specs_dir: Path) -> int:
     """Measure the same first-attempt Implement prompt that production renders, at max effort."""
     try:
-        return len(_base_render(repo, plan, ticket, text, specs_dir))
+        return len(_base_render(repo, ticket, text, specs_dir))
     except RenderOverBound as exc:
         # The renderer measured the complete prompt before refusing it.
         return int(re.search(r"rendered prompt is (\d+) characters", exc.finding.message).group(1))
 
 
-async def review_ticket(driver: Driver, *, repo: Path, plan: str, stem: str, text: str,
+async def review_ticket(driver: Driver, *, repo: Path, stem: str, text: str,
                         specs_dir: Path, tier: AgentTier, stem_slot: str, run_seq: int,
-                        attempt: int, call_seq: int, expected_budget: float | Literal['surface', 'eval'],
-                        prior: str = "none",
-                        siblings: Collection[str] = ()) -> RequisitionVerdict:
-    ticket = review_target(repo, stem, text, siblings)
-    units = hardenable_units(plan, stem, ticket.plan_contract)
+                        attempt: int, call_seq: int) -> RequisitionVerdict:
+    ticket = review_target(repo, stem, text)
     spec = load_spec((specs_dir / "requisition_review.md").read_text())
     ticket_bytes = text.encode()
     sha = hashlib.sha1(f"blob {len(ticket_bytes)}\0".encode() + ticket_bytes).hexdigest()
     try:
-        base = _base_render(repo, plan, ticket, text, specs_dir)
+        base = _base_render(repo, ticket, text, specs_dir)
         chars = len(base)
     except RenderOverBound as exc:
         base = None
@@ -112,9 +99,8 @@ async def review_ticket(driver: Driver, *, repo: Path, plan: str, stem: str, tex
     assert base is not None
 
     try:
-        prompt = render(spec, {"ticket": text, "plan_contract": "included in render",
-                               "context": "included in render", "render": base,
-                               "prior_review": prior, "retry_findings": "none"})
+        prompt = render(spec, {"ticket": text, "context": "included in render", "render": base,
+                               "retry_findings": "none"})
     except RenderOverBound as exc:
         return snag(str(exc), "review render over bound", road="shrink or split the ticket at authoring")
 
@@ -125,8 +111,7 @@ async def review_ticket(driver: Driver, *, repo: Path, plan: str, stem: str, tex
                      effort=spec.meta.effort, ticket=None, worktree=None)
     if driver._active is None:
         driver.begin_watch(owner=stem_slot, ticket=None, run_sequence=run_seq,
-            surface='requisition_review', workspace=repo, expected_budget=expected_budget,
-            stuck_budget=REQUISITION_STUCK_S, scope_fence=(), attempt=attempt)
+            surface='requisition_review', stuck_budget=REQUISITION_STUCK_S, attempt=attempt)
     try:
         recorded = await driver.race(
             lambda: llm_call(driver.effects, driver.watched_llm(), req, driver.redactor, ticket=stem,
@@ -144,8 +129,7 @@ async def review_ticket(driver: Driver, *, repo: Path, plan: str, stem: str, tex
     result = LLMResult(**recorded)
     driver.spool.write(spool_stem, attempt, f"{name}/output.txt", result.text)
     try:
-        reply = RequisitionReply.model_validate_json(unwrap_fence(result.text),
-                                                    context={"hardenable_units": units})
+        reply = RequisitionReply.model_validate_json(unwrap_fence(result.text))
     except ValidationError as exc:
         message = f"invalid requisition review reply: {exc.error_count()} schema error(s)"
         return RequisitionVerdict(**common, verdict="snag", summary=message,

@@ -20,9 +20,9 @@ from tempo.providers import ProviderLLM, child_env
 from tempo.redact import Redactor
 from tempo.scheduler import Scheduler
 from tempo.stages import StageContext
-from tempo.tickets import INTAKE_SIGNAL
+from tempo.tickets import INTAKE_SIGNAL, validate_ticket
 from tempo.watcher import WATCHER_PARSE_FAILURE, Watcher
-from tests.test_cli import PLAN, root, write
+from tests.test_cli import root, write
 from tests.test_daemon_admission import assert_idle
 from tests.test_daemon_config import assert_detached, python_values
 from tests.test_providers import CONFIG, ENV, claude_ok, codex_ok, jsonl
@@ -78,7 +78,6 @@ class ScriptExec:
 @pytest.mark.asyncio
 async def test_production_watchdog_shares_active_executor(root, monkeypatch):
     from tempo.drain import drain
-    from tempo.seams import SubprocessExec
     from tests.test_restart_timers import repository
     from tests.test_serve import until, finish, terminals
 
@@ -86,11 +85,11 @@ async def test_production_watchdog_shares_active_executor(root, monkeypatch):
     async def drive(ctx, ticket, **kwargs):
         assert ctx.driver.llm._exec is ctx.exec_
         ctx.exec_.reply = '{"text":"done"}'
-        for surface, identity, budget in (("implement", ticket.stem, 600), ("triage", None, 'surface')):
+        for surface, identity in (("implement", ticket.stem), ("triage", None)):
             result = await ctx.driver.run(
                 LlmStage(surface=surface, emits=Reply, gates=[], render=lambda *_: "probe"), None,
                 ticket=identity, attempt=0, workspace=ctx.repo, tier="medium", effort="low",
-                stuck_budget=1200, expected_budget=budget, scope_fence=(),
+                stuck_budget=1200,
                 run_seq=5 + len(contexts) if identity is None else None)
             assert result.outcome == 'ok'
             d = ctx.driver.detector
@@ -109,15 +108,14 @@ async def test_production_watchdog_shares_active_executor(root, monkeypatch):
     rig = await repository(root, monkeypatch)
     await rig.add('bootstrap')
     checkout = replace(rig.checkout, control=cli.build_control(rig.checkout))
-    handoff = SubprocessExec()
     dispatch = await runner.prepare_pipeline(checkout)
-    report = await drain(checkout, dispatch, reexec=handoff)
+    report = await drain(checkout, dispatch)
     assert report.exit_code == 0 and contexts[0].exec_ is checkout.exec_
-    assert handoff is not contexts[0].exec_ and handoff is not contexts[0].driver.detector.notify.notifications.exec_
+    assert contexts[0].driver.detector.notify.notifications.exec_ is not contexts[0].exec_
     from tempo.seams import LocalFileSystem
     serving = rig
     rig.fs.publish = LocalFileSystem().publish
-    rig.owner = cli.build_serve(rig.checkout, plan=PLAN)
+    rig.owner = cli.build_serve(rig.checkout)
     write(root, 'continuous', text())
     run = asyncio.create_task(serving.owner.run())
     try:
@@ -152,7 +150,7 @@ class CoreRig:
         self.calls, self.locals = [], []
         kwargs = {} if prepare is None else {"prepare": prepare}
         self.core = cli.build_daemon_core(
-            self.checkout, config_path=config_path, plan=PLAN, read=self.files.get, debounce=5,
+            self.checkout, config_path=config_path, read=self.files.get, debounce=5,
             quarantined=lambda: self.quarantine, drought_parked=lambda: self.drought,
             completed_unmerged=lambda: self.unmerged, **kwargs,
         )
@@ -198,7 +196,7 @@ def assert_core_wiring(rig):
     assert core.scheduler.dispatch == core.admission.dispatch
     assert core.watcher.publish == core.scheduler.update
     assert core.watcher.remove == core.scheduler.remove
-    assert core.watcher.read == rig.files.get and core.watcher.plan == PLAN
+    assert core.watcher.read == rig.files.get
     assert core.watcher.clock is rig.checkout.clock and core.watcher.sleep == rig.checkout.sleep
     assert core.watcher.debounce == 5
     assert core.scheduler.max_unmerged == rig.checkout.config.scheduler.max_unmerged
@@ -725,9 +723,8 @@ async def test_production_core_uses_real_snapshot_pipeline(tmp_path, monkeypatch
         result = await ctx.driver.run(
             LlmStage(surface="review", emits=Reply, gates=[], render=lambda *_: rig.exec.reply),
             None, ticket=original.stem, attempt=0, workspace=tmp_path,
-            tier="medium", effort="low", stuck_budget=60,
-            expected_budget=300.0, scope_fence=())
-        assert result.outcome == "ok" and result.cost.provider == "claude" and result.cost.model == "c-max"
+            tier="medium", effort="low", stuck_budget=60)
+        assert result.outcome == "ok" and result.provider == "claude" and result.model == "c-max"
         assert result.artifact.text == "[REDACTED:CLAUDE_KEY] [REDACTED:CODEX_KEY]"
         return "original-terminal"
 
@@ -1004,9 +1001,7 @@ async def test_composed_merge_queue_admits_reviewed_candidate(admission_context,
     [merged] = [e for e in events if e.type == EventType.STATE_TRANSITION]
     assert merged.ticket == ticket.stem and merged.key is None
     assert merged.body == {"to": "merged", "commit": artifact.commit, "reviewed_sha": reviewed}
-    [regate, completion] = [e for e in events if e.type == EventType.EFFECT_COMPLETION]
-    assert regate.key.startswith(f"merge-regate/{ticket.stem}/7/")
-    assert regate.body["result"]["admission"] == "READY" and regate.body["result"]["reason"] == "bootstrap"
+    [completion] = [e for e in events if e.type == EventType.EFFECT_COMPLETION]
     assert completion.key == f"merge/{ticket.stem}/7"
     [facts] = [e for e in events if e.type == EventType.SIGNAL]
     assert facts.ticket == ticket.stem and facts.key is None
@@ -1128,7 +1123,7 @@ async def test_production_consumes_conflict_handoff_after_unwind(admission_conte
             with pytest.raises(LockHeld):
                 contender.acquire()
             return await writer.consume_handoff(original, handoff, attempt=0)
-        await _Drain(checkout, consume, frozenset())._run_one(ticket, False, "blob")
+        await _Drain(checkout, consume)._run_one(ticket, False, "blob")
     finally:
         lock.release()
     assert chronology == ["abort", "rework"]
@@ -1143,7 +1138,7 @@ async def test_production_consumes_conflict_handoff_after_unwind(admission_conte
     monkeypatch.undo()
     ctx.driver.llm = FakeLLM([agent({"tempo/thing.py": "ok fresh\n"}),
                              verdict()])
-    fresh = stages.validate_ticket(ticket.stem, (ctx.repo / f"tickets/{ticket.stem}/ticket.md").read_text(), ctx.repo)
+    fresh = validate_ticket(ticket.stem, (ctx.repo / f"tickets/{ticket.stem}/ticket.md").read_text(), ctx.repo)
     await writer(fresh)
     assert [r.surface for r in ctx.driver.llm.requests] == ["implement", "review"]
 
@@ -1163,7 +1158,7 @@ async def test_production_applies_reviewed_rework_orders(admission_context, acti
         text = text.replace("kind: feature", "kind: feature\nagent_tier: max\nagent_effort: max")
         ctx.fs.write(ctx.repo / f"tickets/{ticket.stem}/ticket.md", text.encode())
         await commit(ctx, ctx.repo, [f"tickets/{ticket.stem}/ticket.md"])
-        ticket = stages.validate_ticket(ticket.stem, text, ctx.repo)
+        ticket = validate_ticket(ticket.stem, text, ctx.repo)
     proposals = successors(text.strip()) if action == "split" else [(ticket.stem, text.strip().replace("holds the word ok", "holds ok after narrowing"))] if action == "update" else []
     ctx.driver.llm = FakeLLM([order("escalate" if action == "exhausted" else action, proposals)]
                             + [requisition() for _ in proposals])
@@ -1180,7 +1175,7 @@ async def test_production_applies_reviewed_rework_orders(admission_context, acti
     lock = Lockfile(ctx.config.state_dir, instance_id="production", clock=ctx.driver.clock)
     lock.acquire()
     try:
-        await _Drain(checkout, consume, frozenset())._run_one(
+        await _Drain(checkout, consume)._run_one(
             ticket, False, await ctx.git.rev_parse(ctx.repo, f"HEAD:tickets/{ticket.stem}/ticket.md"))
     finally:
         lock.release()
@@ -1293,13 +1288,12 @@ async def test_production_refuses_failed_rework_publication(admission_context, m
         assert await ctx.git.status_porcelain(ctx.repo) == ""
         # A later ordinary drain must not intake a leaked machine proposal as human work.
         from tempo.drain import drain
-        from tests.test_drain_reentry import NoChild
         intake_before = [e for e in events if e.body.get("signal") == INTAKE_SIGNAL]
         for _ in range(ctx.config.caps.retry - caps.draws(events, ticket.stem, "retry")):
             caps.consume(ctx.driver.journal, ticket.stem, "retry", "old")
         async def forbidden(ticket):
             pytest.fail("following drain dispatched refused Rework output")
-        await drain(checkout, forbidden, reexec=NoChild())
+        await drain(checkout, forbidden)
         assert [e for e in ctx.driver.journal.read() if e.body.get("signal") == INTAKE_SIGNAL] == intake_before
         assert await ctx.git.status_porcelain(ctx.repo) == ""
 
@@ -1422,16 +1416,14 @@ class LiveDrain:
     async def resume(self):
         self.request("90-resume", "resume", self.consumer.projection.pause_id)
 
-    async def run(self, dispatch=None, reexec=None, before_dispatch=None):
+    async def run(self, dispatch=None, before_dispatch=None):
         from tempo.drain import drain
-        from tests.test_drain_reentry import NoChild
         async def callback(ticket):
             self.calls.append(ticket.stem)
             self.trace.append("dispatch")
             self.checkout.journal.append(EventType.STATE_TRANSITION, {"to": "merged"}, ticket=ticket.stem)
             return "merged"
-        return await drain(self.checkout, dispatch or callback, reexec=reexec or NoChild(),
-                           before_dispatch=before_dispatch)
+        return await drain(self.checkout, dispatch or callback, before_dispatch=before_dispatch)
 
 
 @pytest.mark.asyncio
@@ -1479,9 +1471,8 @@ async def test_live_drain_pause_blocks_all_offer_accounting(root, monkeypatch, k
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["caps", "retire", "priority", "retry", "premise", "spec-gap"])
+@pytest.mark.parametrize("change", ["caps", "retire", "priority", "retry", "premise"])
 async def test_live_drain_resume_rechecks_selection_and_caps(root, monkeypatch, change):
-    from tempo.runner import SPEC_GAP_HOLD
     from tests.test_drain import confirmed, offer_events
     live = LiveDrain(root, monkeypatch, pause=False)
     c = live.checkout
@@ -1489,16 +1480,10 @@ async def test_live_drain_resume_rechecks_selection_and_caps(root, monkeypatch, 
     await c.git.add(root, ["tickets/work/ticket.md"])
     await c.git.commit(root, "ticket")
     blob = await c.git.rev_parse(root, "HEAD:tickets/work/ticket.md")
-    if change in {"retry", "caps", "premise", "spec-gap"}:
+    if change in {"retry", "caps", "premise"}:
         c.journal.append(EventType.STATE_TRANSITION, {"to": "running", "ticket_sha": "old"}, ticket="work")
-        if change == "spec-gap":
-            from tests.test_drain import round_record
-            round_record(c.journal, "hardening")
-            c.journal.append(EventType.STATE_TRANSITION, {"to": "premise_failed", "dispatch": SPEC_GAP_HOLD,
-                                                        "round": 1, "plan_units": {"19.P3.held": "absent"}}, ticket="work")
-        else:
-            c.journal.append(EventType.STATE_TRANSITION, {"to": "premise_failed" if change == "premise" else "gate_failed",
-                                                        "rung": {"tier": "high", "effort": "max"}}, ticket="work")
+        c.journal.append(EventType.STATE_TRANSITION, {"to": "premise_failed" if change == "premise" else "gate_failed",
+                                                    "rung": {"tier": "high", "effort": "max"}}, ticket="work")
     checkpoints = 0
     async def pause_after_preparation():
         nonlocal checkpoints
@@ -1518,8 +1503,6 @@ async def test_live_drain_resume_rechecks_selection_and_caps(root, monkeypatch, 
         write(root, "urgent", confirmed(priority="P0"))
         await c.git.add(root, ["tickets/urgent/ticket.md"])
         await c.git.commit(root, "new urgent")
-    elif change == "spec-gap":
-        c.journal.append(EventType.STATE_TRANSITION, {"to": "already_satisfied"}, ticket="hardening")
     before = offer_events(root)
     await live.resume()
     report = await task
@@ -1536,8 +1519,8 @@ async def test_live_drain_resume_rechecks_selection_and_caps(root, monkeypatch, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("exit", ["normal", "failure", "cancel", "cancel-held", "handoff"])
-async def test_control_lifecycle_cleanup_on_exit_and_handoff(root, monkeypatch, exit):
+@pytest.mark.parametrize("exit", ["normal", "failure", "cancel", "cancel-held"])
+async def test_control_lifecycle_cleanup_on_exit(root, monkeypatch, exit):
     from tempo.lockfile import Lockfile
     from tests.test_drain import confirmed
     live = LiveDrain(root, monkeypatch)
@@ -1553,24 +1536,9 @@ async def test_control_lifecycle_cleanup_on_exit_and_handoff(root, monkeypatch, 
         if exit == "cancel":
             entered.set()
             await finish.wait()
-        body = {"to": "merged"}
-        if exit == "handoff":
-            c.fs.write(root / "tempo/thing.py", b"upgrade")
-            await c.git.add(root, ["tempo/thing.py"])
-            await c.git.commit(root, "upgrade")
-            body["commit"] = await c.git.rev_parse(root, "HEAD")
-        c.journal.append(EventType.STATE_TRANSITION, body, ticket=ticket.stem)
+        c.journal.append(EventType.STATE_TRANSITION, {"to": "merged"}, ticket=ticket.stem)
         return "merged"
-    class Child:
-        async def run(self, argv, **kwargs):
-            assert live.trace[-2:] == [("discovery", None), "unlock"]
-            assert (c.config.state_dir / "control/active.json").read_bytes() == b"null\n"
-            lock = Lockfile(c.config.state_dir, instance_id="child", clock=c.clock)
-            lock.acquire()
-            lock.release()
-            live.trace.append("child")
-            return 0, "", ""
-    task = asyncio.create_task(live.run(dispatch, Child()))
+    task = asyncio.create_task(live.run(dispatch))
     await live.held.get()
     life = live.consumer.inbox.lifecycle_id
     if exit != "cancel-held":
@@ -1600,8 +1568,6 @@ async def test_control_lifecycle_cleanup_on_exit_and_handoff(root, monkeypatch, 
         assert decision < refresh
     retirement = discoveries[-1]
     assert trace[retirement:retirement + 2] == [("discovery", None), "unlock"]
-    if exit == "handoff":
-        assert trace.index("child") > retirement
     # Retired discovery refuses a publisher that has established contention.
     from tests.test_control_cli import invoke
     lock = Lockfile(c.config.state_dir, instance_id="unpublished-replacement", clock=c.clock)
@@ -1921,7 +1887,6 @@ async def test_composed_admission_holds_accept_identity_bound_resume(admission_c
 @pytest.mark.parametrize("verb", ["run", "drain"])
 def test_bootstrap_inline_admission_never_holds(admission_context, monkeypatch, verb):
     from tests.test_stages import STEM, TICKET, agent, verdict
-    from tests.test_drain_reentry import NoChild
     source = admission_context
     source.fs.write(source.repo / f"tickets/{STEM}/ticket.md", TICKET.format(bypass="").encode())
     llm = FakeLLM([agent({"tempo/thing.py": "ok\n"}), verdict()])
@@ -1937,7 +1902,7 @@ def test_bootstrap_inline_admission_never_holds(admission_context, monkeypatch, 
         return await inline(*args, **kwargs)
     monkeypatch.setattr(runner, "merge", merging)
     assert cli.main([verb, STEM] if verb == "run" else [verb], cwd=source.repo, env=source.env,
-                    clock=source.driver.clock, pipeline=lambda c: runner.bind(c, llm), reexec=NoChild()) == 0
+                    clock=source.driver.clock, pipeline=lambda c: runner.bind(c, llm)) == 0
     assert calls == [STEM] and len(captured) == 1
     queue = captured[0][2]
     assert queue.control is not None and queue.control.admission is None
@@ -1962,7 +1927,7 @@ async def test_production_serve_graph_is_reachable(root, monkeypatch):
     from tests.test_serve import graph, until, finish
     rig = await graph(root, monkeypatch)
     before = asyncio.all_tasks()
-    owner = Serve(rig.checkout, plan=PLAN, read=rig.owner.read, stems=rig.owner.stems)
+    owner = Serve(rig.checkout, read=rig.owner.read, stems=rig.owner.stems)
     assert asyncio.all_tasks() == before and owner.tasks.tasks == ()
     assert rig.journal.read() == [] and owner.core.restart.timers.journal is rig.journal
     rig.owner = owner
@@ -1980,7 +1945,7 @@ async def test_production_serve_graph_is_reachable(root, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("site", ["implement", "fallback-raises", "fallback-absent", "dependency", "base",
-    "flake", "bootstrap", "main-ingest", "operator", "core", "serve", "drain", "driver", "retro"])
+    "flake", "operator", "core", "serve", "drain", "driver", "retro"])
 async def test_production_boxes_receive_rereport_callback(admission_context, tmp_path, monkeypatch, site):
     import inspect
     from tempo.box import Box, RereportJournal
@@ -1991,7 +1956,6 @@ async def test_production_boxes_receive_rereport_callback(admission_context, tmp
     from tests.test_storm_notification_activation import SITES, exercise_site
     from tests.test_serve import graph
     from tests.test_retro_box import PROPOSAL
-    from tests.test_drain_reentry import NoChild
 
     source = admission_context
     checkout, writer = production_writer(source, [])
@@ -2019,7 +1983,7 @@ async def test_production_boxes_receive_rereport_callback(admission_context, tmp
     elif site == "drain":
         checkout = replace(checkout, control=cli.build_control(checkout))
         assert checkout.control._recover.__self__._rereport.journal is checkout.journal
-        await drain(checkout, writer, reexec=NoChild())
+        await drain(checkout, writer)
     elif site == "driver":
         error = ProviderCallError("fake", "quota", rc=1, stderr_tail="quota", failure_class="quota_exhausted",
                                   paved_road="wait for quota")

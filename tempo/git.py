@@ -61,10 +61,6 @@ class Git:
     async def merge_base(self, dir: Path, a: str, b: str) -> str:
         return (await self._run(dir, "merge-base", _ref(a), _ref(b))).strip()
 
-    async def git_common_dir(self, dir: Path) -> Path:
-        path = Path((await self._run(dir, "rev-parse", "--git-common-dir")).strip())
-        return (dir / path).resolve() if not path.is_absolute() else path
-
     async def diff_names(self, dir: Path, base: str, stem: str) -> list[str]:
         out = await self._run(dir, "diff", "--name-only", f"{_ref(base)}...{_ref(stem)}")
         return out.splitlines()

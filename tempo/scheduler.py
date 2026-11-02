@@ -1,4 +1,4 @@
-"""Single-flight dispatch projection (TEMPO_PLAN.md 19.P3.daemon-scheduler)."""
+"""Single-flight dispatch projection (TEMPO_PLAN.md section 9)."""
 
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Set

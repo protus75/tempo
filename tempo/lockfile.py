@@ -46,7 +46,7 @@ class Lockfile:
         if self._fd is not None:
             raise RuntimeError(f"{self.path} is already held by this Lockfile; release it first")
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        # os.open fds are non-inheritable, so a spawned child (the self-upgrade handoff) cannot pin the lock.
+        # os.open fds are non-inheritable, so a spawned child cannot pin the lock.
         fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -74,7 +74,7 @@ class Lockfile:
         self._fd = fd
 
     def release(self) -> None:
-        """Free the lock; the drain's self-upgrade handoff calls this before spawning its child."""
+        """Free the lock."""
         if self._fd is None:
             raise RuntimeError(f"{self.path} is not held by this Lockfile; nothing to release")
         fd, self._fd = self._fd, None
