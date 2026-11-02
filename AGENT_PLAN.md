@@ -975,6 +975,10 @@ series, one commit per removed module.
     `drain._run_one`, which `list_eligible` and `start` wrap in P4
   - the lockfile and heartbeat code, if they live in `daemon`
 - Rename in place and update every caller.
+- Drop `expected` from the ticket `## Time budget` section. After P2 removed the watchdog's soft
+  region, nothing reads it at run time. It goes from `Ticket.expected_minutes`, the grammar check
+  (`stuck` must exceed `expected`), retro calibration (`retro.py` regex), specs, templates,
+  TEMPO_PLAN.md, and tests. `stuck` stays.
 
 **Kept set.** The kept set is every `tempo/` module except `drain`, `daemon`, `runner`, `rework`, and the
 CLI entry `__main__`.
