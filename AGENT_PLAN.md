@@ -900,9 +900,9 @@ series, one commit per removed module.
   `.gitignore`, `pyproject.toml`, and the 80 test files not listed in §2.3.
   - Chupa's rule set B in `CLAUDE.md` is replaced by the P0 session block. `AGENTS.md` gains the same
     block.
-- Also carry the test helper code that carried tests import. Nine carried test files import helpers
-  from test files that are not carried. Move those helpers into `tests/helpers.py` rather than
-  carrying the evidence tests.
+- Two carried test files (`test_gates`, `test_stages`) import helpers from uncarried evidence tests.
+  Those tests also import chupa's `eval/` and `hosts/`, so they are self-build evidence: no
+  `tests/helpers.py`; P2 removes them.
 - Write `TEMPO_PLAN.md` from SEED_PLAN.md filled with "tempo", keeping only the product features. The
   exact cut list is posted for approval first:
   - drop §0 cold start, §19 phases and registries, §21 bootstrap blocks, and §22's build provenance
@@ -910,7 +910,7 @@ series, one commit per removed module.
   - keep §22 as "Contract constants", for the entries that P4 adds
   - drop the self-build passages inside the feature sections: seeding tickets, plan entry units, plan
     hardening, phase exits, GO-grade corpus building
-- Generate `README.md` from TEMPO_PLAN's README block, as a one-off extraction.
+- Generate `README.md` from SEED_PLAN §21's README block, as a one-off extraction.
 - Rename chupa → tempo in identifiers, markers, `.chupa/`, data sentinels, and file names.
   - The rename preserves case: chupa→tempo, Chupa→Tempo, CHUPA→TEMPO.
   - It is a one-off script and is not committed.
@@ -1125,7 +1125,7 @@ the live gate.
 - **Implement's shell is not sandboxed.** Hooks confine its working directory and deny git and agent
   CLIs, and the `submit` snapshot catches writes in the repo and `.tempo/`. Writes elsewhere on the
   machine are not caught, as with chupa's implement child.
-- **P1's failure count is unknown until run.** 37 of the 80 carried test files read chupa's plan text, and 9 import helpers from uncarried tests.
+- **P1's failure count is unknown until run.** 37 of the 80 carried test files read chupa's plan text, and 2 import helpers from uncarried evidence tests.
 - **The orchestrator's decisions meet a real model only in P7**, through the retry and escalate runs.
   Nothing measures them before then.
 
