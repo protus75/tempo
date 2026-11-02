@@ -388,7 +388,8 @@ stdout as the only channel. Tempo enforces the same in two places.
 - A subagent never spawns, messages, or resumes an agent (R2).
 - The spawn prompt is exactly the call id and its paths, and the agent spawned is the one `prepare`
   named.
-- The orchestrator has no shell and no direct file writes. All its actions are tempo tools.
+- The orchestrator has no direct file writes, and its shell runs only `tempo tool` commands. All its
+  actions are tempo tools.
 - Every hook denies a payload it cannot parse, on all three hosts.
 
 **After the call, `submit` is the check.**
@@ -425,11 +426,11 @@ A write that gets past a hook is caught before output is accepted, anywhere in t
 - **One open call per session, on every host.**
   - At the spawn `PreToolUse`, the hook takes the call id from the spawn prompt.
   - At `SubagentStart`, it binds the subagent's id to that call.
-- **Subagents cannot use tempo tools.** Agent files list none. The hook denies any tempo MCP call from a
-  subagent.
+- **Subagents cannot use tempo tools.** The hook denies any `tempo` command from a subagent.
 - **What the orchestrator may use.**
-  - Allowed: tempo tools, the host spawn tool (spawn-checked), and file read and search tools.
-  - Denied: shell, write, and edit.
+  - Allowed: `tempo tool` commands in its shell, the host spawn tool (spawn-checked), and file read
+    and search tools.
+  - Denied: every other shell command, write, and edit.
 - **Which session is the orchestrator.** `begin_session` (§4.6) records the host's chat `session_id`
   from the hook payload in the lockfile. Hooks apply the orchestrator rules to that chat session and the
   subagent rules to `tempo-*` subagents. Every other chat session in the repo, such as one authoring
@@ -455,16 +456,17 @@ Each of these is confirmed by the P4 live gate before P5.
 
 ### 4.1 Tools
 
-Every tool is an existing effect-keyed function, or a thin wrapper over one.
+Every tool is an existing effect-keyed function, or a thin wrapper over one. There is no MCP and no
+server. The orchestrator calls a tool by running `tempo tool <name> '<json args>'` in its shell; the
+command prints a JSON result and exits. All state is in files and the journal, so each call is a fresh
+process.
 
 **Session token.**
-- The VS Code extension starts `tempo mcp` from the repo's MCP config whenever a chat opens, so a
-  running server does not by itself mean an orchestrator session.
 - `begin_session` (§4.6) takes the single-writer lockfile, creates a session token, and records it in the
   lockfile with the host name and the chat `session_id`. Tools read the host from there for model
   resolution and agent names.
 - `begin_session` in a second chat, on any host, finds the lock held and refuses, naming the holder.
-- Every tool except `begin_session` and `status` refuses when this server does not hold the lock.
+- Every tool except `begin_session` and `status` refuses unless its session token matches the lockfile.
 - This gives:
   - a single writer across hosts
   - per-session counters for session limits
@@ -487,8 +489,8 @@ Every tool is an existing effect-keyed function, or a thin wrapper over one.
   - `split_commit` publishes the approved tickets.
 
   A tool cannot spawn a subagent.
-- No tool call blocks longer than `TOOL_CALL_S`, a code constant set in P4 below the shortest host MCP
-  tool timeout.
+- No tool call blocks longer than `TOOL_CALL_S`, a code constant set in P4 below the shortest host
+  shell-command timeout.
 
 | Kind | Tools |
 |---|---|
@@ -677,7 +679,7 @@ orchestrator:
 - these constants, set in the P4c commit from live-gate measurements, with placeholders in tests until
   then:
   - `READ_PART_CHARS`: the smallest whole-file Read size across hosts that pass the gate
-  - `TOOL_CALL_S`: the shortest host MCP tool timeout, minus a margin
+  - `TOOL_CALL_S`: the shortest host shell-command timeout, minus a margin
   - `LOCK_STALE_S`: several times `TOOL_CALL_S`, so a live session is never taken over
   - `RETRO_STUCK_S`: chupa's `call_timeout` default
 
@@ -705,7 +707,7 @@ which takes the lock (§4.1), then `status`. Subagents spawned from that chat ar
 beneath it. Starting is not a checkpoint inside the loop: the user writes tickets and starts the run,
 and no human step follows (R13).
 
-**Pre-start check.** `begin_session` refuses when the host's hook or MCP files fail `render --check`, so
+**Pre-start check.** `begin_session` refuses when the host's hook files fail `render --check`, so
 a repo where `tempo init` skipped a host's settings never runs without hooks.
 
 **End.** The session ends with `write_handoff`, which also releases the lock, when:
@@ -737,7 +739,6 @@ does, and `prepare` renders it per call.
 | Start command in the VS Code chat (§4.6) | `.claude/commands/tempo-run.md` | `.github/prompts/tempo-run.prompt.md` | location confirmed in the P4 live gate |
 | Surface agents (generated, §4.4.2) | `.claude/agents/tempo-<surface>-<model>.md` | `.github/agents/tempo-<surface>-<model>.agent.md` | `.codex/agents/tempo-<surface>-<model>-<effort>.toml` |
 | Hooks | `.claude/settings.json` | `.github/hooks/tempo.json` | `.codex/hooks.json` |
-| MCP (tempo tools) | `.mcp.json` | location confirmed in the P4 live gate | `.codex/config.toml` |
 | Caller identity | `agent_id`/`agent_type` | `parentAgentId`/`agentType` | markers, 1 thread |
 
 **Instruction files.** `CLAUDE.md`, `AGENTS.md`, and `.github/copilot-instructions.md` each carry
@@ -1020,7 +1021,7 @@ gate:
 - **(a)** Split `Driver._run` into `prepare`/`submit` (§3.1): prompt parts, the
   state snapshot, stop classification, and the session token. Implement moves onto the same path (§3.2),
   with `submit` committing its worktree changes. Remove `providers[]` and `routing` from config.
-- **(b)** Start-then-poll tools and the `tempo mcp` server (§4.1).
+- **(b)** Start-then-poll tools and the `tempo tool` command (§4.1).
 - **(c)** Hook policy and adapters for three hosts, failing closed on unparseable payloads (§3.4).
 - **(d)** Role definitions and `render` (§4.4.2, §5), the config edits (§4.4), and session start and
   end (§4.6).
@@ -1047,10 +1048,10 @@ gate:
   - run one `prepare` → spawn → `submit`
   - run one implement subagent in a worktree: allowed writes and shell in the worktree; denied
     writes outside it, `ticket.md` edits, git, and an agent CLI from its shell
-  - confirm the MCP config location, the limit markers in `stop.txt`, the host's subagent stop tool,
+  - confirm the limit markers in `stop.txt`, the host's subagent stop tool,
     and that subagents spawned from the chat panel get the generated agent files and model
   - also capture: `SubagentStart` and `SubagentStop` payloads, a forced subagent limit hit, one round
-    trip with a prompt at `RENDER_BOUND_CHARS`, the extension's permission and MCP-approval settings for
+    trip with a prompt at `RENDER_BOUND_CHARS`, the extension's permission settings for
     a run with no prompts to the user, and what each host does when a hook crashes or times out
 
 **Exit:**
@@ -1070,7 +1071,7 @@ gate:
 - Constant pins.
 - A live-gate report per host, in `docs/livegate/<host>.md`.
   - A host passes only if all of these are confirmed: the six hook cases, the implement confinement
-    cases, the round trip, the MCP location, the limit markers, and the subagent stop tool.
+    cases, the round trip, the limit markers, and the subagent stop tool.
   - **A host that fails the gate is dropped from the defaults until it is fixed.**
   - R5 is met for the hosts that pass. A failed host is reported as
     an open gap; it does not block the others.
