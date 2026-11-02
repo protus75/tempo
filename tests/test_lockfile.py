@@ -3,11 +3,13 @@ import os
 import socket
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from tempo.lockfile import LockHeld, Lockfile
+from tempo.checkout import Refusal
+from tempo.lockfile import LOCK_STALE_S, LockHeld, Lockfile, Sessions
+from tempo.seams import LocalFileSystem
 
 T0 = datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
 
@@ -148,3 +150,36 @@ def test_holder_none_when_identity_unreadable(tmp_path):
         assert exc.value.holder is None
     finally:
         os.close(fd)
+
+
+def test_session_record_begin_check_end_and_stale_takeover(tmp_path):
+    now = [T0]
+    sessions = Sessions(tmp_path, clock=lambda: now[0], fs=LocalFileSystem())
+    record = sessions.begin(token="t1", host="claude", chat="c1", number=1)
+    assert sessions.read() == record and record["tickets"] == 0
+    now[0] += timedelta(seconds=30)
+    assert sessions.check("t1")["heartbeat"] == "2026-08-04T12:00:30+00:00"
+    with pytest.raises(Refusal, match="token does not hold"):
+        sessions.check("t2")
+    now[0] += timedelta(seconds=LOCK_STALE_S)
+    with pytest.raises(Refusal, match="held by the claude chat c1"):
+        sessions.begin(token="t2", host="codex", chat="c2", number=2)
+    now[0] += timedelta(seconds=1)
+    assert sessions.begin(token="t2", host="codex", chat="c2", number=2)["chat"] == "c2"
+    sessions.end("t2")
+    assert sessions.read() is None
+
+
+def test_a_waiting_acquire_blocks_until_the_holder_releases(tmp_path):
+    holder = make(tmp_path)
+    holder.acquire()
+    child = subprocess.Popen([sys.executable, "-c", (
+        "import sys; sys.path.insert(0, %r)\n"
+        "from datetime import UTC, datetime\n"
+        "from tempo.lockfile import Lockfile\n"
+        "Lockfile(%r, instance_id='w', clock=lambda: datetime.now(UTC)).acquire(wait=True)\n"
+        "print('got it')\n") % (os.getcwd(), str(tmp_path))], stdout=subprocess.PIPE, text=True)
+    with pytest.raises(subprocess.TimeoutExpired):
+        child.wait(timeout=0.3)
+    holder.release()
+    assert child.communicate(timeout=10)[0] == "got it\n"

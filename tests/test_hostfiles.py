@@ -337,3 +337,14 @@ async def test_committed_core_template_extraction_refuses(repo, source):
     [finding] = report.findings
     assert finding.path == 'tempo/hostfiles.py' and finding.code == 'core_drift'
     assert finding.paved_road == 'define CORE_TEMPLATE as one literal bytes assignment'
+
+
+def test_a_named_block_renders_beside_core_without_touching_it():
+    core = hostfiles.render(b"project\n")
+    both = hostfiles.render(core, template=b"protocol\n", name="protocol")
+    assert hostfiles.parse(both)[0] + hostfiles.parse(both)[1] != b""  # core still parses
+    assert hostfiles.render(both) == both  # refreshing core leaves the protocol block alone
+    assert hostfiles.render(both, template=b"protocol\n", name="protocol") == both
+    assert b"<!-- tempo:protocol begin -->\nprotocol\n<!-- tempo:protocol end -->" in both
+    with pytest.raises(hostfiles.MarkerCorruption, match="tempo:protocol.*retry render"):
+        hostfiles.render(b"<!-- tempo:protocol begin -->\n", name="protocol")

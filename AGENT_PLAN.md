@@ -244,6 +244,9 @@ ran. Nothing else in it changes.
 **Scope.** `prepare` and `submit` serve the six surfaces that survive the conversion: implement (the one
 writing surface, §3.2), review, requisition, triage, author, and retro. `diagnose` and `rework` are never
 called from P4 on: the P4 orchestrator flow writes a handoff and stops on failure, and P5 deletes them.
+The `prepare` and `submit` tools in P4 serve only requisition, implement, and review, the surfaces of
+the P4 orchestrator flow. Triage, author, and retro run through `Calls` from P4a; their tool wiring
+comes in P5 with the decide rules that trigger them.
 
 **Surfaces with no ticket** (triage, retro, and author before its ticket exists):
 - The stem is the one chupa's effect key already uses for that surface.

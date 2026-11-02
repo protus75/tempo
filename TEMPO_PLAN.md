@@ -726,3 +726,6 @@ Entries are added by P4 (AGENT_PLAN.md). A changed value needs an entry here in 
 
 - `READ_PART_CHARS` (tempo/call.py) = 50,000: the largest prompt part a subagent reads in one file. A placeholder until the P4c live gate sets it to the smallest whole-file Read size among the hosts that pass.
 - `CODEX_EFFORT` (tempo/call.py) = low, medium, high map to themselves; max maps to `xhigh`. A placeholder until the P4c live gate confirms Codex's highest level.
+- `RETRO_STUCK_S` (tempo/call.py) = 5400.0: the retro call deadline, chupa's `call_timeout` default.
+- `TOOL_CALL_S` (tempo/tools.py) = 60.0: no tool call blocks longer than this. A placeholder until the P4c live gate sets it below the shortest host shell-command timeout.
+- `LOCK_STALE_S` (tempo/lockfile.py) = 900.0: `begin_session` takes over a session whose heartbeat is older than this. A placeholder until P4c sets it to several times `TOOL_CALL_S`.

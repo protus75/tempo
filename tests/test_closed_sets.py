@@ -10,7 +10,7 @@ from typing import get_args
 
 import pytest
 
-from tempo import (artifacts, audit, author, backlog, box, call, caps, checkpoint, config, control, enginelog, gates, inbox, journal, llm, merge, mergequeue, notify, providers, requisition, runner, serve, specs, stages, storm, thresh, tickets, triage)
+from tempo import (artifacts, audit, author, backlog, box, call, caps, checkpoint, config, control, enginelog, gates, hooks, hosts, inbox, jobs, journal, llm, lockfile, merge, mergequeue, notify, providers, requisition, runner, serve, specs, stages, storm, thresh, tickets, tools, triage)
 
 
 def ident(v):
@@ -52,6 +52,8 @@ def test_box_closed_sets_and_constants():
 
 def test_call_closed_sets_and_constants():
     assert call.READ_PART_CHARS == 50_000
+    assert call.RETRO_STUCK_S == 5400.0
+    assert call.SIDE_STATE == ('session.json', 'hooks', 'jobs')
     assert call.CALL_CLOSED == 'subagent_call_closed'
     assert call.OWN_FILES == ('output.txt', 'stop.txt', 'call.json')
     assert call.SURFACES == ('implement', 'review', 'requisition_review', 'triage', 'author', 'retro')
@@ -60,6 +62,19 @@ def test_call_closed_sets_and_constants():
     assert call.DROUGHT == frozenset({'quota_exhausted', 'rate_limited', 'outage'})
     assert set(get_args_deep(config.Surface)) == set(call.SURFACES)
     assert set(get_args_deep(config.HostName)) == {'claude', 'codex', 'copilot'}
+
+def test_session_and_tool_constants():
+    assert lockfile.LOCK_STALE_S == 900.0
+    assert lockfile.SESSION_FILE == 'session.json'
+    assert tools.TOOL_CALL_S == 60.0
+    assert tools.FLOW_SURFACES == ('requisition_review', 'implement', 'review')
+    assert tuple(tools.TOOLS) == ('begin_session', 'status', 'list_eligible', 'read_ticket', 'read_attempts', 'read_box', 'start', 'prepare', 'submit', 'check', 'merge', 'job', 'write_handoff')
+    assert jobs.KINDS == ('check', 'merge', 'submit')
+    assert jobs.FINISHED == frozenset({'done', 'lost'})
+    assert hosts.HOSTS == ('claude', 'copilot', 'codex')
+    assert set(hosts.EVENTS) == {'PreToolUse', 'SubagentStart', 'SubagentStop'}
+    assert hooks.READ_COMMANDS == frozenset({'cat', 'sed', 'head', 'tail', 'rg', 'grep'})
+    assert hooks.DENIED_BINARIES == frozenset({'git', 'gh', 'tempo', 'claude', 'codex', 'copilot', 'gemini', 'aider', 'cursor-agent', 'opencode', 'amp'})
 
 def test_caps_closed_sets_and_constants():
     assert caps.CAPS == ('decisions', 'retry', 'infra', 'premise_bounce')
@@ -100,7 +115,7 @@ def test_journal_closed_sets_and_constants():
     assert dict(journal.EVENT_VERSIONS) == {'cap_consumed': 1, 'checkpoint': 1, 'effect_completion': 1, 'effect_intent': 1, 'signal': 1, 'state_transition': 1, 'timer_armed': 1, 'timer_fired': 1}
     assert {e.value for e in journal.EventType} == {'cap_consumed', 'checkpoint', 'effect_completion', 'effect_intent', 'signal', 'state_transition', 'timer_armed', 'timer_fired'}
     assert journal.ROLL_BYTES == 67108864
-    assert journal.SIGNAL_NAMES == frozenset({'author_invoked', 'checkpoint_push_failed', 'control_decision', 'dead_dependency', 'diagnosis', 'draft_confirmed', 'drain_halted', 'flake_detected', 'flake_released', 'harvest_failed', 'kill_applied', 'merge_conflict_facts', 'merge_red_streak', 'merge_tree_mismatch', 'provider_call_outcome', 'recovery_alert', 'reject_arrival', 'reject_verdict', 'requisition_verdict', 'retro_failed', 'retro_prompt_spec_change_merged', 'retro_ticket_authored', 'rework_order', 'storm_breaker_trip', 'storm_occurrence', 'subagent_call_closed', 'supersedes', 'ticket_intake', 'tombstone_auto_reopened', 'triage_pass', 'watcher_parse_failure'})
+    assert journal.SIGNAL_NAMES == frozenset({'author_invoked', 'checkpoint_push_failed', 'control_decision', 'dead_dependency', 'diagnosis', 'draft_confirmed', 'drain_halted', 'flake_detected', 'flake_released', 'handoff_written', 'harvest_failed', 'kill_applied', 'merge_conflict_facts', 'merge_red_streak', 'merge_tree_mismatch', 'provider_call_outcome', 'recovery_alert', 'reject_arrival', 'reject_verdict', 'requisition_verdict', 'retro_failed', 'retro_prompt_spec_change_merged', 'retro_ticket_authored', 'rework_order', 'session_begun', 'storm_breaker_trip', 'storm_occurrence', 'subagent_call_closed', 'supersedes', 'ticket_intake', 'tombstone_auto_reopened', 'triage_pass', 'watcher_parse_failure'})
     assert journal.TERMINAL_STATES == frozenset({'abandoned', 'already_satisfied', 'gate_failed', 'infra_error', 'invalid_artifact', 'merged', 'premise_failed', 'rejected', 'timeout'})
 
 def test_llm_closed_sets_and_constants():

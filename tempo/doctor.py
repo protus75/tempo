@@ -3,6 +3,7 @@
 import fcntl
 from dataclasses import dataclass
 
+from tempo import render as host_render
 from tempo.config import load_config
 from tempo.git import Git
 from tempo.journal import Journal
@@ -48,6 +49,12 @@ async def check(*, repo, config_path, env, exec_, clock, in_venv):
         row("config", True, "config schema is valid")
     except Exception as exc:
         row("config", False, f"{exc}; repair the selected config and rerun doctor")
+    if config is None:
+        row("render", False, "config unavailable; repair the selected config and rerun doctor")
+    else:
+        drift = host_render.drift(repo, config)
+        row("render", not drift, f"stale generated host files: {', '.join(drift)}; run `tempo render`"
+            if drift else "generated host files are current")
     for name in ("lock", "journal"):
         if config is None:
             row(name, False, "state directory unavailable; repair the selected config and rerun doctor")

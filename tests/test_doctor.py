@@ -6,10 +6,12 @@ import sys
 import pytest
 
 from tempo import doctor
+from tempo import render as host_render
+from tempo.config import load_config
 from tempo.__main__ import main
 from tempo.journal import EventType
 from tempo.lockfile import Lockfile
-from tempo.seams import ExecutableNotFound
+from tempo.seams import ExecutableNotFound, LocalFileSystem
 from tests.test_cli import root, ENV, Clock, journal
 
 
@@ -24,6 +26,11 @@ class Exec:
         if self.failure:
             raise ExecutableNotFound("git")
         return 0, "git version fixture\n", ""
+
+
+def rendered(root):
+    host_render.write(root, load_config(None, cwd=root), LocalFileSystem())
+    return root
 
 
 def checks(root, *, venv=True, git_failure=False):
@@ -57,23 +64,36 @@ def test_doctor_check_order(root, monkeypatch):
     monkeypatch.setattr(doctor, "load_config", config_check)
     monkeypatch.setattr(doctor, "inspect_lock", lock_check)
     monkeypatch.setattr(doctor.Journal, "read", journal_check)
-    results = checks(root, venv=False)
+    results = checks(rendered(root), venv=False)
     assert order == ["git", "config", "lock", "journal"]
-    assert [r.name for r in results] == ["venv", "git", "config", "lock", "journal"]
-    assert [r.passed for r in results] == [False, True, True, True, True]
+    assert [r.name for r in results] == ["venv", "git", "config", "render", "lock", "journal"]
+    assert [r.passed for r in results] == [False, True, True, True, True, True]
     assert doctor.render(results) == (
         "doctor: failed\n"
         "FAIL venv: no active Python venv; run `uv run python -m tempo doctor`\n"
         "PASS git: git version fixture\n"
         "PASS config: config schema is valid\n"
+        "PASS render: generated host files are current\n"
         "PASS lock: no writer lock exists\n"
         "PASS journal: readable history (0 events)\n")
     assert not (root / ".tempo").exists()
 
 
-@pytest.mark.parametrize("failure", ["venv", "git", "config", "lock", "journal"])
+def test_doctor_fails_on_stale_render(root):
+    rendered(root)
+    (root / ".claude/settings.json").write_text("{}\n")
+    (root / ".claude/agents/tempo-review-old.md").write_text("stale\n")
+    [row] = [r for r in checks(root) if r.name == "render"]
+    assert not row.passed
+    assert ".claude/settings.json" in row.detail and "tempo-review-old.md" in row.detail
+    assert "run `tempo render`" in row.detail
+
+
+@pytest.mark.parametrize("failure", ["venv", "git", "config", "render", "lock", "journal"])
 def test_doctor_failures(root, capsys, monkeypatch, failure):
     import tempo.__main__ as module
+    if failure != "render":
+        rendered(root)
     holder = Lockfile(root / ".tempo/state", instance_id="other", clock=Clock())
     if failure == "config":
         (root / "config.yaml").write_text("schema_version: 1\n")
@@ -92,15 +112,16 @@ def test_doctor_failures(root, capsys, monkeypatch, failure):
         output = capsys.readouterr()
         assert output.err == "" and "Traceback" not in output.out
         lines = output.out.splitlines()
-        assert len(lines) == 6 and lines[0] == "doctor: failed"
-        assert [line.split()[1].rstrip(":") for line in lines[1:]] == ["venv", "git", "config", "lock", "journal"]
-        assert lines[["venv", "git", "config", "lock", "journal"].index(failure) + 1].startswith("FAIL")
+        names = ["venv", "git", "config", "render", "lock", "journal"]
+        assert len(lines) == 7 and lines[0] == "doctor: failed"
+        assert [line.split()[1].rstrip(":") for line in lines[1:]] == names
+        assert lines[names.index(failure) + 1].startswith("FAIL")
         if failure == "config":
             assert all("FAIL" in line and "repair the selected config" in line for line in lines[3:])
         elif failure == "lock":
-            assert "wait for" in lines[4] and "never delete" in lines[4]
+            assert "wait for" in lines[5] and "never delete" in lines[5]
         elif failure == "journal":
-            assert "backup" in lines[5]
+            assert "backup" in lines[6]
     finally:
         if holder.held:
             holder.release()
@@ -114,6 +135,7 @@ def test_doctor_is_read_only(root, monkeypatch, capsys, history):
         pytest.fail("doctor invoked a writer or model")
     monkeypatch.setattr(runner, "bind", forbidden)
     monkeypatch.setattr(module, "build_control", forbidden)
+    rendered(root)
     holder = Lockfile(root / ".tempo/state", instance_id="original", clock=Clock())
     if history in {"held", "idle"}:
         holder.acquire()

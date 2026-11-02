@@ -193,6 +193,20 @@ async def _read_pipe(
     return bytes(captured)
 
 
+class Spawn(Protocol):
+    def __call__(self, argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], keep_fd: int) -> None:
+        """Start a detached process that outlives the caller and inherits `keep_fd`; never wait for it."""
+        ...
+
+
+def detached_spawn(argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], keep_fd: int) -> None:
+    """Real detached-process seam: its own session, no pipes back to the caller."""
+    os.set_inheritable(keep_fd, True)
+    with open(os.devnull, "rb") as stdin, open(os.devnull, "wb") as out:
+        subprocess.Popen(list(argv), cwd=cwd, env=dict(env), stdin=stdin, stdout=out, stderr=out,
+                         start_new_session=True, pass_fds=(keep_fd,))
+
+
 @runtime_checkable
 class FileSystem(Protocol):
     def publish(self, path: Path, data: bytes) -> None:

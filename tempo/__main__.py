@@ -5,6 +5,7 @@ The composition root: the only place real seams are constructed. Exit 2 is an en
 
 import argparse
 import asyncio
+import json
 import os
 import signal
 import sys
@@ -14,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from tempo import control, drain, hostfiles, runner, serve, triage
+from tempo import control, drain, hooks, hostfiles, hosts, render as host_render, runner, serve, triage
 from tempo.checkout import SPECS_DIR, Checkout, Refusal
 from tempo.config import ConfigError, ConfigSnapshot, load_config, migrate_config
 from tempo.control import PauseConsumer
@@ -27,12 +28,13 @@ from tempo.notify import NOTIFY_TIMEOUT_S, NotificationReconciler
 from tempo.llm import LLM
 from tempo.redact import Redactor
 from tempo.restart import Restart
-from tempo.seams import Clock, ExecutableNotFound, LocalFileSystem, SubprocessExec
+from tempo.seams import Clock, ExecutableNotFound, LocalFileSystem, SubprocessExec, detached_spawn
 from tempo.seams import CommandNotifications
 from tempo.status import project, render
 from tempo.storm import StormLedger
 from tempo.timers import Timers
 from tempo.tickets import IntakeRefused, Ticket, TicketInvalid, stem_findings, template, ticket_path, validate_ticket
+from tempo.tools import Tools
 
 GIT_TIMEOUT_S = 30.0
 
@@ -115,6 +117,18 @@ def build_notifications(checkout: Checkout, *, config_path: Path | None, log) ->
         load=lambda: load_config(config_path, cwd=checkout.repo), compose=compose, log=log)
 
 
+def build_tools(checkout: Checkout, *, config_path: Path | None) -> Tools:
+    """The orchestrator tools, with job workers launched as detached `tempo job-run <id>` processes."""
+    def launch(id: str, fd: int) -> None:
+        config = ["--config", str(config_path)] if config_path is not None else []
+        detached_spawn([sys.executable, "-m", "tempo", *config, "job-run", id], cwd=checkout.repo,
+                       env=dict(checkout.env), keep_fd=fd)
+
+    notifications = CommandNotifications(SubprocessExec(), cwd=checkout.repo, env=dict(checkout.env),
+                                         timeout=NOTIFY_TIMEOUT_S, scrub=Redactor({}).scrub)
+    return Tools(checkout, launch=launch, notifications=notifications)
+
+
 def _parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="python -m tempo")
     ap.add_argument("--config", type=Path, help="config path (default: config.yaml at the checkout root)")
@@ -136,6 +150,13 @@ def _parser() -> argparse.ArgumentParser:
         sub.add_parser(verb, help=f"{verb} a draft or Reject item under the lock").add_argument("stem")
     sub.add_parser("drain", help="run every eligible ticket to quiescence under the lock")
     sub.add_parser("serve", help="run the foreground daemon until kill or a signal stops it")
+    tool = sub.add_parser("tool", help="run one orchestrator tool and print its JSON result")
+    tool.add_argument("name")
+    tool.add_argument("args", nargs="?", default="{}", help="the tool's arguments as one JSON object")
+    sub.add_parser("hook", help="run one host hook on the JSON payload from stdin").add_argument("host")
+    sub.add_parser("render", help="write the generated host files").add_argument(
+        "--check", action="store_true", help="only list the files that differ from a fresh render")
+    sub.add_parser("job-run", help="(internal) the detached worker of one tool job").add_argument("id")
     return ap
 
 
@@ -147,6 +168,7 @@ def main(
     clock: Clock = _clock,
     pipeline: Callable[[Checkout], runner.Dispatch] | None = None,
     llm: LLM | None = None,
+    stdin: bytes | None = None,
 ) -> int:
     """`pipeline` and `llm` are the fake-model seams the scripted verbs run on until P5 removes them.
 
@@ -155,6 +177,8 @@ def main(
     args = _parser().parse_args(argv)
     repo = Path(cwd) if cwd is not None else Path.cwd()
     env = dict(os.environ) if env is None else env
+    if args.verb == "hook":
+        return _hook(args.host, sys.stdin.buffer.read() if stdin is None else stdin, repo, clock)
     try:
         if args.verb == "migrate-config":
             migrate_config(args.config, cwd=repo, fs=LocalFileSystem())
@@ -171,6 +195,14 @@ def main(
         if args.verb == "core":
             hostfiles.refresh(hostfiles.conduct_paths(config, repo), LocalFileSystem())
             return 0
+        if args.verb == "render":
+            if args.check:
+                drift = host_render.drift(repo, config)
+                print("\n".join(f"stale: {rel}" for rel in drift) if drift else "render: current")
+                return runner.EXIT_REFUSED if drift else 0
+            print("\n".join(f"wrote: {rel}" for rel in host_render.write(repo, config, LocalFileSystem()))
+                  or "render: current")
+            return 0
         exec_ = SubprocessExec()
         checkout = Checkout(
             repo=repo, config=config, env=env, exec_=exec_,
@@ -179,6 +211,11 @@ def main(
         )
         if args.verb == "status":
             print(render(asyncio.run(_status(checkout))), end="")
+            return 0
+        if args.verb == "tool":
+            return _tool(build_tools(checkout, config_path=args.config), args.name, args.args)
+        if args.verb == "job-run":
+            asyncio.run(build_tools(checkout, config_path=args.config).run_job(args.id))
             return 0
         if args.verb in {"pause", "resume", "kill"}:
             return asyncio.run(_control(checkout, args.verb))
@@ -232,6 +269,39 @@ def main(
                 if args.verb == "retro" and isinstance(e, ConfigError) else "")
         print(f"tempo {args.verb}: {e}{road}", file=sys.stderr)
         return runner.EXIT_REFUSED
+
+
+def _tool(tools: Tools, name: str, raw: str) -> int:
+    """Print one JSON object: `ok` true with the result, or false with the refusal and its paved road."""
+    def refuse(message: str, road: str) -> int:
+        print(json.dumps({"ok": False, "refused": message, "do_instead": road}))
+        return runner.EXIT_REFUSED
+    try:
+        args = json.loads(raw)
+    except ValueError as e:
+        return refuse(f"the arguments are not JSON: {e}", "pass one JSON object in single quotes")
+    if not isinstance(args, dict):
+        return refuse("the arguments are not a JSON object", "pass one JSON object in single quotes")
+    try:
+        result = asyncio.run(tools.run(name, args))
+    except (Refusal, LockHeld, IntakeRefused, ConfigError) as e:
+        message, _, road = str(e).rpartition(" -- ")
+        return refuse(message or road, road if message else "see the message")
+    print(json.dumps({"ok": True, **result}))
+    return 0
+
+
+def _hook(host: str, data: bytes, repo: Path, clock: Clock) -> int:
+    """Hooks fail closed: any fault denies, on every host."""
+    try:
+        out, code = hooks.handle(host, data, cwd=repo, clock=clock, fs=LocalFileSystem())
+    except Exception as exc:
+        out, code = hosts.reply(False, f"tempo hook failed: {type(exc).__name__}: {exc}"), 2
+    if out:
+        print(out)
+    if code:
+        print(json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"], file=sys.stderr)
+    return code
 
 
 async def _retro(checkout, dispatch):

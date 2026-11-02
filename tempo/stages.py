@@ -481,6 +481,14 @@ async def implement(ctx: StageContext, ticket: Ticket, *, attempt: int) -> Stage
     except RenderOverBound as e:
         # The pre-call short-circuit: ticket-text arithmetic, parked like premise_failed (section 8).
         return StageResult(outcome="premise_failed", artifact=None, findings=[e.finding])
+    return await finish_implement(ctx, ticket, spec, result, attempt=attempt)
+
+
+async def finish_implement(ctx: StageContext, ticket: Ticket, spec: Spec, result: StageResult, *,
+                           attempt: int) -> StageResult:
+    """After the call: file second problems, write + lift the run record, and issue the packing slip."""
+    stem = ticket.stem
+    worktree = ctx.worktree(stem)
     if result.outcome != "ok":
         if result.provider is not None:
             record = f'{TICKETS_DIR}/{stem}/run.md'
@@ -504,12 +512,16 @@ async def implement(ctx: StageContext, ticket: Ticket, *, attempt: int) -> Stage
     await lift_outbox(ctx, stem, "run-record", attempt=attempt)
     if reply.outcome == "premise_failed":
         return _short(result, "premise_failed", list(reply.findings))
-    slip = PackingSlip(
+    return _short(result, "ok", [], await packing_slip(ctx, spec, stem, reply))
+
+
+async def packing_slip(ctx: StageContext, spec: Spec, stem: str, reply: ImplementReply) -> PackingSlip:
+    return PackingSlip(
         produced_by_spec_version=_major(spec),
         produced_at_sha=await ctx.git.rev_parse(ctx.repo, stem),
-        stem=stem, branch=stem, outcome=reply.outcome, summary=reply.summary, run_record=record,
+        stem=stem, branch=stem, outcome=reply.outcome, summary=reply.summary,
+        run_record=f"{TICKETS_DIR}/{stem}/run.md",
     )
-    return _short(result, "ok", [], slip)
 
 
 # --- Check --------------------------------------------------------------------------------------
@@ -937,6 +949,13 @@ async def review(ctx: StageContext, ticket: Ticket, invoice: Invoice, *, attempt
             stuck_budget=ticket.stuck_minutes * 60.0)
     except RenderOverBound as e:
         return StageResult(outcome="premise_failed", artifact=None, findings=[e.finding])
+    return await finish_review(ctx, ticket, spec, result, reviewed, attempt=attempt)
+
+
+async def finish_review(ctx: StageContext, ticket: Ticket, spec: Spec, result: StageResult, reviewed: str, *,
+                        attempt: int) -> StageResult:
+    """After the call: the verdict-keyed artifact, pinned to the reviewed SHA, lands in `review.md`."""
+    stem = ticket.stem
     if result.outcome != "ok":
         return result
     verdict = result.artifact

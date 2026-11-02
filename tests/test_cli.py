@@ -492,10 +492,13 @@ def test_retro_refusals(root, capsys, failure):
 
 
 def test_doctor_cli(root, capsys):
+    assert cli(root, "render", stages=lambda c: pytest.fail("pipeline constructed")) == 0
+    capsys.readouterr()
     assert cli(root, "doctor", stages=lambda c: pytest.fail("pipeline constructed")) == 0
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == "doctor: ok"
-    assert [line.split(":", 1)[0] for line in lines[1:]] == [f"PASS {n}" for n in ("venv", "git", "config", "lock", "journal")]
+    assert [line.split(":", 1)[0] for line in lines[1:]] == [
+        f"PASS {n}" for n in ("venv", "git", "config", "render", "lock", "journal")]
 
 
 def core_config(root, hosts):

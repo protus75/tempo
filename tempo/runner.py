@@ -12,7 +12,7 @@ from typing import assert_never
 from tempo.artifacts import Finding, Harvest, StageResult
 from tempo.box import BOX_DIR
 from tempo.storm import arrival_id
-from tempo.backlog import dead_dependents, settled_dependencies, ticket_state
+from tempo.backlog import admit, dead_dependents, ticket_state
 from tempo.checkout import SPECS_DIR, Checkout, Refusal
 from tempo.caps import capability, consume, next_rung, spent, spent_reason
 from tempo.driver import Driver
@@ -25,8 +25,8 @@ from tempo.reconcile import reconcile
 from tempo.stages import (DiagnosisMaterial, StageContext, diagnose, harvest, harvest_orphan, run_stages,
                           run_wall_seconds, write_diagnosis)
 from tempo.status import last_states, reject_queue
-from tempo.tickets import (INTAKE_SIGNAL, Ticket, TicketInvalid, intake,
-                           stamp, stem_findings, ticket_path, validate_ticket)
+from tempo.tickets import (INTAKE_SIGNAL, Ticket, intake,
+                           stamp, stem_findings, ticket_path)
 
 EXIT_MERGED = 0
 EXIT_TICKET = 1
@@ -258,7 +258,7 @@ async def run_ticket(stem: str, checkout: Checkout, dispatch: Dispatch) -> int:
 
         storm_producer(root=checkout.config.state_dir / BOX_DIR, fs=checkout.fs,
                        journal=checkout.journal, clock=checkout.clock).recover()
-        ticket = await _admit(stem, checkout)
+        ticket = await admit(stem, checkout)
         checkout.journal.append(EventType.STATE_TRANSITION, {"to": "running"}, ticket=stem)
         terminal = await dispatch(ticket)
         if terminal not in TERMINAL_STATES:
@@ -343,34 +343,3 @@ async def reject_ticket(stem: str, checkout: Checkout) -> bool:
         checkout.journal.append(EventType.STATE_TRANSITION, {"to": "rejected"}, ticket=stem)
     await dead_dependents(stem, checkout)
     return last != "rejected"
-
-
-async def _admit(stem: str, checkout: Checkout) -> Ticket:
-    """Intake every pending ticket, then validate the one to dispatch; refuse anything not dispatchable."""
-    repo = checkout.repo
-    result = await intake(repo, checkout.git, checkout.journal, checkout.fs)
-    if refused := result.refused.get(stem):
-        raise Refusal(f"{ticket_path(stem)} failed intake: "
-                      + "; ".join(f"[{f.code}] {f.message} ({f.paved_road})" for f in refused),
-                      f"fix the ticket, then `run {stem}` again")
-    path = repo / ticket_path(stem)
-    if not path.is_file():
-        raise Refusal(f"{ticket_path(stem)} does not exist",
-                      f"author it with `python -m tempo new {stem}`, fill it, then `run {stem}`")
-    try:
-        ticket = validate_ticket(stem, path.read_text(), repo)
-    except TicketInvalid as e:
-        raise Refusal(f"{ticket_path(stem)} is invalid: "
-                      + "; ".join(f"[{f.code}] {f.message} ({f.paved_road})" for f in e.findings),
-                      f"fix the ticket, then `run {stem}` again") from None
-    last = last_states(checkout.journal.read())
-    if last.get(stem) == "merged" or ticket.frontmatter.state == "merged":
-        raise Refusal(f"{stem} is already merged", "author follow-up work as a new stem with `new`")
-    if ticket.frontmatter.state != "confirmed":
-        raise Refusal(f"{stem} is `state: {ticket.frontmatter.state}`, not confirmed",
-                      f"set `state: confirmed` in {ticket_path(stem)} to dispatch it, or author a new stem")
-    settled = settled_dependencies(checkout.journal.read())
-    if unmerged := [d for d in ticket.depends if d not in settled]:
-        raise Refusal(f"{stem} depends on unmerged {', '.join(unmerged)}",
-                      " then ".join(f"`run {d}`" for d in unmerged) + f" first, then `run {stem}`")
-    return ticket

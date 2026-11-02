@@ -13,7 +13,7 @@ findings. An uncharged one (infra_error, provider_drought) and a timeout are jou
 import hashlib
 import json
 import secrets
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -22,11 +22,13 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from tempo.artifacts import Finding, Outcome, StageResult
+from tempo.caps import consume
 from tempo.checkout import Refusal
 from tempo.config import Config, ConfigSnapshot, Severity
 from tempo.driver import LlmStage, Spool, check_reply
 from tempo.effects import Effects
 from tempo.git import Git
+from tempo.hosts import agent_path
 from tempo.journal import Event, EventType, Journal, render_ts
 from tempo.journal import run_seq as journal_run_seq
 from tempo.llm import AgentEffort, AgentTier
@@ -35,13 +37,17 @@ from tempo.providers import FAILURE_MARKERS, WRITING_SURFACES
 from tempo.redact import Redactor
 from tempo.seams import Clock, FileSystem
 from tempo.specs import check_render_bound
+from tempo.thresh import record_outcome
 from tempo.tickets import TICKET_FILE, TICKETS_DIR
 from tempo.timers import Timers
 
 # Contract constants (TEMPO_PLAN.md section 22). P4c sets READ_PART_CHARS from the live gate.
 READ_PART_CHARS = 50_000
+RETRO_STUCK_S = 5400.0  # chupa's call_timeout default: the retro call deadline
 CALL_CLOSED = "subagent_call_closed"
 OWN_FILES = ("output.txt", "stop.txt", "call.json")
+# State the tools and hooks keep while a call runs: never a confinement finding.
+SIDE_STATE = ("session.json", "hooks", "jobs")
 # Every surface that runs as a subagent; `pins` keys come from this set.
 SURFACES = ("implement", "review", "requisition_review", "triage", "author", "retro")
 # Codex carries effort; P4c confirms the level `max` maps to.
@@ -112,40 +118,58 @@ def _digest(snapshot: Mapping[str, Any]) -> str:
     return _sha(json.dumps(snapshot, sort_keys=True).encode())
 
 
+def _intents(history: list[Event]) -> dict[str, Event]:
+    return {e.body["call_id"]: e for e in history
+            if e.type == EventType.EFFECT_INTENT and "call_id" in e.body}
+
+
+def _closures(history: list[Event]) -> dict[str, Event]:
+    out = {}
+    for e in history:
+        if e.type == EventType.EFFECT_COMPLETION and "call" in e.body:
+            out[e.body["call"]["call_id"]] = e
+        elif e.type == EventType.SIGNAL and e.body.get("signal") == CALL_CLOSED:
+            out[e.body["call_id"]] = e
+    return out
+
+
+def call_record(intent: Event) -> dict[str, Any]:
+    return json.loads((Path(intent.body["dir"]) / "call.json").read_text())
+
+
+def issued(history: list[Event], call_id: str) -> dict[str, Any] | None:
+    """The call.json of a call `prepare` issued, or None."""
+    intent = _intents(history).get(call_id)
+    return call_record(intent) if intent is not None else None
+
+
+def closed(history: list[Event], call_id: str) -> bool:
+    return call_id in _closures(history)
+
+
+def open_calls(history: list[Event]) -> list[dict[str, Any]]:
+    """Every issued call with no completion or closing note, read back from its call.json."""
+    closed = _closures(history)
+    return [call_record(e) for cid, e in _intents(history).items() if cid not in closed]
+
+
+async def _no_notify(failure: str, message: str) -> None:
+    return None
+
+
 class Calls:
     def __init__(self, *, config: Config | ConfigSnapshot, host: str, session: str, repo: Path,
                  journal: Journal, spool: Spool, redactor: Redactor, git: Git, fs: FileSystem,
                  clock: Clock, timers: Timers, severity: Mapping[str, Severity], retry_cap: int,
-                 notify: Callable[[str, str], Any] = lambda failure, message: None,
+                 notify: Callable[[str, str], Awaitable[None]] = _no_notify,
                  new_id: Callable[[], str] = lambda: secrets.token_hex(16)) -> None:
         self.config, self.host, self.session, self.repo = config, host, session, repo
         self.journal, self.effects, self.spool, self.redactor = journal, Effects(journal), spool, redactor
         self.git, self.fs, self.clock, self.timers = git, fs, clock, timers
         self.severity, self.retry_cap, self.notify, self.new_id = severity, retry_cap, notify, new_id
 
-    # --- journal folds ---------------------------------------------------------------------------
-
-    def _intents(self, history: list[Event]) -> dict[str, Event]:
-        return {e.body["call_id"]: e for e in history
-                if e.type == EventType.EFFECT_INTENT and "call_id" in e.body}
-
-    def _closures(self, history: list[Event]) -> dict[str, Event]:
-        out = {}
-        for e in history:
-            if e.type == EventType.EFFECT_COMPLETION and "call" in e.body:
-                out[e.body["call"]["call_id"]] = e
-            elif e.type == EventType.SIGNAL and e.body.get("signal") == CALL_CLOSED:
-                out[e.body["call_id"]] = e
-        return out
-
     def open_calls(self) -> list[dict[str, Any]]:
-        """Every issued call with no completion or closing note, read back from its call.json."""
-        history = self.journal.read()
-        closed = self._closures(history)
-        return [self._record(e) for cid, e in self._intents(history).items() if cid not in closed]
-
-    def _record(self, intent: Event) -> dict[str, Any]:
-        return json.loads((Path(intent.body["dir"]) / "call.json").read_text())
+        return open_calls(self.journal.read())
 
     # --- prepare ---------------------------------------------------------------------------------
 
@@ -196,18 +220,21 @@ class Calls:
 
         model = resolve_model(self.config, self.host, stage.surface, spec.tier)
         agent = agent_name(self.host, stage.surface, model, spec.effort)
+        if not agent_path(self.repo, self.host, agent).is_file():
+            raise Refusal(f"agent {agent} has no file {agent_path(self.repo, self.host, agent)}",
+                          "run `tempo render` to write the agent files for config.yaml")
         snapshot = await self._snapshot(root, call_dir, len(history))
         deadline = render_ts(self.clock() + timedelta(seconds=spec.stuck_budget))
         self.effects.begin(key, ticket=spec.ticket, body={
             "call_id": call_id, "deadline": deadline, "snapshot": _digest(snapshot), "dir": str(call_dir)})
+        spawn = "\n".join([f"call: {call_id}", *(f"part: {p}" for p in parts), f"reply: {reply}"])
         record = {
             "call_id": call_id, "session": self.session, "host": self.host, "agent": agent, "model": model,
             "host_reported_model": None, "surface": stage.surface, "key": key, "ticket": spec.ticket,
             "attempt": spec.attempt, "call_seq": call_seq, "spool_stem": spool_stem, "read_root": str(root),
-            "deadline": deadline, "parts": parts, "reply": reply, "snapshot": snapshot,
+            "deadline": deadline, "parts": parts, "reply": reply, "spawn_prompt": spawn, "snapshot": snapshot,
         }
         self.fs.write(call_dir / "call.json", (json.dumps(record, indent=2) + "\n").encode())
-        spawn = "\n".join([f"call: {call_id}", *(f"part: {p}" for p in parts), f"reply: {reply}"])
         return Prepared(call=call_id, state="pending", agent=agent, spawn_prompt=spawn,
                         parts=tuple(parts), reply=reply)
 
@@ -233,7 +260,7 @@ class Calls:
             trees[str(tree)] = {"head": await self.git.rev_parse(tree, "HEAD"), "changed": changed}
         state_dir = Path(self.config.state_dir)
         skip = {state_dir / "journal", Path(self.config.worktree_root), state_dir / "tempo.lock",
-                *(call_dir / name for name in OWN_FILES)}
+                *(state_dir / name for name in SIDE_STATE), *(call_dir / name for name in OWN_FILES)}
         state = {}
         if state_dir.is_dir():
             for path in sorted(state_dir.rglob("*")):
@@ -269,13 +296,13 @@ class Calls:
 
     async def submit(self, call_id: str, stage: LlmStage) -> Submitted:
         history = self.journal.read()
-        intent = self._intents(history).get(call_id)
+        intent = _intents(history).get(call_id)
         if intent is None:
             raise Refusal(f"call {call_id} was never issued", "submit only a call id that prepare returned")
-        record = self._record(intent)
+        record = call_record(intent)
         if stage.surface != record["surface"]:
             raise ValueError(f"call {call_id} is a {record['surface']} call, not {stage.surface}")
-        closing = self._closures(history).get(call_id)
+        closing = _closures(history).get(call_id)
         if closing is not None:
             return self._recorded(closing, stage, record)
 
@@ -307,17 +334,25 @@ class Calls:
                 if not any(t.body.timer_id.startswith(f"provider-cooldown/{self.host}/")
                            for t in self.timers.pending.values()):
                     self.timers.arm(f"provider-cooldown/{self.host}/{render_ts(until)}", until, ticket=None)
+                self._breaker(record, failure)
+                if record["ticket"] is not None:
+                    # A session cannot loop on an exhausted quota: each drought draws caps.infra.
+                    ticket_sha = await self.git.rev_parse(self.repo, f"HEAD:{TICKETS_DIR}/{record['ticket']}/{TICKET_FILE}")
+                    consume(self.journal, record["ticket"], "infra", ticket_sha)
                 self._close(record, "provider_drought", failure)
                 return Submitted(state="closed", outcome="provider_drought")
             if failure in ("auth_error", "model_error"):
-                self.notify(failure, self.redactor.scrub(stop.get("message", "")))
+                self._breaker(record, failure)
+                await self.notify(failure, self.redactor.scrub(stop.get("message", "")))
                 self._close(record, "infra_error", failure)
                 return Submitted(state="closed", outcome="infra_error")
             missing = Finding(code="invalid_artifact", message="the subagent wrote no reply file",
                               paved_road=f"write the reply JSON to {record['reply']}")
+            self._breaker(record, "unclassified" if text is None else None)
             return await self._complete(record, stage, text or "", "invalid_artifact",
                                         checked.hard if checked else [missing], None)
 
+        self._breaker(record, None)
         hard = list(checked.hard)
         if stage.review is not None:
             review = await stage.review(checked.artifact, record["call_seq"])
@@ -329,6 +364,10 @@ class Calls:
         if record["surface"] in WRITING_SURFACES and getattr(checked.artifact, "outcome", None) == "ok":
             await self._commit(record)
         return await self._complete(record, stage, text, "ok", checked.soft, checked.artifact)
+
+    def _breaker(self, record: dict[str, Any], failure: str | None) -> None:
+        record_outcome(self.journal, self.clock, self.config.circuit_breaker, self.host, failure,
+                       ticket=record["ticket"], call_key=record["key"])
 
     @staticmethod
     def _read(path: Path) -> str | None:

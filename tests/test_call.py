@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel, ConfigDict
 
+from tempo import render as host_render
 from tempo.artifacts import Artifact, Finding
 from tempo.call import CALL_CLOSED, READ_PART_CHARS, Calls, CallSpec, agent_name
 from tempo.checkout import Refusal
@@ -98,6 +99,7 @@ def init_repo(path: Path) -> Path:
     (path / "tickets" / "t-1").mkdir(parents=True)
     (path / "tickets" / "t-1" / "ticket.md").write_text("ticket\n")
     (path / "app.py").write_text("x = 1\n")
+    host_render.write(path, load_config(None, cwd=path), LocalFileSystem())
     sh(path, "git", "add", "-A")
     sh(path, "git", "commit", "-q", "-m", "init")
     return path
@@ -114,12 +116,17 @@ def build(repo: Path, *, session: str = "s1", clock: Clock | None = None, notice
     journal = Journal(config.state_dir, clock)
     redactor = Redactor({})
     counter = iter(ids or (f"{n:032x}" for n in range(1, 100)))
+
+    async def notify(failure, message):
+        if notices is not None:
+            notices.append((failure, message))
+
     return Calls(config=config, host="claude", session=session, repo=repo, journal=journal,
                  spool=Spool(config.state_dir / "spools", redactor, LocalFileSystem()), redactor=redactor,
                  git=Git(SubprocessExec(), env={"PATH": "/usr/bin:/bin"}, timeout=30.0), fs=LocalFileSystem(),
                  clock=clock, timers=Timers(journal=journal, clock=clock, sleep=asyncio.sleep),
                  severity=merge_severity(config), retry_cap=config.caps.retry,
-                 notify=(lambda f, m: notices.append((f, m))) if notices is not None else (lambda f, m: None),
+                 notify=notify,
                  new_id=lambda: next(counter))
 
 
@@ -260,6 +267,9 @@ def test_a_limit_hit_is_uncharged_and_arms_the_host_cooldown(repo):
     armed = [e for e in events(calls) if e.type == EventType.TIMER_ARMED]
     assert armed[0].body["timer_id"] == "provider-cooldown/claude/2026-11-02T00:30:00+00:00"
     assert not any(e.type == EventType.EFFECT_COMPLETION for e in events(calls))
+    # The drought draws caps.infra, so a session cannot loop on it, and feeds the host's breaker.
+    assert [e.body["cap"] for e in events(calls) if e.type == EventType.CAP_CONSUMED] == ["infra"]
+    assert breaker(calls) == ["quota_exhausted"]
     assert Path(run(calls.prepare(spec(repo))).reply).parent.name == "call-01"
 
 
@@ -278,6 +288,26 @@ def test_a_missing_reply_with_an_unclassified_stop_is_charged(repo):
     reply(prepared, None, message="I could not finish")
     done = run(calls.submit(prepared.call, REVIEW))
     assert (done.state, done.outcome) == ("completed", "invalid_artifact")
+    assert breaker(calls) == ["unclassified"]
+
+
+def test_an_accepted_reply_resets_the_breaker_streak(repo):
+    calls = build(repo)
+    prepared = run(calls.prepare(spec(repo)))
+    reply(prepared, echo("hello"))
+    run(calls.submit(prepared.call, REVIEW))
+    assert breaker(calls) == [None]
+
+
+def test_prepare_refuses_an_agent_with_no_rendered_file(repo):
+    calls = build(repo)
+    (repo / ".claude/agents/tempo-review-opus.md").unlink()
+    with pytest.raises(Refusal, match="run `tempo render`"):
+        run(calls.prepare(spec(repo)))
+
+
+def breaker(calls):
+    return [e.body["failure_class"] for e in events(calls) if e.body.get("signal") == "provider_call_outcome"]
 
 
 def test_a_dead_sessions_call_is_recorded_by_the_next_prepare_on_its_key(repo):

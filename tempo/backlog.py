@@ -13,8 +13,8 @@ from tempo.effects import Effects
 from tempo.journal import TERMINAL_STATES, Event, EventType, Journal
 from tempo.status import last_states, reject_queue
 from tempo.storm import arrival_id
-from tempo.tickets import (INTAKE_SIGNAL, Ticket, depends_cycle, parse_ticket, split_frontmatter, stamp,
-                           ticket_path, validate_ticket)
+from tempo.tickets import (INTAKE_SIGNAL, Ticket, TicketInvalid, depends_cycle, intake, parse_ticket,
+                           split_frontmatter, stamp, ticket_path, validate_ticket)
 
 # `already_satisfied` settles the stem as a no-op (section 7): it satisfies `depends` and is never re-offered.
 SETTLED = frozenset({"merged", "already_satisfied"})
@@ -159,3 +159,34 @@ async def dead_dependents(dead: str, checkout: Checkout) -> None:
                             summary=f"{stem} depends on {dependency}, which was rejected or abandoned; re-wire, re-scope, or reject it",
                             occurrence_id=arrival_id("dead-dependency", stem, dependency))
                 checkout.journal.append(EventType.SIGNAL, {"signal": "dead_dependency", "dead": dependency}, ticket=stem)
+
+
+async def admit(stem: str, checkout: Checkout) -> Ticket:
+    """Intake every pending ticket, then validate the one to dispatch; refuse anything not dispatchable."""
+    repo = checkout.repo
+    result = await intake(repo, checkout.git, checkout.journal, checkout.fs)
+    if refused := result.refused.get(stem):
+        raise Refusal(f"{ticket_path(stem)} failed intake: "
+                      + "; ".join(f"[{f.code}] {f.message} ({f.paved_road})" for f in refused),
+                      f"fix the ticket, then `run {stem}` again")
+    path = repo / ticket_path(stem)
+    if not path.is_file():
+        raise Refusal(f"{ticket_path(stem)} does not exist",
+                      f"author it with `python -m tempo new {stem}`, fill it, then `run {stem}`")
+    try:
+        ticket = validate_ticket(stem, path.read_text(), repo)
+    except TicketInvalid as e:
+        raise Refusal(f"{ticket_path(stem)} is invalid: "
+                      + "; ".join(f"[{f.code}] {f.message} ({f.paved_road})" for f in e.findings),
+                      f"fix the ticket, then `run {stem}` again") from None
+    last = last_states(checkout.journal.read())
+    if last.get(stem) == "merged" or ticket.frontmatter.state == "merged":
+        raise Refusal(f"{stem} is already merged", "author follow-up work as a new stem with `new`")
+    if ticket.frontmatter.state != "confirmed":
+        raise Refusal(f"{stem} is `state: {ticket.frontmatter.state}`, not confirmed",
+                      f"set `state: confirmed` in {ticket_path(stem)} to dispatch it, or author a new stem")
+    settled = settled_dependencies(checkout.journal.read())
+    if unmerged := [d for d in ticket.depends if d not in settled]:
+        raise Refusal(f"{stem} depends on unmerged {', '.join(unmerged)}",
+                      " then ".join(f"`run {d}`" for d in unmerged) + f" first, then `run {stem}`")
+    return ticket

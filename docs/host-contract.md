@@ -196,6 +196,32 @@ Each gate_bypass has only nonblank `code` (an engine gate code) and `reason`.
 Put ordering in Depends on and priority, not extra metadata. New human intake
 stamps source human and confirms; machine sources belong to engine authoring.
 
+## Generated host files, hooks, and tools
+
+`tempo render` writes, from config.yaml, each host's hook file (`.claude/settings.json`,
+`.github/hooks/tempo.json`, `.codex/hooks.json`) and a `tempo:protocol` block in its instruction
+file, for all three hosts. For each host in `orchestrator.models` it also writes the orchestrator
+rules, the `/tempo-run` start command (Codex: location set by the P4c live gate), and one thin
+`tempo-<surface>-<model>` agent file per reachable surface and model, plus effort on Codex. Stale
+generated `tempo-*` files are deleted. These are render targets: change config.yaml or tempo's
+`tempo/rules/` and rerender, never hand-edit them. `tempo render --check` lists drift; `doctor`
+runs it, and `begin_session` refuses when the host's hook file is stale.
+
+Every hook runs `tempo hook <host>` with the host's JSON payload on stdin. A payload that does not
+parse, and any hook fault, is denied (exit 2). The chat that ran `begin_session` is the orchestrator:
+its shell runs only `tempo tool <name> '<json>'`, it never writes, and it may spawn only the agent its
+open call names with exactly that call's spawn prompt. A `tempo-*` subagent reads only its call's read
+root, the engine specs, and its prompt parts; writes only its reply, and implement also its worktree
+except `ticket.md`; and never spawns, messages, or resumes an agent, or runs git, `gh`, `tempo`, an
+agent CLI, or a publish. Every other chat gets no tempo enforcement.
+
+The orchestrator's tools print one JSON object: `{"ok": true, ...}` or `{"ok": false, "refused",
+"do_instead"}` (exit 2). `begin_session` returns the session token every other tool except `status`
+needs; `write_handoff` commits `tickets/orchestrator/handoff.md` and ends the session. `check`,
+`merge`, and a call's validation in `submit` run in a detached `tempo job-run` worker; poll `job` (or
+`submit`) until done. Session state is `<state_dir>/session.json`, hook state `<state_dir>/hooks/`, and
+job state `<state_dir>/jobs/`; none of them is a confinement finding.
+
 ## Checks and injectable seams
 
 `Gate.check(artifact, workspace) -> GateReport` is synchronous; the report has
@@ -231,6 +257,8 @@ The minimal seams in `tempo/seams.py` are:
 - `write(path, data)` fsyncs a temporary file and atomically replaces the target;
   `replace(src, dst)` atomically replaces; `publish(path, data)` durably publishes
   without overwriting an existing destination.
+- `detached_spawn(argv, *, cwd, env, keep_fd)` starts a job worker in its own session that inherits
+  the job lock's descriptor and is never waited for.
 - `async notify(argv) -> dict[str, str | int]` validates nonempty argv, nonblank
   executable and NUL-free strings; CommandNotifications scrubs output and
   returns rc/stdout/stderr on success. Nonzero, timeout, missing executable or
