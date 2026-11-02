@@ -1,35 +1,28 @@
 # Instance config (host plane, TEMPO_PLAN.md section 15). Operator-owned: edit between runs.
-# Both providers are kind: cli on ambient CLI
-# login, so no `auth` and no key export. IMPLEMENT/AUTHOR inherit models_by_tier[tier]; REVIEW pins
-# claude's strongest model at every tier (diversity from codex IMPLEMENT is a preference, not a gate).
 schema_version: 1
 state_dir: .tempo/state
-providers:
-  - name: claude
-    kind: cli
-    package: "@anthropic-ai/claude-code"
-    models_by_tier: {low: claude-sonnet-5-5, medium: claude-sonnet-5-5, high: claude-opus-5-5, max: claude-opus-5-5}
-    limits: {concurrency: 1}
-  - name: codex
-    kind: cli
-    package: "@openai/codex"
-    models_by_tier: {low: gpt-6-luna, medium: gpt-6.1-sol, high: gpt-6.1-sol, max: gpt-6-astra}
-    limits: {concurrency: 1}
-routing:
-  - {tier: low, surface: implement, candidates: [{provider: codex}]}
-  - {tier: low, surface: author, candidates: [{provider: claude}]}
-  - {tier: low, surface: review, candidates: [{provider: claude, model: claude-opus-5-5}]}
-  - {tier: medium, surface: implement, candidates: [{provider: codex}]}
-  - {tier: medium, surface: author, candidates: [{provider: claude}]}
-  - {tier: medium, surface: review, candidates: [{provider: claude, model: claude-opus-5-5}]}
-  - {tier: high, surface: implement, candidates: [{provider: codex}]}
-  - {tier: high, surface: author, candidates: [{provider: claude}]}
-  - {tier: high, surface: review, candidates: [{provider: claude, model: claude-opus-5-5}]}
-  - {tier: max, surface: implement, candidates: [{provider: codex}]}
-  - {tier: max, surface: author, candidates: [{provider: claude}]}
-  - {tier: max, surface: review, candidates: [{provider: claude, model: claude-opus-5-5}]}
+# Subagent models per host (AGENT_PLAN.md section 4.4.2). Review is pinned to each host's strongest
+# model, which never appears in models_by_tier: a model never reviews its own work.
+hosts:
+  claude:
+    models_by_tier: {low: claude-sonnet-5-5, medium: claude-sonnet-5-5, high: claude-sonnet-5-5, max: claude-sonnet-5-5}
+    pins: {review: claude-opus-5-5}
+    quota_window_minutes: 60
+  codex:
+    models_by_tier: {low: gpt-6-luna, medium: gpt-6.1-sol, high: gpt-6.1-sol, max: gpt-6.1-sol}
+    pins: {review: gpt-6-astra}
+    quota_window_minutes: 60
+  # copilot:                       # fill in model ids to enable Copilot; checked like the others
+  #   models_by_tier: {low: <id>, medium: <id>, high: <id>, max: <id>}
+  #   pins: {review: <id>}
+  #   quota_window_minutes: 60
+orchestrator:
+  models: {claude: claude-opus-5-5, codex: gpt-6-astra}   # copilot added after the P4c live gate
+  session:
+    max_tickets: 5                 # tickets started before the session hands off
+    max_minutes: 240               # tools refuse new work after this; the session hands off
 review: {}
 merge: {}
-drain:
-  max_ticket_minutes: 180  # raised from the shipped 90 to admit longer ticket stuck budgets (section 18)
+tickets:
+  max_minutes: 180  # raised from the shipped 90 to admit longer ticket stuck budgets (section 18)
 engine_plane_safety_inventory: [specs/, tempo/gates.py, tempo/config.py, tempo/providers.py, config.yaml]

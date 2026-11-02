@@ -16,7 +16,6 @@ from tempo.backlog import authored_at, sort_key
 from tempo.gates import GateReport, run_gates
 from tempo.git import GitError, RebaseRefused
 from tempo.journal import Event, EventType
-from tempo.providers import child_env
 from tempo.seams import ExecutableNotFound
 from tempo.stages import CommandResult, Evidence, StageContext
 from tempo.tickets import TICKETS_DIR, Ticket
@@ -134,7 +133,7 @@ class MergeQueue:
         road = "make the configured command exit 0 on the rebased candidate and retry"
         try:
             rc, out, err = await self.ctx.exec_.run(
-                argv, cwd=self.ctx.worktree(ticket.stem), env=child_env(self.ctx.env, self.ctx.config),
+                argv, cwd=self.ctx.worktree(ticket.stem), env=dict(self.ctx.env),
                 timeout=ticket.stuck_minutes * 60.0)
         except TimeoutError:
             rc, out, err = None, "", f"timed out after the ticket's stuck budget ({ticket.stuck_minutes}m)"

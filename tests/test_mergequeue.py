@@ -19,7 +19,6 @@ from tempo.git import Git
 from tempo.journal import EventType
 from tempo.llm import FakeLLM
 from tempo.mergequeue import CONFLICT_FACTS, RED_STREAK, TREE_MISMATCH, ConflictHandoff, MergeQueue, TreeMismatch
-from tempo.providers import child_env
 from tempo.seams import ExecutableNotFound, LocalFileSystem, SubprocessExec
 from tempo.stages import ApprovedInvoice, CommandResult, StageContext, render_review
 from tempo.tickets import validate_ticket
@@ -42,7 +41,7 @@ def ctx(tmp_path):
     driver = Driver.from_config(config, llm=FakeLLM([]), env=ENV,
                                 clock=lambda: datetime(2026, 10, 6, tzinfo=UTC),
                                 sleep=lambda _: asyncio.Event().wait())
-    context = StageContext(repo, config, ENV, exec_, Git(exec_, env=child_env(ENV, config), timeout=30),
+    context = StageContext(repo, config, ENV, exec_, Git(exec_, env=dict(ENV), timeout=30),
                            LocalFileSystem(), driver, SPECS)
     async def init():
         await context.git.init(repo, branch="main")
@@ -313,6 +312,9 @@ def test_snapshot_configured_command_records_list_argv(ctx, safety, argv, rc):
 
 @pytest.mark.parametrize("safety", [True, False])
 def test_host_check_environment_timeout_and_redaction(ctx, monkeypatch, safety):
+    from tempo.redact import Redactor
+    ctx.driver.redactor = ctx.driver.spool._redactor = Redactor({"FAKE_KEY": SECRET})
+
     async def scenario():
         ticket = await ready(ctx)
         ctx.config.review.mechanical = [host("../unsafe-code", argv=["host", SECRET])]
@@ -322,7 +324,7 @@ def test_host_check_environment_timeout_and_redaction(ctx, monkeypatch, safety):
         results, reports = await queue.host_checks(ticket, attempt=4, safety=safety)
         argv, kw = calls[0]
         assert kw["cwd"] == ctx.worktree(ticket.stem) and kw["timeout"] == ticket.stuck_minutes * 60.0
-        assert "FAKE_KEY" not in kw["env"] and kw["env"]["PATH"] == ENV["PATH"]
+        assert kw["env"]["PATH"] == ENV["PATH"]
         assert not results[0].base_red and SECRET not in results[0].tail
         assert len(results[0].tail) <= stages.OUTPUT_TAIL_CHARS
         assert SECRET not in reports[0].findings[0].message and reports[0].code == "../unsafe-code"
@@ -419,7 +421,7 @@ def test_semantic_conflict_never_moves_main(ctx):
                             fence=("tempo/other.py",))
         for candidate in (ticket, other):
             assert (await ctx.exec_.run(command, cwd=ctx.worktree(candidate.stem),
-                    env=child_env(ctx.env, ctx.config), timeout=30))[0] == 0
+                    env=dict(ctx.env), timeout=30))[0] == 0
         next_ticket = await ready(ctx, "next", changes={"tempo/new.py": "green\n"}, fence=("tempo/new.py",))
         queue = MergeQueue(ctx, escalate=lambda _: None)
         for candidate in (ticket, other, next_ticket):

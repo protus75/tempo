@@ -309,18 +309,33 @@ uncharged `infra_error` call does not count.
 
 `timeout`, `invalid_artifact`, and `gate_failed` keep their meaning and their journal shape.
 
-**New fields.** Exactly three fields are new in the journal call record. `call_id` and `deadline` go in
-the effect intent. `model_source` goes in the completion, copied from `call.json`, where the hook records
-any host-reported model.
-- the call id, a random 128-bit hex string
-- the deadline, measured from `prepare`
-- the model-source note: `{resolved: <model>, host_reported: <model or null>}`. `host_reported` is
-  filled only when a host's subagent hook payload carries a model field.
+**New fields.** These fields are new in the journal call record. The effect intent gets four:
+- `call_id`: a random 128-bit hex string
+- `deadline`: measured from `prepare`
+- `snapshot`: the hash of the state snapshot (§3.4)
+- `dir`: the call's spool folder, which holds `call.json`
 
-**The old path.** The old child-process `Driver._run` code stays through P4 only as the parity-test
-reference, and it runs only under the fake process-exec seam. No real agent CLI runs from P4 on. The
-not-yet-removed scripted modules (`drain`, `runner`, `diagnose`, `rework`) are not wired to the orchestrator
-and are not run live. P5 deletes them, the old path, and `providers.CliAdapter`.
+The completion gets two:
+- `model_source`: `{resolved: <model>, host_reported: <model or null>}`, copied from `call.json`.
+  `host_reported` is filled only when a host's subagent hook payload carries a model field.
+- `call`: `{call_id, outcome, final, head, findings}`. It records what `submit` decided, so the next
+  `prepare` knows whether to replay, re-prompt with the findings, or stop. `head` is implement's
+  branch head after `submit` commits.
+
+An uncharged call or a timeout gets no completion. It is closed by a `subagent_call_closed` signal
+naming the call id and the outcome.
+
+**The old path.** P4a deletes every way tempo could launch an agent CLI:
+- the CLI adapters, `ProviderLLM`, and the CLI preflight
+- `providers[]`, `routing`, and `routing_default_tier`
+- provider admission and failover (`ProviderSession`, the `Thresh` slots); the breaker fold stays
+- the CLI-stream watchdog
+- the `run`, `drain`, `serve`, `triage`, and `retro` commands
+
+`Driver._run` stays through P4 only as the parity-test reference, driven by the fake LLM. The scripted
+modules (`drain`, `runner`, `serve`, `daemon`, `diagnose`, `rework`) stay until P5 for their tests,
+which also use the fake LLM. They are not wired to the orchestrator and cannot run live. P5 deletes them
+and the old path.
 
 ### 3.2 Implement is a subagent
 
@@ -659,7 +674,7 @@ orchestrator:
 - Codex subagent threads: 1
 - triage cadence (§4.2)
 - paths
-- these constants, set in the P4 commit from live-gate measurements, with placeholders in tests until
+- these constants, set in the P4c commit from live-gate measurements, with placeholders in tests until
   then:
   - `READ_PART_CHARS`: the smallest whole-file Read size across hosts that pass the gate
   - `TOOL_CALL_S`: the shortest host MCP tool timeout, minus a margin
@@ -880,7 +895,7 @@ These were decided first, then revised by the review dispositions you accepted.
 
 ## 8. Phases
 
-Before each phase, its exact file list is posted for approval. P1–P4 and P6 are one commit each. P5 is a
+Before each phase, its exact file list is posted for approval. P1–P3, each of P4a, P4b, and P4c, and P6 are one commit each. P5 is a
 series, one commit per removed module.
 
 ### P0 — Plan
@@ -997,6 +1012,12 @@ too. The move list above is a minimum, not the whole list.
 
 ### P4 — Agent layer, config, live gate
 
+P4 runs as three sub-phases, one chat and one commit each, so the code work is not blocked on the live
+gate:
+- **P4a:** (a), the §4.4 config edits, and deleting the CLI path (§3.1, "The old path").
+- **P4b:** (b), (c), the rest of (d), and (e).
+- **P4c:** (f) and (g), and setting the §4.4.6 constants from the live-gate measurements.
+
 **Work:**
 - **(a)** Split `Driver._run` into `prepare`/`submit` (§3.1): prompt parts, the
   state snapshot, stop classification, and the session token. Implement moves onto the same path (§3.2),
@@ -1005,8 +1026,9 @@ too. The move list above is a minimum, not the whole list.
 - **(c)** Hook policy and adapters for three hosts, failing closed on unparseable payloads (§3.4).
 - **(d)** Role definitions and `render` (§4.4.2, §5), the config edits (§4.4), and session start and
   end (§4.6).
-  - P4's `render` writes the host files and the `tempo:protocol` block into the repo. P6 only packages
-    them.
+  - P4's `render` writes the host files and the `tempo:protocol` block into the fixture repo (e), never
+    into this repo, so a hook fault cannot break chats here. The live gate runs with the fixture repo
+    open in VS Code. P6 packages the files.
   - The orchestrator's instructions in P4 cover the call protocol in chupa's stage order:
     - `status` → `start`
     - requisition (`prepare`/spawn/`submit`)
@@ -1045,7 +1067,7 @@ too. The move list above is a minimum, not the whole list.
   - denial of an unparseable payload
 - `submit` refuses a stray write.
 - The old driver path and `prepare` → fake subagent → `submit` produce byte-identical artifacts and
-  journal events, except the three fields in §3.1.
+  journal events, except the new fields in §3.1.
   - The comparison runs under a fixed clock and fixed ids.
   - Prompts are not compared, because the new prompt carries the worktree path.
 - Config tests: unknown key, unresolvable combination, review separation.
@@ -1073,7 +1095,7 @@ too. The move list above is a minimum, not the whole list.
   - ladder routing in `runner`
   - the `daemon` loop and `serve`
   - `runner` dispatch
-  - the old `Driver._run` child path (§3.1) and `providers.CliAdapter`. `FAILURE_MARKERS` stay, for
+  - the old `Driver._run` path (§3.1). The CLI adapters went in P4a. `FAILURE_MARKERS` stay, for
     `stop.txt`.
 - Each removal also deletes its CLI command. At the end of P5, `__main__` joins the kept set and the
   import-graph test covers it.

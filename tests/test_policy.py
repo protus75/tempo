@@ -7,26 +7,17 @@ from tempo.config import BOX_POLICY_DEFAULTS, load_config
 from tempo.policy import policy_row, start_state, touches_inventory
 
 ROOT = Path(__file__).resolve().parent.parent
+HOSTS = ("hosts:\n  claude:\n    models_by_tier: {low: low, medium: medium, high: medium, max: medium}\n"
+         "    pins: {review: max}\norchestrator:\n  models: {claude: max}\n")
 
 
 def config(tmp_path: Path):
-    routes = "".join(
-        f"  - {{tier: {tier}, surface: {surface}, candidates: [{{provider: claude}}]}}\n"
-        for tier in ("low", "medium", "high", "max") for surface in ("review", "author")
-    )
     text = textwrap.dedent(
         """\
         schema_version: 1
         state_dir: state
-        providers:
-          - name: claude
-            kind: cli
-            package: test-cli
-            models_by_tier: {low: low, medium: medium, high: high, max: max}
-            limits: {concurrency: 1}
-        routing:
         """
-    ) + routes + "review: {}\nmerge: {}\nengine_plane_safety_inventory: [tempo/gates.py]\n"
+    ) + "review: {}\nmerge: {}\nengine_plane_safety_inventory: [tempo/gates.py]\n" + HOSTS
     (tmp_path / "config.yaml").write_text(text)
     return load_config(None, cwd=tmp_path)
 

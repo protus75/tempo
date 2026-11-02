@@ -31,7 +31,7 @@ def test_implement_spec_defines_both_premise_kinds():
 
 def test_spec_lint_accepts_the_implement_and_requisition_specs():
     specs = Path(__file__).resolve().parent.parent / "specs"
-    for name, version in (("implement", "1.6"), ("requisition_review", "2.3")):
+    for name, version in (("implement", "1.7"), ("requisition_review", "2.3")):
         text = (specs / f"{name}.md").read_text()
         assert lint_spec(text) == []
         assert load_spec(text).meta.version == version

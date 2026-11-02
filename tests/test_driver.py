@@ -22,17 +22,14 @@ CONFIG = textwrap.dedent(
     """\
     schema_version: 1
     state_dir: .tempo
-    providers:
-      - name: claude
-        kind: cli
-        package: test-cli
-        auth: TEMPO_TEST_KEY
-        models_by_tier: {low: haiku, medium: sonnet, high: opus, max: opus}
-        limits: {concurrency: 1}
-    routing:
-      - {tier: medium, surface: implement, candidates: [{provider: claude, model: sonnet}]}
     review: {}
     merge: {}
+    hosts:
+      claude:
+        models_by_tier: {low: sonnet, medium: sonnet, high: sonnet, max: sonnet}
+        pins: {review: opus}
+    orchestrator:
+      models: {claude: opus}
     engine_plane_safety_inventory: [specs/]
     """
 )
@@ -352,34 +349,6 @@ def test_surfaces_sharing_an_attempt_keep_separate_spools(tmp_path):
 def test_fake_llm_refuses_when_script_exhausted():
     with pytest.raises(AssertionError, match="script exhausted"):
         asyncio.run(FakeLLM([]).call(LLMRequest("implement", "x", "low", "low", None, None)))
-
-
-def test_configured_secret_value_never_reaches_spool_or_engine_log(tmp_path):
-    # CONFIG-to-writer path: the secret is named only by the provider's `auth` field and resolved from env.
-    llm = FakeLLM(
-        [
-            f"I found {SECRET} in the environment",  # invalid -> re-prompt carries the echo back
-            RuntimeError(f"auth failed for key {SECRET}"),
-        ]
-    )
-    driver, state = build(tmp_path, llm)
-    result = run(driver, text=f"payload with {SECRET}")
-    assert result.outcome == "infra_error"
-    assert SECRET in llm.requests[0].rendered  # the model still gets what it was sent
-    files = [p for p in state.rglob("*") if p.is_file()]
-    assert {p.name for p in files} >= {"prompt.md", "output.txt", "error.txt", "engine.log"}
-    for p in files:
-        assert SECRET not in p.read_text(), p
-    assert "[REDACTED:TEMPO_TEST_KEY]" in (spool(state) / "implement" / "call-01" / "prompt.md").read_text()
-    assert "[REDACTED:TEMPO_TEST_KEY]" in (spool(state) / "implement" / "call-02" / "error.txt").read_text()
-
-
-def test_redactor_from_config_skips_unset_and_empty_values(tmp_path):
-    (tmp_path / "config.yaml").write_text(CONFIG)
-    config = load_config(None, cwd=tmp_path)
-    assert Redactor.from_config(config, {}).scrub("abc") == "abc"
-    assert Redactor.from_config(config, {"TEMPO_TEST_KEY": ""}).scrub("abc") == "abc"
-    assert Redactor.from_config(config, {"TEMPO_TEST_KEY": "b"}).scrub("abc") == "a[REDACTED:TEMPO_TEST_KEY]c"
 
 
 def test_redactor_replaces_longest_secret_first():

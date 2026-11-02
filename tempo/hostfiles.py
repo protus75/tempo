@@ -126,11 +126,18 @@ def refresh(paths: Sequence[Path], fs: FileSystem) -> None:
         fs.write(path, fresh)
 
 
+CONDUCT_FILES = {"claude": "CLAUDE.md", "codex": "AGENTS.md", "copilot": ".github/copilot-instructions.md"}
+
+
+def conduct_paths(config, checkout: Path) -> tuple[Path, ...]:
+    """Each configured host's instruction file, once."""
+    return tuple(dict.fromkeys(checkout / CONDUCT_FILES[host] for host in config.hosts))
+
+
 async def committed_core(workspace, config, git):
     """Gather raw candidate bytes only when their blob identities match HEAD."""
     from tempo.artifacts import Finding
     from tempo.git import GitError
-    from tempo.providers import routed_conduct_paths
 
     files, findings = {}, []
     template = CORE_TEMPLATE
@@ -154,7 +161,7 @@ async def committed_core(workspace, config, git):
             findings.append(Finding(code="core_drift", path=source_path,
                 message="cannot extract candidate tempo core template",
                 paved_road="define CORE_TEMPLATE as one literal bytes assignment"))
-    for path in routed_conduct_paths(config, workspace):
+    for path in conduct_paths(config, workspace):
         rel = path.relative_to(workspace).as_posix()
         try:
             blob = await git.rev_parse(workspace, f"HEAD:{rel}")

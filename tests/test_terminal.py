@@ -142,10 +142,10 @@ def test_an_engine_plane_refusal_exits_2_and_dispatches_nothing(repo, capsys):
     assert llm.requests == [] and transitions(repo) == []
 
 
-def test_an_unbuildable_provider_layer_refuses_with_exit_2(repo, capsys):
-    author(repo)  # the test config's `fake` provider has no shipped cli adapter
+def test_run_without_an_injected_model_refuses_with_exit_2(repo, capsys):
+    author(repo)
     code = main(["run", STEM], cwd=repo, env=ENV, clock=clock)
 
     assert code == runner.EXIT_REFUSED
-    assert "no shipped cli adapter" in capsys.readouterr().err
+    assert "tempo runs none" in capsys.readouterr().err
     assert transitions(repo) == []

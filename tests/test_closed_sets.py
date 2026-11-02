@@ -10,7 +10,7 @@ from typing import get_args
 
 import pytest
 
-from tempo import (artifacts, audit, author, backlog, box, caps, checkpoint, config, control, enginelog, gates, inbox, journal, llm, merge, mergequeue, notify, providers, requisition, runner, serve, specs, stages, storm, thresh, tickets, triage)
+from tempo import (artifacts, audit, author, backlog, box, call, caps, checkpoint, config, control, enginelog, gates, inbox, journal, llm, merge, mergequeue, notify, providers, requisition, runner, serve, specs, stages, storm, thresh, tickets, triage)
 
 
 def ident(v):
@@ -50,8 +50,19 @@ def test_box_closed_sets_and_constants():
     assert box.MESSAGE_CLASSES == ('suggestion', 'failure_report', 'override_report', 'retro_finding', 'bug_report')
     assert set(get_args_deep(box.MessageClass)) == {'bug_report', 'failure_report', 'override_report', 'retro_finding', 'suggestion'}
 
+def test_call_closed_sets_and_constants():
+    assert call.READ_PART_CHARS == 50_000
+    assert call.CALL_CLOSED == 'subagent_call_closed'
+    assert call.OWN_FILES == ('output.txt', 'stop.txt', 'call.json')
+    assert call.SURFACES == ('implement', 'review', 'requisition_review', 'triage', 'author', 'retro')
+    assert call.CODEX_EFFORT == {'low': 'low', 'medium': 'medium', 'high': 'high', 'max': 'xhigh'}
+    assert call.AUTH_MARKERS == ('invalid api key', 'please run /login', 'not logged in', 'oauth token has expired', '401 unauthorized', 'token has expired')
+    assert call.DROUGHT == frozenset({'quota_exhausted', 'rate_limited', 'outage'})
+    assert set(get_args_deep(config.Surface)) == set(call.SURFACES)
+    assert set(get_args_deep(config.HostName)) == {'claude', 'codex', 'copilot'}
+
 def test_caps_closed_sets_and_constants():
-    assert caps.CAPS == ('diagnosis', 'retry', 'infra', 'premise_bounce')
+    assert caps.CAPS == ('decisions', 'retry', 'infra', 'premise_bounce')
     assert caps.LEVELS == ('low', 'medium', 'high', 'max')
 
 def test_checkpoint_closed_sets_and_constants():
@@ -89,7 +100,7 @@ def test_journal_closed_sets_and_constants():
     assert dict(journal.EVENT_VERSIONS) == {'cap_consumed': 1, 'checkpoint': 1, 'effect_completion': 1, 'effect_intent': 1, 'signal': 1, 'state_transition': 1, 'timer_armed': 1, 'timer_fired': 1}
     assert {e.value for e in journal.EventType} == {'cap_consumed', 'checkpoint', 'effect_completion', 'effect_intent', 'signal', 'state_transition', 'timer_armed', 'timer_fired'}
     assert journal.ROLL_BYTES == 67108864
-    assert journal.SIGNAL_NAMES == frozenset({'author_invoked', 'checkpoint_push_failed', 'control_decision', 'dead_dependency', 'diagnosis', 'draft_confirmed', 'drain_halted', 'flake_detected', 'flake_released', 'harvest_failed', 'kill_applied', 'merge_conflict_facts', 'merge_red_streak', 'merge_tree_mismatch', 'provider_call_outcome', 'provider_cap_wait', 'recovery_alert', 'reject_arrival', 'reject_verdict', 'requisition_verdict', 'retro_failed', 'retro_prompt_spec_change_merged', 'retro_ticket_authored', 'rework_order', 'storm_breaker_trip', 'storm_occurrence', 'supersedes', 'ticket_intake', 'tombstone_auto_reopened', 'triage_pass', 'watcher_parse_failure'})
+    assert journal.SIGNAL_NAMES == frozenset({'author_invoked', 'checkpoint_push_failed', 'control_decision', 'dead_dependency', 'diagnosis', 'draft_confirmed', 'drain_halted', 'flake_detected', 'flake_released', 'harvest_failed', 'kill_applied', 'merge_conflict_facts', 'merge_red_streak', 'merge_tree_mismatch', 'provider_call_outcome', 'recovery_alert', 'reject_arrival', 'reject_verdict', 'requisition_verdict', 'retro_failed', 'retro_prompt_spec_change_merged', 'retro_ticket_authored', 'rework_order', 'storm_breaker_trip', 'storm_occurrence', 'subagent_call_closed', 'supersedes', 'ticket_intake', 'tombstone_auto_reopened', 'triage_pass', 'watcher_parse_failure'})
     assert journal.TERMINAL_STATES == frozenset({'abandoned', 'already_satisfied', 'gate_failed', 'infra_error', 'invalid_artifact', 'merged', 'premise_failed', 'rejected', 'timeout'})
 
 def test_llm_closed_sets_and_constants():
@@ -108,10 +119,8 @@ def test_notify_closed_sets_and_constants():
     assert notify.NOTIFY_TIMEOUT_S == 30.0
 
 def test_providers_closed_sets_and_constants():
-    assert {k: ident(x) for k, x in providers.ADAPTERS.items()} == {'claude': 'ClaudeAdapter', 'codex': 'CodexAdapter'}
     assert providers.FAILURE_MARKERS == (('quota_exhausted', ('quota exhausted', 'usage limit reached', 'out of extra usage')), ('rate_limited', ('rate limit', 'too many requests')), ('outage', ('service unavailable', 'internal server error', 'stream disconnected', 'at capacity')), ('model_error', ('model unavailable', 'model not found', 'model is not supported')))
     assert set(get_args_deep(providers.FailureClass)) == {'auth_error', 'model_error', 'outage', 'quota_exhausted', 'rate_limited', 'unclassified'}
-    assert providers.PREFLIGHT_TIMEOUT_S == 120.0
     assert providers.WRITING_SURFACES == frozenset({'implement'})
 
 def test_requisition_closed_sets_and_constants():
@@ -149,7 +158,8 @@ def test_storm_closed_sets_and_constants():
     assert storm.STORM_THRESHOLD == 5
 
 def test_thresh_closed_sets_and_constants():
-    assert thresh.SPILL_WAIT_SECONDS == 60
+    assert thresh.PROVIDER_CALL_OUTCOME == 'provider_call_outcome'
+    assert thresh._COUNTED == frozenset({'outage', 'unclassified'})
 
 def test_tickets_closed_sets_and_constants():
     assert set(get_args_deep(tickets.Level)) == {'high', 'low', 'max', 'medium'}

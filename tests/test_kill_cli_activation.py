@@ -231,9 +231,8 @@ def exercise_live_cli_kill(root, monkeypatch):
         monkeypatch.setattr(checkout.journal, "append", recorded)
         composed.append(writer)
         return writer
-    monkeypatch.setattr(runner, "ProviderLLM", lambda *args, **kwargs: llm)
-    monkeypatch.setattr(runner, "bind", composed_bind)
-    assert entry.main(["drain"], cwd=root, env=ENV, clock=Clock(), pipeline=runner.pipeline) == runner.EXIT_TICKET
+    assert entry.main(["drain"], cwd=root, env=ENV, clock=Clock(),
+                      pipeline=lambda c: composed_bind(c, llm)) == runner.EXIT_TICKET
     assert len(controls) == len(composed) == 1
     assert llm.calls == llm.aborts == llm.cancels == 1
     assert dispatch_cancelled == [False], "dispatch cancelled before composed executor abort"

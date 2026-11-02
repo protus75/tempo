@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from tempo import backlog, runner, triage
-from tempo.checkout import Checkout, Refusal, call_timeout
+from tempo.checkout import Checkout, Refusal
 from tempo.config import ConfigError, snapshot_config
 from tempo.daemon import DaemonTasks, HeartbeatCycle, TicketWriter, WorkerFailureObserver
 from tempo.control import protected_cleanup
@@ -20,8 +20,6 @@ from tempo.journal import EventType
 from tempo.lockfile import Lockfile
 from tempo.merge import AdmissionBoundary
 from tempo.mergequeue import ConflictHandoff
-from tempo.providers import ProviderLLM
-from tempo.providers import ProviderSetupError
 from tempo.journal import JournalCorruption
 from tempo.seams import ExecutableNotFound
 from tempo.redact import Redactor
@@ -78,12 +76,12 @@ class Serve:
     def __init__(self, checkout: Checkout, *, config_path: Path | None = None,
                  read: Callable[[str], str | None],
                  stems: Callable[[], Iterable[str]],
-                 prepare=runner.prepare_pipeline, signals: Callable | None = None,
+                 prepare, llm, signals: Callable | None = None,
                  failure: Callable[[BaseException], None] | None = None) -> None:
         from tempo.__main__ import build_daemon_core, build_notifications
 
         self.read, self.stems, self.signals = read, stems, signals
-        self.prepare = prepare
+        self.prepare, self.llm = prepare, llm
         self.config_path = config_path
         self.writers: dict[str, TicketWriter] = {}
         self.queue = None
@@ -98,7 +96,7 @@ class Serve:
         self.stopper = self.observer = self.checkpoint = None
         self.responses = tuple(Responsiveness() for _ in range(4))
         self.log = EngineLog(checkout.config.state_dir / "engine.log",
-                             Redactor.from_config(checkout.config, checkout.env), checkout.clock)
+                             Redactor({}), checkout.clock)
         self.failure = failure or (lambda exc: self.log.event("worker_failure", error=str(exc)))
         self.notifications = build_notifications(checkout, config_path=config_path, log=self.log)
 
@@ -123,10 +121,6 @@ class Serve:
                 try:
                     return await callback(ticket)
                 finally:
-                    latest = next((e.body for e in reversed(local.journal.read())
-                                   if e.type == EventType.STATE_TRANSITION and e.ticket == ticket.stem), {})
-                    if 'provider_drought' in latest:
-                        self.core.scheduler.update(ticket)
                     if (not callback.continuations and not any(
                             context is callback.ctx and stem in callback.queue.pending
                             for stem, context in callback.queue.contexts.items())):
@@ -170,14 +164,6 @@ class Serve:
         projection = self.control.projection
         if projection.kill_requested:
             self.stop()
-        if ticket.stem not in self.writers and not self.stopping and self.control.providers.active:
-            from tempo.config import load_config
-            snapshot = load_config(self.config_path, cwd=self.checkout.repo)
-            tier, _ = runner.capability(ticket, self.checkout.journal.read())
-            drought = self.control.providers.drought(snapshot, tier, 'implement')
-            if drought:
-                self.control.providers.park(ticket.stem, drought)
-                return False
         return (not self.stopping and projection.pause_id is None
                 and (self.control.admission is None
                      or self.control.admission in projection.released_hold_ids)
@@ -281,12 +267,7 @@ class Serve:
                 triage.report_intake(c)
                 if not self.box.pending():
                     return
-                llm = ProviderLLM(c.config, exec_=c.exec_, fs=c.fs, env=c.env, cwd=c.repo,
-                                  timeout=call_timeout(c.config), session=self.control.providers)
-                problems = await llm.preflight() if self.control.providers.active else []
-                if problems:
-                    raise ProviderSetupError('; '.join(problems))
-                await triage.triage_pass(c, llm)
+                await triage.triage_pass(c, self.llm)
         while True:
             await response.wait(poll())
             await response.wait(self.checkout.sleep(SERVE_POLL_S))
@@ -381,7 +362,7 @@ class Serve:
                     # belong to this lifetime's cleanup, not another worker failure.
                     if not self.stopping and not self.control.projection.kill_requested:
                         pending_failure = exc
-                        code = (2 if isinstance(exc, (ConfigError, Refusal, ProviderSetupError,
+                        code = (2 if isinstance(exc, (ConfigError, Refusal,
                                                      JournalCorruption, ExecutableNotFound)) else 1)
                     self.stop()
                     raise
@@ -429,7 +410,7 @@ class Serve:
                 self.stop()
             except Exception as exc:
                 self.log.event("serve_failed", error=str(exc))
-                code = (2 if isinstance(exc, (ConfigError, Refusal, ProviderSetupError,
+                code = (2 if isinstance(exc, (ConfigError, Refusal,
                                              JournalCorruption, ExecutableNotFound)) else 1)
                 self.stop()
             cleanup = asyncio.create_task(self.control.apply_kill(self.cleanup)
@@ -447,7 +428,6 @@ class Serve:
         finally:
             try:
                 await protected_cleanup(asyncio.create_task(self.notifications.close()))
-                await protected_cleanup(asyncio.create_task(self.control.providers.close()))
             finally:
                 try:
                     self.control.retire()
@@ -459,10 +439,10 @@ class Serve:
 async def serve(checkout: Checkout, *, config_path: Path | None = None,
                 read: Callable[[str], str | None] | None = None,
                 stems: Callable[[], Iterable[str]] | None = None,
-                prepare=runner.prepare_pipeline, signals: Callable | None = None,
+                prepare, llm, signals: Callable | None = None,
                 failure: Callable[[BaseException], None] | None = None) -> int:
     from tempo.__main__ import build_serve
 
     owner = build_serve(checkout, config_path=config_path, read=read, stems=stems,
-                        prepare=prepare, signals=signals, failure=failure)
+                        prepare=prepare, llm=llm, signals=signals, failure=failure)
     return await owner.run()

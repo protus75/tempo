@@ -151,7 +151,6 @@ def test_status_production_provenance(tmp_path, monkeypatch, capsys):
 @pytest.mark.parametrize("populated", [False, True])
 def test_status_preserves_sections_and_is_write_free(tmp_path, monkeypatch, capsys, populated):
     from tempo.effects import Effects
-    from tempo.providers import ProviderLLM
     from tempo.seams import CommandNotifications
 
     c, writer, _, _ = rig(tmp_path)
@@ -188,7 +187,6 @@ def test_status_preserves_sections_and_is_write_free(tmp_path, monkeypatch, caps
     monkeypatch.setattr(Lockfile, "acquire", forbidden)
     monkeypatch.setattr(Effects, "run", forbidden)
     monkeypatch.setattr(FakeLLM, "call", forbidden)
-    monkeypatch.setattr(ProviderLLM, "call", forbidden)
     monkeypatch.setattr(CommandNotifications, "notify", forbidden)
     monkeypatch.setattr(Retro, "__call__", forbidden)
     monkeypatch.setattr(runner, "bind", forbidden)

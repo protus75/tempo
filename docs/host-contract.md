@@ -7,7 +7,7 @@ Foreign process-state adoption is excluded.
 ## Copyable configuration
 
 Copy this YAML to `config.yaml` at the host checkout root and edit the models,
-paths, package and checks for your host. `--config <path>` selects another file;
+paths and checks for your host. `--config <path>` selects another file;
 otherwise the invocation cwd selects `config.yaml`. The loader uses PyYAML
 `safe_load`, refuses unknown fields and validates strict types (paths accept
 strings). These check commands and merge strategies are host choices, not engine
@@ -16,16 +16,12 @@ presets. Loading this example does not run its commands or contact a provider.
 ```yaml host-example
 schema_version: 1
 state_dir: .tempo
-providers:
-  - name: codex
-    kind: cli
-    package: '@openai/codex' # pnpm package used by provider preflight
-    # auth: OPENAI_API_KEY # environment-variable NAME; omit for ambient CLI login
+hosts: # subagent models per host; review is pinned to a model outside models_by_tier
+  codex:
     models_by_tier: {low: host-model, medium: host-model, high: host-model, max: host-model}
-    limits: {concurrency: 1}
-routing:
-  - {tier: medium, surface: review, candidates: [{provider: codex}]}
-  - {tier: medium, surface: implement, candidates: [{provider: codex, model: host-model}]}
+    pins: {review: host-review-model}
+orchestrator:
+  models: {codex: host-orchestrator-model} # every host here needs a hosts entry, and the reverse
 review:
   mechanical: # argv lists, never shell commands; choose your host's checks
     - {code: host-test, argv: [uv, run, pytest, -q], trigger: always, severity: hard}
@@ -55,33 +51,30 @@ entire default block. This inventory follows `tempo/config.py`.
 
 ```yaml config-fields
 Config:
-  required: [schema_version, state_dir, providers, routing, review, merge, engine_plane_safety_inventory]
+  required: [schema_version, state_dir, hosts, orchestrator, review, merge, engine_plane_safety_inventory]
   defaults:
     worktree_root: unset
-    routing_default_tier: medium
     scheduler: {max_unmerged: 2}
-    caps: {diagnosis: 6, retry: 6, premise_bounce: 2, infra: 6, quarantine: 5, poison: 2}
+    caps: {decisions: 6, retry: 6, premise_bounce: 2, infra: 6, quarantine: 5, poison: 2}
     circuit_breaker: {k: 3, cooldown_minutes: 10}
-    drain: {max_runtime_hours: 12, max_ticket_minutes: 90}
+    drain: {max_runtime_hours: 12}
+    tickets: {max_minutes: 90}
     box_policy: {failure_report: confirmed, retro_finding: confirmed, override_report: draft, suggestion: draft, bug_report_self_diagnosed: confirmed, bug_report_player_repro: confirmed, bug_report_player_no_repro: draft}
     notify: unset
     report_inbox: unset
     context_files: []
-Provider:
-  required: [name, kind, models_by_tier, limits]
-  defaults: {auth: unset, package: unset}
 ModelsByTier:
   required: [low, medium, high, max]
   defaults: {}
-Limits:
-  required: [concurrency]
-  defaults: {quota_window_minutes: 60}
-Route:
-  required: [tier, surface, candidates]
-  defaults: {}
-Candidate:
-  required: [provider]
-  defaults: {model: unset}
+Host:
+  required: [models_by_tier]
+  defaults: {pins: {}, quota_window_minutes: 60}
+Orchestrator:
+  required: [models]
+  defaults: {session: {max_tickets: 5, max_minutes: 240}}
+OrchestratorSession:
+  required: []
+  defaults: {max_tickets: 5, max_minutes: 240}
 Review:
   required: []
   defaults: {mechanical: [], surfaces: [], trigger_map: {}, gate_severity: {}}
@@ -105,40 +98,39 @@ Scheduler:
   defaults: {max_unmerged: 2}
 Caps:
   required: []
-  defaults: {diagnosis: 6, retry: 6, premise_bounce: 2, infra: 6, quarantine: 5, poison: 2}
+  defaults: {decisions: 6, retry: 6, premise_bounce: 2, infra: 6, quarantine: 5, poison: 2}
 CircuitBreaker:
   required: []
   defaults: {k: 3, cooldown_minutes: 10}
 Drain:
   required: []
-  defaults: {max_runtime_hours: 12, max_ticket_minutes: 90}
+  defaults: {max_runtime_hours: 12}
+Tickets:
+  required: []
+  defaults: {max_minutes: 90}
 ```
 
 ```yaml config-values
 tier: [low, medium, high, max]
 severity: [hard, soft]
-kind: [api, cli]
 trigger: [always, path-prefix-list]
 strategy: [regenerate, union]
 start_state: [draft, confirmed]
 box_row: [failure_report, retro_finding, override_report, suggestion, bug_report_self_diagnosed, bug_report_player_repro, bug_report_player_no_repro]
 ```
 
-`schema_version` must be the integer 1, not a boolean or string. `kind: api`
-is currently refused: use `cli`; Implement requires a CLI even when API support
-eventually ships. Every CLI requires a nonempty `package` despite its unset model
-default. Shipped runtime adapters are `claude` and `codex`; the loader accepts
-other names but provider setup refuses names without an adapter. `auth` names an
-environment variable, never a literal secret. Count fields are integers at
-least 1, and retry must not exceed
-diagnosis. Providers, routing, route candidates, argv and strategy paths are
-nonempty lists where declared. Notify requires a nonblank executable and
-NUL-free strings.
+`schema_version` must be the integer 1, not a boolean or string. Count fields
+are integers at least 1, and retry must not exceed decisions. Argv and strategy
+paths are nonempty lists where declared. Notify requires a nonblank executable
+and NUL-free strings.
 
-Candidates name declared providers and are ordered primary-until-pressure;
-absent `model` selects `models_by_tier[tier]`. Non-review surfaces fall back to
-the review routing row. Surface names and host check codes are strings; engine
-gate overrides use engine codes. `trigger` is `always` or a path-prefix list.
+Tempo runs no agent CLI: every model call is a subagent of the host's VS Code
+chat. `hosts` names each host (`claude`, `codex`, `copilot`) and its subagent
+models. A surface's model is its `pins` entry, else `models_by_tier[tier]`.
+`pins.review` is required and must not appear in `models_by_tier`, so a model
+never reviews its own work. Every host in `hosts` needs an `orchestrator.models`
+entry, and the reverse. Two model ids that render the same agent name are
+refused. Host check codes are strings; engine gate overrides use engine codes. `trigger` is `always` or a path-prefix list.
 Regenerate requires argv; union accepts no argv and only resolves append-only
 conflicts. A conflict path must match exactly one strategy, and regenerated
 paths must be outside the ticket fence; otherwise resolve through Rework with a
@@ -175,9 +167,9 @@ schema. Every future version bump must ship its migration step.
 Engine-owned `<!-- tempo:core begin -->` and `<!-- tempo:core end -->` lines
 delimit the managed conduct block; the remainder is project-owned content.
 Engine process wins over host content. Do not hand-edit the core: `tempo core`
-inserts or refreshes it, then commit the routed files. Routed candidates select
-CLAUDE.md for provider name `claude`, AGENTS.md otherwise, deduplicated;
-unrouted provider declarations do not select files.
+inserts or refreshes it, then commit the selected files. Each configured host
+selects its instruction file: `claude` CLAUDE.md, `codex` AGENTS.md, `copilot`
+.github/copilot-instructions.md, deduplicated.
 First adoption with zero marker-like text inserts the block before every
 original byte. Refresh preserves prefix and suffix bytes without decoding them.
 Partial, duplicate, reversed, inline or stray marker text refuses; repair to
@@ -231,12 +223,11 @@ The minimal seams in `tempo/seams.py` are:
   explicit required env and timeout (None means unbounded). Each child uses
   start_new_session; timeout and outer cancellation use the same group kill and
   wait helper. `kill_group(pgid)` is synchronous SIGKILL signal-not-reap; run
-  owns reaping. `on_spawn` publishes the pgid, provider call return clears it.
+  owns reaping. `on_spawn` publishes the pgid.
   `on_stdout_line` includes the EOF tail; consumer failure stops delivery but
   drains capture, attaches process_capture and raises after reap. Unwind retains
   timeout/cancellation type. ExecutableNotFound names the missing binary: install
-  it or fix child PATH. Prompts are spooled files connected by stdin_path, never
-  argv elements. No stdin_path means devnull.
+  it or fix child PATH. No stdin_path means devnull.
 - `write(path, data)` fsyncs a temporary file and atomically replaces the target;
   `replace(src, dst)` atomically replaces; `publish(path, data)` durably publishes
   without overwriting an existing destination.
@@ -245,9 +236,8 @@ The minimal seams in `tempo/seams.py` are:
   returns rc/stdout/stderr on success. Nonzero, timeout, missing executable or
   OS errors raise NotificationFailed: fix argv/PATH and retry pending evidence.
 
-Non-LLM children inherit the parent environment minus every configured provider
-key; only the serving LLM gets its own key. Active-work and notification
-executors are separate; abort targets the executor that spawned active work.
+Children inherit the parent environment: no config field names a provider key.
+Active-work and notification executors are separate; abort targets the executor that spawned active work.
 
 ## Instance custody
 
@@ -263,7 +253,7 @@ State dir owns journal, box queue, quarantine ledgers, attempt spools, engine
 log and heartbeat. Decisions and tombstones are committed under
 `tickets/decisions/`, so dedup memory travels with the repo. Config is re-read at
 each dispatch cycle: watcher/debounce in daemon, re-parsing in scaffold verbs;
-routing, severity and ceiling edits take effect without restart.
+model, severity and ceiling edits take effect without restart.
 
 ## Report-inbox contract
 

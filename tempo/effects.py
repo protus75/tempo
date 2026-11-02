@@ -35,8 +35,16 @@ class Effects:
         if key in self._completed:
             return self._recorded(key)
 
-        self._journal.append(EventType.EFFECT_INTENT, {}, ticket=ticket, key=key)
-        result = await action()
+        self.begin(key, ticket=ticket)
+        return self.complete(key, await action(), ticket=ticket, served=served)
+
+    def begin(self, key: str, *, ticket: str | None, body: dict[str, Any] | None = None) -> None:
+        """Journal the intent; a subagent call (tempo/call.py) begins in `prepare` and completes in `submit`."""
+        self._journal.append(EventType.EFFECT_INTENT, body or {}, ticket=ticket, key=key)
+
+    def complete(self, key: str, result: Any, *, ticket: str | None,
+                 served: Callable[[Any], dict[str, Any]] | None = None,
+                 extra: dict[str, Any] | None = None) -> Any:
         try:
             encoded = json.dumps(result)
         except (TypeError, ValueError) as exc:
@@ -46,7 +54,7 @@ class Effects:
         # Return the decoded record, not `result`, so executing and replaying yield identical values.
         recorded = json.loads(encoded)
         body = {"result": recorded} if served is None else {"result": recorded, "served": served(recorded)}
-        self._journal.append(EventType.EFFECT_COMPLETION, body, ticket=ticket, key=key)
+        self._journal.append(EventType.EFFECT_COMPLETION, {**body, **(extra or {})}, ticket=ticket, key=key)
         self._completed.add(key)
         return recorded
 

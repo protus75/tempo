@@ -183,17 +183,15 @@ def test_runner_applies_soft_severity_from_config(tmp_path):
             """\
             schema_version: 1
             state_dir: .tempo
-            providers:
-              - name: claude
-                kind: cli
-                package: test-cli
-                models_by_tier: {low: a, medium: b, high: c, max: d}
-                limits: {concurrency: 1}
-            routing:
-              - {tier: medium, surface: implement, candidates: [{provider: claude, model: b}]}
             review:
               gate_severity: {scope_fence: soft}
             merge: {}
+            hosts:
+              claude:
+                models_by_tier: {low: a, medium: b, high: c, max: c}
+                pins: {review: d}
+            orchestrator:
+              models: {claude: d}
             engine_plane_safety_inventory: []
             """
         )

@@ -13,7 +13,7 @@ import pytest
 import yaml
 from pydantic import BaseModel
 
-from tempo import config, gates, hostfiles, providers, seams, tickets
+from tempo import config, gates, hostfiles, seams, tickets
 from tempo.lockfile import Lockfile, LockHeld
 from tempo.mergequeue import MergeQueue
 
@@ -55,7 +55,7 @@ def test_host_contract_example_loads(tmp_path):
     assert cfg.schema_version == 1
     assert cfg.state_dir == tmp_path / ".tempo"
     assert cfg.worktree_root == cfg.state_dir / "worktrees"
-    assert cfg.providers[0].package == "@openai/codex"
+    assert cfg.hosts["codex"].pins == {"review": "host-review-model"}
     assert cfg.review.mechanical[0].argv == ["uv", "run", "pytest", "-q"]
     assert cfg.review.mechanical[1].trigger == ["src/"]
     assert cfg.review.surfaces[0].rules_doc == Path("docs/review.md")
@@ -80,7 +80,6 @@ def test_host_contract_schema_coverage(tmp_path):
     for name, annotation in (("tier", config.Tier), ("severity", config.Severity),
                              ("start_state", config.StartState), ("box_row", config.BoxRow)):
         assert values[name] == list(get_args(annotation))
-    assert values["kind"] == list(get_args(config.Provider.model_fields["kind"].annotation))
     assert values["strategy"] == ["regenerate", "union"]
     assert values["trigger"] == ["always", "path-prefix-list"]
     raw = yaml.safe_load(block("host-example"))
@@ -96,11 +95,11 @@ def test_host_contract_schema_coverage(tmp_path):
         with pytest.raises(config.ConfigError, match="missing") as exc:
             load(tmp_path, candidate)
         assert exc.value.key == key
-    for key, value in (("routing_default_tier", "unknown"), ("unknown", 1)):
+    for key, value in (("unknown", 1),):
         with pytest.raises(config.ConfigError):
             load(tmp_path, {**raw, key: value})
-    for change in (lambda r: r["providers"][0].pop("package"),
-                   lambda r: r["providers"][0].update(kind="api"),
+    for change in (lambda r: r["hosts"]["codex"]["pins"].pop("review"),
+                   lambda r: r["orchestrator"]["models"].update(claude="x"),
                    lambda r: r["merge"]["strategies"][1].update(argv=["x"]),
                    lambda r: r["review"]["mechanical"][0].update(severity="warn")):
         candidate = copy.deepcopy(raw)
@@ -112,12 +111,11 @@ def test_host_contract_schema_coverage(tmp_path):
     assert cfg.worktree_root == tmp_path / "work" and cfg.report_inbox == tmp_path / "inbox"
     assert cfg.context_files == [Path("docs/a.md")]
     assert cfg.box_policy == {**config.BOX_POLICY_DEFAULTS, "failure_report": "draft"}
-    assert cfg.providers[0].auth is None and cfg.providers[0].limits.quota_window_minutes == 60
+    assert cfg.hosts["codex"].quota_window_minutes == 60
     assert cfg.notify is None
-    assert providers.resolve(cfg, "medium", "review").model == cfg.providers[0].models_by_tier.medium
     assert load(tmp_path, {**raw, "state_dir": str(tmp_path / "absolute")}).state_dir == tmp_path / "absolute"
-    mentions("Every explicit null", "primary-until-pressure",
-             "Relative `state_dir`", "remain Path values as written", "use `cli`")
+    mentions("Every explicit null", "never reviews its own work",
+             "Relative `state_dir`", "remain Path values as written", "runs no agent CLI")
 
 
 def test_host_contract_migration_and_managed_ownership(tmp_path):
@@ -157,15 +155,14 @@ def test_host_contract_migration_and_managed_ownership(tmp_path):
         with pytest.raises(hostfiles.MarkerCorruption):
             hostfiles.render(corrupt)
     cfg = load(tmp_path)
-    assert providers.routed_conduct_paths(cfg, tmp_path) == (tmp_path / "AGENTS.md",)
-    cfg.providers[0].name = "claude"
-    for route in cfg.routing:
-        route.candidates[0].provider = "claude"
-    assert providers.routed_conduct_paths(cfg, tmp_path) == (tmp_path / "CLAUDE.md",)
+    assert hostfiles.conduct_paths(cfg, tmp_path) == (tmp_path / "AGENTS.md",)
+    cfg.hosts = {"claude": cfg.hosts["codex"], "copilot": cfg.hosts["codex"]}
+    assert hostfiles.conduct_paths(cfg, tmp_path) == (
+        tmp_path / "CLAUDE.md", tmp_path / ".github/copilot-instructions.md")
     assert "tempo core" in hostfiles.classify_core(None).paved_road
     inventory(tickets.Frontmatter, yaml.safe_load(block("ticket-fields")))
     mentions("additive-only", "no frontmatter schema migration mechanism", "validates the full candidate", "original bytes",
-             "before any write", "no-op", "zero marker-like text", "without decoding", "unrouted")
+             "before any write", "no-op", "zero marker-like text", "without decoding", "deduplicated")
 
 
 def test_host_contract_seam_inventory(tmp_path):
@@ -184,12 +181,9 @@ def test_host_contract_seam_inventory(tmp_path):
     assert "await _kill_and_wait(proc)" in source
     assert "kill_group(proc.pid)" in inspect.getsource(seams._kill_and_wait)
     assert "SIGKILL" in inspect.getsource(seams.SubprocessExec.kill_group)
-    assert "stdin_path=prompt" in inspect.getsource(providers.CliAdapter.invoke)
     assert "fsync" in inspect.getsource(seams.LocalFileSystem.write)
     assert "os.replace" in inspect.getsource(seams.LocalFileSystem.write)
     cfg = load(tmp_path)
-    cfg.providers[0].auth = "SECRET"
-    assert providers.child_env({"PATH": "/bin", "SECRET": "value"}, cfg) == {"PATH": "/bin"}
 
     class Queue(MergeQueue):
         async def _command(self, ticket, attempt, argv, code, name):
@@ -210,7 +204,7 @@ def test_host_contract_seam_inventory(tmp_path):
         response = (0, "SECRET", "")
 
         async def run(self, argv, *, cwd, env, timeout):
-            assert cwd == tmp_path and "SECRET" not in env and timeout == 120
+            assert cwd == tmp_path and timeout == 120
             if isinstance(self.response, Exception):
                 raise self.response
             return self.response

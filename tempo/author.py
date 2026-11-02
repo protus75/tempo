@@ -240,7 +240,7 @@ async def author(checkout: Checkout, driver: Driver, box: Box, message: Message,
         text = stamp(provisional, "state", state)
         reviewed = await review_ticket(
             driver, repo=checkout.repo, stem=artifact.stem, text=text, specs_dir=SPECS_DIR,
-            tier=checkout.config.routing_default_tier, stem_slot="author", run_seq=pass_no,
+            tier=spec.meta.tier, stem_slot="author", run_seq=pass_no,
             attempt=message.seq, call_seq=call_seq)
         reviewed_text = text
         reviewed_state = state
@@ -259,7 +259,7 @@ async def author(checkout: Checkout, driver: Driver, box: Box, message: Message,
                      render=render_author, review=review_candidate,
                      terminal_findings=frozenset({"requisition_rma"})), None,
             ticket=None, run_seq=pass_no, attempt=message.seq, workspace=checkout.repo,
-            tier=checkout.config.routing_default_tier, effort=spec.meta.effort, stuck_budget=AUTHOR_STUCK_S)
+            tier=spec.meta.tier, effort=spec.meta.effort, stuck_budget=AUTHOR_STUCK_S)
     except BaseException:
         author_gate.cleanup()
         raise

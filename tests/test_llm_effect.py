@@ -20,17 +20,14 @@ CONFIG = textwrap.dedent(
     """\
     schema_version: 1
     state_dir: .tempo
-    providers:
-      - name: claude
-        kind: cli
-        package: test-cli
-        auth: TEMPO_TEST_KEY
-        models_by_tier: {low: haiku, medium: sonnet, high: opus, max: opus}
-        limits: {concurrency: 1}
-    routing:
-      - {tier: medium, surface: implement, candidates: [{provider: claude, model: sonnet}]}
     review: {}
     merge: {}
+    hosts:
+      claude:
+        models_by_tier: {low: sonnet, medium: sonnet, high: sonnet, max: sonnet}
+        pins: {review: opus}
+    orchestrator:
+      models: {claude: opus}
     engine_plane_safety_inventory: [specs/]
     """
 )
@@ -183,8 +180,10 @@ def test_ticketless_surface_keys_on_its_surface_name(tmp_path):
 
 
 def test_recorded_result_is_scrubbed_before_the_completion_and_the_return(tmp_path):
+    from tempo.redact import Redactor
     llm = FakeLLM([served(f"leak {SECRET}"), served(echo_json("hi"))])
     driver, state_dir = build(tmp_path, llm)
+    driver.redactor = driver.spool._redactor = Redactor({"TEMPO_TEST_KEY": SECRET})
     run(driver)
 
     journal_bytes = b"".join(p.read_bytes() for p in (state_dir / "journal").glob("*.jsonl"))

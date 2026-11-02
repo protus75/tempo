@@ -29,14 +29,14 @@ def test_fold_counts_only_named_cap_and_stem_across_ticket_revisions(tmp_path):
     j.append(EventType.STATE_TRANSITION, {"to": "infra_error"}, ticket="red")
     events = j.read()
     config = Caps(infra=4, retry=2)
-    assert CAPS == ("diagnosis", "retry", "infra", "premise_bounce")
+    assert CAPS == ("decisions", "retry", "infra", "premise_bounce")
     assert draws(events, "red", "infra") == 3
     assert draws(events, "red", "retry") == 1
     assert draws(events, "other", "infra") == 1
     assert remaining(config, events, "red", "infra") == 1
     assert spent(config, events, "red") is None
-    j.append(EventType.CAP_CONSUMED, {"cap": "diagnosis"}, ticket="red")
-    assert spent(Caps(diagnosis=1, retry=1, infra=3), j.read(), "red") == "diagnosis"
+    j.append(EventType.CAP_CONSUMED, {"cap": "decisions"}, ticket="red")
+    assert spent(Caps(decisions=1, retry=1, infra=3), j.read(), "red") == "decisions"
     assert spent_reason("infra") == "infra cap spent"
 
 
@@ -87,7 +87,7 @@ def test_crashing_implement_draws_infra_immediately_before_terminal(repo):
     infra = next(i for i, e in enumerate(events) if e.type == EventType.CAP_CONSUMED and e.body["cap"] == "infra")
     assert infra < terminal
     assert events[infra].body == {"cap": "infra", "ticket_sha": sha}
-    assert all((e.type == EventType.CAP_CONSUMED and e.body["cap"] == "diagnosis")
+    assert all((e.type == EventType.CAP_CONSUMED and e.body["cap"] == "decisions")
                or (e.type == EventType.SIGNAL and e.body.get("signal") == "diagnosis")
                or (e.key is not None and ("/diagnose/" in e.key or e.key.endswith("/diagnosis")))
                for e in events[infra + 1:terminal])
@@ -114,9 +114,9 @@ def test_other_terminals_draw_only_when_infra(repo, monkeypatch, outcome, expect
         assert next(e.body for e in events if e.type == EventType.CAP_CONSUMED) == {"cap": "infra", "ticket_sha": sha}
 
 
-@pytest.mark.parametrize("cap", ["infra", "diagnosis"])
+@pytest.mark.parametrize("cap", ["infra", "decisions"])
 def test_spent_cap_parks_even_with_retry_remaining(tmp_path, capsys, cap):
-    retry_limit = 1 if cap == "diagnosis" else 3
+    retry_limit = 1 if cap == "decisions" else 3
     root = make_root(tmp_path, f"caps: {{{cap}: 2, retry: {retry_limit}}}\n")
     commit_ticket(root, "red", confirmed())
     j = journal(root)

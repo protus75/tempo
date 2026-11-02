@@ -9,14 +9,6 @@ VALID = textwrap.dedent(
     """\
     schema_version: 1
     state_dir: .tempo
-    providers:
-      - name: claude
-        kind: cli
-        package: test-cli
-        models_by_tier: {low: haiku, medium: sonnet, high: opus, max: opus}
-        limits: {concurrency: 1}
-    routing:
-      - {tier: medium, surface: implement, candidates: [{provider: claude, model: sonnet}]}
     review:
       mechanical:
         - {code: pytest, argv: [uv, run, pytest], trigger: always, severity: hard}
@@ -30,6 +22,12 @@ VALID = textwrap.dedent(
       strategies:
         - {paths: [uv.lock], strategy: regenerate, argv: [uv, lock]}
         - {paths: [CHANGELOG.md], strategy: union}
+    hosts:
+      claude:
+        models_by_tier: {low: haiku, medium: sonnet, high: sonnet, max: sonnet}
+        pins: {review: opus}
+    orchestrator:
+      models: {claude: opus}
     engine_plane_safety_inventory: [specs/, tempo/gates.py, config.yaml]
     """
 )
@@ -58,21 +56,18 @@ def test_valid_config_loads_from_cwd_with_shipped_defaults(tmp_path):
     assert cfg.schema_version == SCHEMA_VERSION == 1
     assert cfg.state_dir == tmp_path / ".tempo"
     assert cfg.worktree_root == tmp_path / ".tempo" / "worktrees"
-    assert cfg.providers[0].auth is None
-    assert cfg.providers[0].limits.quota_window_minutes == 60
-    assert cfg.routing[0].candidates[0].provider == "claude"
-    assert cfg.routing_default_tier == "medium"
+    assert cfg.hosts["claude"].quota_window_minutes == 60 and cfg.hosts["claude"].pins == {"review": "opus"}
     assert cfg.review.mechanical[0].trigger == "always"
     assert cfg.review.mechanical[1].trigger == ["tempo/"]
     assert cfg.merge.strategies[0].argv == ["uv", "lock"]
     assert cfg.scheduler.max_unmerged == 2
     assert cfg.caps.model_dump() == {
-        "diagnosis": 6, "retry": 6, "premise_bounce": 2, "infra": 6, "quarantine": 5, "poison": 2,
+        "decisions": 6, "retry": 6, "premise_bounce": 2, "infra": 6, "quarantine": 5, "poison": 2,
     }
     assert cfg.circuit_breaker.k == 3
     assert cfg.circuit_breaker.cooldown_minutes == 10
     assert cfg.drain.max_runtime_hours == 12
-    assert cfg.drain.max_ticket_minutes == 90
+    assert cfg.tickets.max_minutes == 90
     assert cfg.box_policy == {
         "failure_report": "confirmed",
         "retro_finding": "confirmed",
@@ -108,7 +103,7 @@ def test_explicit_values_override_defaults_and_partial_blocks_keep_the_rest(tmp_
     )
     cfg = load_config(write(tmp_path, text), cwd=tmp_path)
     assert cfg.worktree_root == Path("/tmp/wt")
-    assert cfg.caps.retry == 4 and cfg.caps.diagnosis == 6
+    assert cfg.caps.retry == 4 and cfg.caps.decisions == 6
     assert cfg.box_policy["failure_report"] == "draft"
     assert cfg.box_policy["suggestion"] == "draft"
     assert cfg.notify == ["notify-send", "tempo"]
@@ -117,7 +112,7 @@ def test_explicit_values_override_defaults_and_partial_blocks_keep_the_rest(tmp_
 
 
 @pytest.mark.parametrize(
-    "key", ["schema_version", "state_dir", "providers", "routing", "review", "merge",
+    "key", ["schema_version", "state_dir", "hosts", "orchestrator", "review", "merge",
             "engine_plane_safety_inventory"],
 )
 def test_missing_required_top_level_key_is_refused_naming_it(tmp_path, key):
@@ -131,9 +126,10 @@ def test_missing_required_top_level_key_is_refused_naming_it(tmp_path, key):
 
 
 def test_missing_nested_required_key_names_full_path(tmp_path):
-    err = refusal(tmp_path, edit(VALID, "limits: {concurrency: 1}", "limits: {}"))
-    assert err.key == "providers.0.limits.concurrency"
-    assert "providers.0.limits.concurrency" in str(err)
+    err = refusal(tmp_path, edit(VALID, "models_by_tier: {low: haiku, medium: sonnet, high: sonnet, max: sonnet}",
+                                 "models_by_tier: {low: haiku, medium: sonnet, high: sonnet}"))
+    assert err.key == "hosts.claude.models_by_tier.max"
+    assert "hosts.claude.models_by_tier.max" in str(err)
 
 
 def test_unknown_key_is_refused_naming_it(tmp_path):
@@ -177,23 +173,30 @@ def test_non_integer_or_negative_schema_version_is_refused(tmp_path, value):
     assert err.key == "schema_version"
 
 
-def test_api_provider_is_refused_until_its_client_ships(tmp_path):
-    # Route a read-only surface: routing implement to api is refused earlier, by its own rule.
-    text = edit(VALID, "surface: implement", "surface: review")
-    err = refusal(tmp_path, edit(text, "kind: cli", "kind: api\n    auth: ANTHROPIC_API_KEY"))
-    assert err.key == "providers.0.kind"
-    assert "kind: cli" in str(err)
-
-
-def test_routing_candidate_must_name_a_declared_provider(tmp_path):
-    err = refusal(tmp_path, edit(VALID, "{provider: claude, model: sonnet}", "{provider: gpt, model: x}"))
-    assert err.key == "routing.0.candidates.0.provider"
-    assert "gpt" in str(err)
-
-
-def test_retry_cap_above_diagnosis_cap_is_refused(tmp_path):
+def test_retry_cap_above_decisions_cap_is_refused(tmp_path):
     err = refusal(tmp_path, VALID + "caps: {retry: 7}\n")
     assert err.key == "caps.retry"
+
+
+def test_hosts_resolve_each_surface_with_review_pinned_outside_the_tiers(tmp_path):
+    from tempo.call import resolve_model
+    cfg = load_config(None, cwd=write(tmp_path, VALID).parent)
+    assert resolve_model(cfg, "claude", "implement", "low") == "haiku"
+    assert resolve_model(cfg, "claude", "review", "low") == "opus"
+    assert cfg.orchestrator.session.max_tickets == 5 and cfg.orchestrator.session.max_minutes == 240
+
+
+@pytest.mark.parametrize("old,new,key", [
+    ("pins: {review: opus}", "pins: {review: sonnet}", "hosts.claude.pins.review"),
+    ("pins: {review: opus}", "pins: {}", "hosts.claude.pins.review"),
+    ("models: {claude: opus}", "models: {claude: opus, codex: x}", "orchestrator.models.codex"),
+    ("models: {claude: opus}", "models: {copilot: opus}", "orchestrator.models.copilot"),
+    ("pins: {review: opus}", "pins: {review: opus, diagnose: opus}", "hosts.claude.pins.diagnose"),
+    ("pins: {review: opus}", "pins: {review: opus}\n    effort: high", "hosts.claude.effort"),
+    ("{low: haiku, medium: sonnet, high: sonnet", "{low: s/1, medium: s:1, high: sonnet", "hosts.claude"),
+])
+def test_host_config_refusals_name_the_key(tmp_path, old, new, key):
+    assert refusal(tmp_path, edit(VALID, old, new)).key == key
 
 
 def test_closed_vocabularies_refuse_unknown_values(tmp_path):
@@ -201,7 +204,6 @@ def test_closed_vocabularies_refuse_unknown_values(tmp_path):
         "review.mechanical.1.severity"
     )
     assert refusal(tmp_path, VALID + "box_policy: {bogus_row: draft}\n").key == "box_policy.bogus_row"
-    assert refusal(tmp_path, VALID + "routing_default_tier: huge\n").key == "routing_default_tier"
 
 
 def test_union_strategy_takes_no_argv_and_regenerate_requires_one(tmp_path):
@@ -232,7 +234,7 @@ def test_provider_backstop_never_undercuts_a_ticket_stuck_budget(tmp_path):
     from tempo.checkout import call_timeout
     write(tmp_path, VALID)
     cfg = load_config(None, cwd=tmp_path)
-    assert call_timeout(cfg) == cfg.drain.max_ticket_minutes * 60.0
+    assert call_timeout(cfg) == cfg.tickets.max_minutes * 60.0
 
 
 @pytest.mark.parametrize("argv", ['[]', 'notify-send', '[3]', '[true]', '[{}]', '[""]',

@@ -32,7 +32,6 @@ from tempo.git import Git, GitError
 from tempo.hostfiles import CORE_TEMPLATE, CoreDriftGate, committed_core
 from tempo.journal import EventType, run_seq
 from tempo.llm import LLM
-from tempo.providers import child_env
 from tempo.seams import ExecutableNotFound, FileSystem, ProcessExec
 from tempo.specs import RenderOverBound, Spec, load_spec, render
 from tempo.tickets import _HEADING, TICKET_FILE, TICKETS_DIR, Ticket, ticket_path
@@ -615,7 +614,7 @@ async def _gather_bug(ctx: StageContext, ticket: Ticket, evidence: Evidence, *, 
     async def execute(root: Path, name: str) -> RegressionRun:
         try:
             rc, out, err = await ctx.exec_.run(list(ticket.regression), cwd=root,
-                                              env=child_env(ctx.env, ctx.config),
+                                              env=dict(ctx.env),
                                               timeout=ticket.stuck_minutes * 60.0)
         except (TimeoutError, ExecutableNotFound, OSError) as error:
             rc, out, err = None, "", f"regression execution failed: {error}"
@@ -657,7 +656,7 @@ async def gather_evidence(
 ) -> Evidence:
     stem = ticket.stem
     worktree = ctx.worktree(stem)
-    env = child_env(ctx.env, ctx.config)  # verification never inherits a provider key (section 6)
+    env = dict(ctx.env)
     results = []
     red: list[tuple[int, list[str]]] = []
     timeout = ticket.stuck_minutes * 60.0
@@ -1009,19 +1008,12 @@ async def run_stages(ctx: StageContext, ticket: Ticket) -> StagesRun:
                 finally:
                     boundary.active = None
         except Exception as exc:
-            from tempo.providers import ProviderCallError, ProviderDrought
-            from tempo.driver import ProviderDroughtResult
-            if isinstance(exc, ProviderDrought):
-                result = ProviderDroughtResult(outcome='infra_error', artifact=None, findings=[],
-                                               provider_drought=exc.record)
-            elif isinstance(exc, ProviderCallError):
-                findings = await ctx.driver.provider_failure(exc, owner=ticket.stem, ticket=ticket.stem,
-                    sequence=run.attempt, surface='requisition_review', workspace=ctx.worktree(ticket.stem))
-                meter = ctx.driver.detector.call if ctx.driver.detector else None
-                result = StageResult(outcome='infra_error', artifact=None, findings=findings,
-                    provider=meter.identity[0] if meter else None, model=meter.identity[1] if meter else None)
-            else:
+            from tempo.providers import ProviderCallError
+            if not isinstance(exc, ProviderCallError):
                 raise
+            findings = await ctx.driver.provider_failure(exc, owner=ticket.stem, ticket=ticket.stem,
+                sequence=run.attempt, surface='requisition_review', workspace=ctx.worktree(ticket.stem))
+            result = StageResult(outcome='infra_error', artifact=None, findings=findings)
         run.results[stage] = result
         if result.outcome != "ok":
             break

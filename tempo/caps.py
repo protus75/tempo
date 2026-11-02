@@ -4,10 +4,9 @@ from collections.abc import Iterable
 
 from tempo.config import Caps, Config, ConfigSnapshot
 from tempo.journal import Event, EventType, Journal
-from tempo.providers import ProviderSetupError, resolve
 from tempo.tickets import Ticket
 
-CAPS = ("diagnosis", "retry", "infra", "premise_bounce")
+CAPS = ("decisions", "retry", "infra", "premise_bounce")
 LEVELS = ("low", "medium", "high", "max")
 
 
@@ -65,19 +64,13 @@ def capability(ticket: Ticket, events: Iterable[Event]) -> tuple[str, str]:
     return rung["tier"], rung["effort"]
 
 
-def next_rung(config: Config | ConfigSnapshot, tier: str, effort: str) -> dict[str, str] | None:
-    """Move to the next distinct Implement model, then increase effort."""
-    def model(level: str) -> tuple[str, str] | None:
-        try:
-            served = resolve(config, level, "implement")
-        except ProviderSetupError:
-            return None
-        return served.provider.name, served.model
+def next_rung(config: Config | ConfigSnapshot, host: str, tier: str, effort: str) -> dict[str, str] | None:
+    """Move to the host's next distinct Implement model, then increase effort."""
+    from tempo.call import resolve_model
 
-    current = model(tier)
+    current = resolve_model(config, host, "implement", tier)
     for higher in LEVELS[LEVELS.index(tier) + 1:]:
-        candidate = model(higher)
-        if candidate is not None and candidate != current:
+        if resolve_model(config, host, "implement", higher) != current:
             return {"tier": higher, "effort": effort}
     if effort != "max":
         return {"tier": tier, "effort": LEVELS[LEVELS.index(effort) + 1]}

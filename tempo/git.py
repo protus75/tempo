@@ -52,6 +52,17 @@ class Git:
     async def status_porcelain(self, dir: Path) -> str:
         return await self._run(dir, "status", "--porcelain")
 
+    async def changed_paths(self, dir: Path) -> list[str]:
+        """Every changed or untracked path, untracked directories expanded; a rename lists both paths."""
+        tokens = iter((await self._run(dir, "status", "--porcelain=v1", "-z", "--untracked-files=all")).split("\0"))
+        paths = []
+        for token in tokens:
+            if token:
+                paths.append(token[3:])
+                if token[0] in "RC":
+                    paths.append(next(tokens))
+        return paths
+
     async def ls_files(self, dir: Path) -> list[str]:
         return (await self._run(dir, "ls-files")).splitlines()
 

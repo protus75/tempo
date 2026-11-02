@@ -68,36 +68,24 @@ class ModelsByTier(_Strict):
     max: str
 
 
-class Limits(_Strict):
-    concurrency: Count
+HostName = Literal["claude", "codex", "copilot"]
+Surface = Literal["implement", "review", "requisition_review", "triage", "author", "retro"]
+
+
+class Host(_Strict):
+    models_by_tier: ModelsByTier
+    pins: dict[Surface, str] = {}
     quota_window_minutes: Count = 60
 
 
-class Provider(_Strict):
-    name: str
-    kind: Literal["api", "cli"]
-    auth: str | None = None
-    package: str | None = None  # a `cli` provider's pnpm package: the preflight reads its latest release
-    models_by_tier: ModelsByTier
-    limits: Limits
-
-    @model_validator(mode="after")
-    def _cli_declares_its_package(self) -> "Provider":
-        if self.kind == "cli" and not self.package:
-            raise ValueError(f"cli provider {self.name!r} declares no `package`; name its pnpm package"
-                             " (section 6 provider preflight)")
-        return self
+class OrchestratorSession(_Strict):
+    max_tickets: Count = 5
+    max_minutes: Count = 240
 
 
-class Candidate(_Strict):
-    provider: str
-    model: str | None = None  # absent: the provider's models_by_tier[tier] serves (section 6)
-
-
-class Route(_Strict):
-    tier: Tier
-    surface: str
-    candidates: Annotated[list[Candidate], Field(min_length=1)]
+class Orchestrator(_Strict):
+    models: Annotated[dict[HostName, str], Field(min_length=1)]
+    session: OrchestratorSession = OrchestratorSession()
 
 
 class MechanicalCheck(_Strict):
@@ -142,7 +130,7 @@ class Scheduler(_Strict):
 
 
 class Caps(_Strict):
-    diagnosis: Count = 6
+    decisions: Count = 6
     retry: Count = 6
     premise_bounce: Count = 2
     infra: Count = 6
@@ -157,22 +145,25 @@ class CircuitBreaker(_Strict):
 
 class Drain(_Strict):
     max_runtime_hours: Count = 12
-    max_ticket_minutes: Count = 90
+
+
+class Tickets(_Strict):
+    max_minutes: Count = 90
 
 
 class Config(_Strict):
     schema_version: int
     state_dir: PathField
     worktree_root: PathField | None = None
-    providers: Annotated[list[Provider], Field(min_length=1)]
-    routing: Annotated[list[Route], Field(min_length=1)]
-    routing_default_tier: Tier = "medium"
+    hosts: dict[HostName, Host]
+    orchestrator: Orchestrator
     review: Review
     merge: Merge
     scheduler: Scheduler = Scheduler()
     caps: Caps = Caps()
     circuit_breaker: CircuitBreaker = CircuitBreaker()
     drain: Drain = Drain()
+    tickets: Tickets = Tickets()
     engine_plane_safety_inventory: list[str]  # no shipped default: absence fails closed (section 12)
     box_policy: dict[BoxRow, StartState] = Field(default_factory=lambda: dict(BOX_POLICY_DEFAULTS))
     notify: Argv | None = None
@@ -377,37 +368,40 @@ def _from_validation(path: Path, e: ValidationError) -> ConfigError:
 
 
 def _check_references(path: Path, cfg: Config) -> None:
-    kinds = {p.name: p.kind for p in cfg.providers}
-    # Before the api refusal: routing Implement to api stays wrong after the api client ships.
-    for i, route in enumerate(cfg.routing):
-        for j, cand in enumerate(route.candidates):
-            if route.surface == "implement" and kinds.get(cand.provider, "cli") != "cli":
-                raise ConfigError(
-                    path,
-                    f"routing.{i}.candidates.{j}.provider",
-                    f"implement must be served by a kind: cli provider ({cand.provider!r} is"
-                    f" {kinds[cand.provider]}); an api provider returns text and cannot edit the worktree",
-                )
-    for i, provider in enumerate(cfg.providers):
-        if provider.kind == "api":
-            raise ConfigError(
-                path,
-                f"providers.{i}.kind",
-                "kind: api is refused until the api client ships (section 6); use kind: cli",
-            )
-    declared = {p.name for p in cfg.providers}
-    for i, route in enumerate(cfg.routing):
-        for j, cand in enumerate(route.candidates):
-            if cand.provider not in declared:
-                raise ConfigError(
-                    path,
-                    f"routing.{i}.candidates.{j}.provider",
-                    f"{cand.provider!r} is not a declared provider; declare it under providers or use one of"
-                    f" {sorted(declared)}",
-                )
-    if cfg.caps.retry > cfg.caps.diagnosis:
+    _check_hosts(path, cfg)
+    if cfg.caps.retry > cfg.caps.decisions:
         raise ConfigError(
             path,
             "caps.retry",
-            f"{cfg.caps.retry} exceeds caps.diagnosis ({cfg.caps.diagnosis}); set retry at or below it",
+            f"{cfg.caps.retry} exceeds caps.decisions ({cfg.caps.decisions}); set retry at or below it",
         )
+
+
+def _check_hosts(path: Path, cfg: Config) -> None:
+    """Section 4.4.2: each reachable host resolves, keeps review off its tier models, and names agents uniquely."""
+    from tempo.call import SURFACES, agent_name
+
+    for host in cfg.orchestrator.models:
+        if host not in cfg.hosts:
+            raise ConfigError(path, f"orchestrator.models.{host}",
+                              f"host {host!r} has no hosts.{host} entry; add one or remove it from orchestrator.models")
+    for host, entry in cfg.hosts.items():
+        if host not in cfg.orchestrator.models:
+            raise ConfigError(path, f"hosts.{host}",
+                              f"host {host!r} has no orchestrator.models.{host} entry; add the orchestrator model")
+        tiers = set(entry.models_by_tier.model_dump().values())
+        review = entry.pins.get("review")
+        if review is None or review in tiers:
+            raise ConfigError(path, f"hosts.{host}.pins.review",
+                              "review must be pinned to a model not in models_by_tier, so a model never reviews"
+                              " its own work; pin the host's strongest model and cap models_by_tier below it")
+        names: dict[str, str] = {}
+        models = {*tiers, *entry.pins.values()}
+        for surface in SURFACES:
+            for model in models:
+                for effort in ("low", "medium", "high", "max"):
+                    name = agent_name(host, surface, model, effort)
+                    if names.setdefault(name, model) != model:
+                        raise ConfigError(path, f"hosts.{host}",
+                                          f"models {names[name]!r} and {model!r} both render agent {name!r};"
+                                          " use model ids that differ in [A-Za-z0-9.-]")

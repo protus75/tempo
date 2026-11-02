@@ -61,17 +61,14 @@ def setup(tmp_path: Path, responses: list) -> tuple[Path, Driver, FakeLLM]:
     (tmp_path / "context.txt").write_text("context")
     (tmp_path / "config.yaml").write_text("""schema_version: 1
 state_dir: .state
-providers:
-  - name: fake
-    kind: cli
-    package: test-cli
-    auth: FAKE_KEY
-    models_by_tier: {low: m, medium: m, high: m, max: m}
-    limits: {concurrency: 1}
-routing:
-  - {tier: high, surface: review, candidates: [{provider: fake}]}
 review: {}
 merge: {}
+hosts:
+  claude:
+    models_by_tier: {low: sonnet, medium: sonnet, high: sonnet, max: sonnet}
+    pins: {review: opus}
+orchestrator:
+  models: {claude: opus}
 engine_plane_safety_inventory: [context.txt]
 """)
     llm = FakeLLM(responses)

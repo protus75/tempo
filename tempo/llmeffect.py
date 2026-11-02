@@ -25,13 +25,8 @@ async def llm_call(
     effects: Effects, llm: LLM, req: LLMRequest, redactor: Redactor, *, ticket: str | None,
     stem: str, run_seq: int, attempt: int, call_seq: int
 ) -> dict[str, Any]:
+    async def action():
+        result = await llm.call(req)
+        return asdict(replace(result, text=redactor.scrub(result.text)))
     key = llm_key(stem, run_seq, req.surface, attempt, call_seq)
-    async def record(operation):
-        async def action():
-            result = await operation()
-            return asdict(replace(result, text=redactor.scrub(result.text)))
-        return await effects.run(action, key=key, ticket=ticket, served=_served)
-    # A replay has no admission, wait, meter, outcome or cooldown side effect.
-    if key in effects._completed or not hasattr(llm, 'admitted_call'):
-        return await record(lambda: llm.call(req))
-    return await llm.admitted_call(req, ticket=ticket, call_key=key, effect=record)
+    return await effects.run(action, key=key, ticket=ticket, served=_served)

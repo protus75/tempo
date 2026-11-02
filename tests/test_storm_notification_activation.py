@@ -552,8 +552,11 @@ def test_production_startup_recovers_without_new_arrival(admission_context, star
     if startup == "daemon":
         journal = Journal(ctx.config.state_dir, clock)
         checkout = Checkout(ctx.repo, ctx.config, ctx.env, ctx.exec_, ctx.git, journal, ctx.fs, clock)
+        async def prepare(local):
+            pytest.fail("startup prepared a dispatch")
         core = cli.build_daemon_core(checkout, read=lambda _: None, debounce=0,
-            quarantined=lambda: set(), drought_parked=lambda: set(), completed_unmerged=lambda: 0)
+            quarantined=lambda: set(), drought_parked=lambda: set(), completed_unmerged=lambda: 0,
+            prepare=prepare)
         before = snapshot(ctx.config.state_dir)
         assert len(trips(journal)) == 0
         assert snapshot(ctx.config.state_dir) == before

@@ -18,17 +18,6 @@ from tests.test_drain import Clock, commit_ticket, confirmed, make_root
 
 def root_with_box(tmp_path: Path) -> tuple[Path, Box]:
     root = make_root(tmp_path)
-    config = root.joinpath("config.yaml")
-    config.write_text(config.read_text().replace("  - {tier: medium, surface: implement, candidates: [{provider: claude}]}", """  - {tier: medium, surface: implement, candidates: [{provider: claude}]}
-  - {tier: low, surface: author, candidates: [{provider: claude}]}
-  - {tier: medium, surface: author, candidates: [{provider: claude}]}
-  - {tier: high, surface: author, candidates: [{provider: claude}]}
-  - {tier: max, surface: author, candidates: [{provider: claude}]}
-  - {tier: low, surface: review, candidates: [{provider: claude}]}
-  - {tier: medium, surface: review, candidates: [{provider: claude}]}
-  - {tier: high, surface: review, candidates: [{provider: claude}]}
-  - {tier: max, surface: review, candidates: [{provider: claude}]}
-"""))
     return root, Box(root / ".tempo" / "state" / "box", LocalFileSystem())
 
 
@@ -85,8 +74,7 @@ def requisition_reply(verdict: str, findings: list | None = None) -> str:
 
 
 def run(root: Path, monkeypatch, llm: FakeLLM) -> int:
-    monkeypatch.setattr("tempo.__main__.ProviderLLM", lambda *args, **kwargs: llm)
-    return main(["triage"], cwd=root, env=ENV, clock=Clock())
+    return main(["triage"], cwd=root, env=ENV, clock=Clock(), llm=llm)
 
 
 def subjects(root: Path) -> list[str]:

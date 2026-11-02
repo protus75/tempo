@@ -206,7 +206,6 @@ def test_core_classifier_is_pure(monkeypatch):
     from tempo.git import Git
     from tempo.journal import Journal
     from tempo.llm import FakeLLM
-    from tempo.providers import ProviderLLM
     from tempo.seams import SubprocessExec
 
     samples = [None, b"Project", hostfiles.render(b"Project"),
@@ -220,7 +219,7 @@ def test_core_classifier_is_pure(monkeypatch):
                              (Path, ("read_bytes", "read_text", "write_bytes", "write_text", "open")),
                              (builtins, ("open",)), (SubprocessExec, ("run", "kill_group")),
                              (asyncio, ("create_subprocess_exec", "create_subprocess_shell")),
-                             (Git, ("_call",)), (FakeLLM, ("call",)), (ProviderLLM, ("call",)),
+                             (Git, ("_call",)), (FakeLLM, ("call",)),
                              (Journal, ("append",))):
             for name in names:
                 pure.setattr(owner, name, forbidden)

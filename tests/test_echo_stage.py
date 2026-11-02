@@ -17,16 +17,14 @@ CONFIG = textwrap.dedent(
     """\
     schema_version: 1
     state_dir: .tempo
-    providers:
-      - name: fake
-        kind: cli
-        package: test-cli
-        models_by_tier: {low: fake, medium: fake, high: fake, max: fake}
-        limits: {concurrency: 1}
-    routing:
-      - {tier: medium, surface: echo, candidates: [{provider: fake, model: fake}]}
     review: {}
     merge: {}
+    hosts:
+      claude:
+        models_by_tier: {low: sonnet, medium: sonnet, high: sonnet, max: sonnet}
+        pins: {review: opus}
+    orchestrator:
+      models: {claude: opus}
     engine_plane_safety_inventory: [specs/]
     """
 )

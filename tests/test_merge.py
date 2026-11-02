@@ -524,7 +524,7 @@ def test_core_activation_first_adoption_merge(repo, mode, omitted):
     from tempo import hostfiles, stages
     from tests.test_cli import core_config
     from tests.test_mergequeue import approve
-    core_config(repo, [('medium', 'implement', ['claude', 'codex']), ('medium', 'review', ['claude', 'codex'])])
+    core_config(repo, ['claude', 'codex'])
     original = {'CLAUDE.md': b'# Claude project\r\nno final newline', 'AGENTS.md': b'# Codex project\n'}
     for path, data in original.items():
         (repo / path).write_bytes(data)

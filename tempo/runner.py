@@ -4,7 +4,6 @@ single-writer lockfile, and the stage-dispatch seam, all in the one process hold
 Exit codes (section 18): 0 merged, 1 a non-ok ticket terminal, 2 an engine-plane refusal.
 """
 
-import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import assert_never
@@ -14,16 +13,14 @@ from tempo.artifacts import Finding, Harvest, StageResult
 from tempo.box import BOX_DIR
 from tempo.storm import arrival_id
 from tempo.backlog import dead_dependents, settled_dependencies, ticket_state
-from tempo.checkout import SPECS_DIR, Checkout, Refusal, call_timeout
+from tempo.checkout import SPECS_DIR, Checkout, Refusal
 from tempo.caps import capability, consume, next_rung, spent, spent_reason
-from tempo.config import snapshot_config
 from tempo.driver import Driver
 from tempo.effects import Effects
 from tempo.journal import TERMINAL_STATES, Dispatch as JournalDispatch, Event, EventType, dispatch_of
 from tempo.llm import LLM
 from tempo.lockfile import Lockfile
 from tempo.merge import compose_pipeline, merge
-from tempo.providers import ProviderLLM
 from tempo.reconcile import reconcile
 from tempo.stages import (DiagnosisMaterial, StageContext, diagnose, harvest, harvest_orphan, run_stages,
                           run_wall_seconds, write_diagnosis)
@@ -40,50 +37,6 @@ IDENTICAL_K = 3
 # The stage seam: drives the validated ticket through the stages and merge, journals the run's single
 # terminal transition (section 11), and returns that terminal state.
 Dispatch = Callable[[Ticket], Awaitable[str]]
-
-
-Pipeline = Callable[[Checkout], Dispatch]
-
-
-def pipeline(checkout: Checkout) -> Dispatch:
-    """Preparation belongs to the outer lock-held run/drain lifetime."""
-    class PreparedDispatch:
-        callback = None
-        snapshot = None
-        stages = None
-        async def prepare(self):
-            snapshot = snapshot_config(checkout.control.load_config())
-            if self.callback is not None and snapshot == self.snapshot:
-                return
-            local = replace(checkout, config=snapshot)
-            self.callback = await prepare_pipeline(local)
-            self.stages = self.callback.stages
-            self.snapshot = snapshot
-        async def __call__(self, ticket):
-            if self.callback is None:
-                await self.prepare()
-            try:
-                return await self.callback(ticket)
-            finally:
-                self.callback = None
-        async def abort_current(self):
-            if self.callback is not None:
-                await self.callback.abort_current()
-    return PreparedDispatch()
-
-
-async def prepare_pipeline(checkout: Checkout) -> Dispatch:
-    """Preflight this checkout's providers before constructing any stage consumers."""
-    llm = ProviderLLM(checkout.config, exec_=checkout.exec_, fs=checkout.fs, env=checkout.env,
-                      cwd=checkout.repo, timeout=call_timeout(checkout.config),
-                      session=checkout.control.providers)
-    problems = await llm.preflight()
-    for notice in llm.preflight_notices:
-        print(f"tempo: provider preflight notice: {notice}", file=sys.stderr)
-    if problems:
-        raise Refusal("provider preflight failed: " + "; ".join(problems),
-                      "fix each named provider, then run the same command again (section 6 provider preflight)")
-    return bind(checkout, llm)
 
 
 def bind(checkout: Checkout, llm: LLM) -> Dispatch:
@@ -127,11 +80,9 @@ async def drive(ctx: StageContext, ticket: Ticket, *, admission=None, consume_ha
     if result.outcome != "already_satisfied":
         await harvest_failure(ctx, ticket, attempt=run.attempt, stage=stage, outcome=result.outcome,
                               findings=result.findings)
-    drought = getattr(result, 'provider_drought', None)
-    quota = any(f.code == 'quota_exhausted' for f in result.findings)
-    if drought is not None or quota:
+    if any(f.code == 'quota_exhausted' for f in result.findings):
         return await failure_terminal(ctx, ticket, outcome=result.outcome, stage=stage,
-            findings=result.findings, attempt=run.attempt, provider_drought=drought)
+            findings=result.findings, attempt=run.attempt)
     if result.outcome in {"infra_error", "timeout"}:
         ticket_sha = await ctx.git.rev_parse(ctx.repo, f"HEAD:{ticket_path(ticket.stem)}")
         consume(ctx.driver.journal, ticket.stem, "infra", ticket_sha)
@@ -141,14 +92,6 @@ async def drive(ctx: StageContext, ticket: Ticket, *, admission=None, consume_ha
         ticket_sha = await ctx.git.rev_parse(ctx.repo, f"HEAD:{ticket_path(ticket.stem)}")
         consume(ctx.driver.journal, ticket.stem, "premise_bounce", ticket_sha)
     diagnosed = not over_bound
-    if (diagnosed and isinstance(ctx.driver.llm, ProviderLLM)
-            and not spent(ctx.config.caps, ctx.driver.journal.read(), ticket.stem)
-            and ctx.worktree(ticket.stem).exists()):
-        tier, _ = capability(ticket, ctx.driver.journal.read())
-        refusal = ctx.driver.llm.session.drought(ctx.config, tier, 'diagnose')
-        if refusal:
-            return await failure_terminal(ctx, ticket, outcome='infra_error', stage=stage,
-                findings=result.findings, attempt=run.attempt, provider_drought=refusal.record)
     if diagnosed:
         worktree = ctx.worktree(ticket.stem)
         mechanical = None if worktree.exists() else "workspace gone"
@@ -167,7 +110,7 @@ async def drive(ctx: StageContext, ticket: Ticket, *, admission=None, consume_ha
             lessons = []
         else:
             ticket_sha = await ctx.git.rev_parse(ctx.repo, f"HEAD:{ticket_path(ticket.stem)}")
-            consume(ctx.driver.journal, ticket.stem, "diagnosis", ticket_sha)
+            consume(ctx.driver.journal, ticket.stem, "decisions", ticket_sha)
             harvest_path = ctx.repo / "tickets" / ticket.stem / "attempts" / str(run.attempt) / "harvest.json"
             harvest_artifact = Harvest.model_validate_json(harvest_path.read_text()) if harvest_path.is_file() else None
             record_path = ctx.repo / "tickets" / ticket.stem / "run.md"
@@ -209,19 +152,13 @@ async def harvest_failure(ctx: StageContext, ticket: Ticket, *, attempt: int, st
 async def failure_terminal(ctx: StageContext, ticket: Ticket, *, outcome: str, stage: str,
                            findings: list[Finding], attempt: int, reworked: StageResult | None = None,
                            rework_requested: bool = False, mechanical: bool = False,
-                           verdict: str | None = None, provider_drought: dict | None = None) -> str:
+                           verdict: str | None = None) -> str:
     """Preserve the producing terminal, then retire a published split before wiping and returning."""
     from tempo.rework import ReworkOrder
     from tempo.storm import storm_producer
 
     reason = ",".join(sorted({f.code for f in findings})) or outcome
     terminal = {"to": outcome, "stage": stage, "reason": reason}
-    if provider_drought is None and reworked is not None:
-        provider_drought = getattr(reworked, 'provider_drought', None)
-    if provider_drought is not None:
-        terminal.update(to='infra_error', reason='provider_drought', provider_drought=provider_drought)
-        rework_requested, verdict = False, None
-        outcome = 'infra_error'
     history = ctx.driver.journal.read()
     tier, effort = capability(ticket, history)
     split = False
@@ -270,7 +207,8 @@ async def failure_terminal(ctx: StageContext, ticket: Ticket, *, outcome: str, s
         if spent(ctx.config.caps, history, ticket.stem) or verdict in {"reject", "abandon-human"}:
             dispatch = "reject_queue"
         elif verdict == "escalate" or (verdict is not None and identical and not rework_requested):
-            rung = next_rung(ctx.config, tier, effort)
+            # The scripted runner has no session host; it ladders on the first configured host.
+            rung = next_rung(ctx.config, next(iter(ctx.config.hosts)), tier, effort)
             if rung is None:
                 dispatch = "reject_queue"
             else:
@@ -289,7 +227,7 @@ async def failure_terminal(ctx: StageContext, ticket: Ticket, *, outcome: str, s
             routed = bool(spent(ctx.config.caps, history, ticket.stem))
         case _:
             assert_never(terminal_dispatch)
-    if not mechanical and not split and routed and provider_drought is None:
+    if not mechanical and not split and routed:
         terminal["routed"] = "reject_queue"
     ctx.driver.journal.append(EventType.STATE_TRANSITION, terminal, ticket=ticket.stem)
     if split:
@@ -312,8 +250,8 @@ async def run_ticket(stem: str, checkout: Checkout, dispatch: Dispatch) -> int:
         await reconcile(checkout.journal, checkout.git, checkout.repo, checkout.config.worktree_root,
                         lambda orphan, attempt: harvest_orphan(checkout, orphan, attempt))
         if checkout.control is not None:
-            checkout.control.providers.timers.reconstruct()
-            checkout.control.providers.timers.fire_due()
+            checkout.control.timers.reconstruct()
+            checkout.control.timers.fire_due()
         if hasattr(dispatch, 'prepare'):
             await dispatch.prepare()
         from tempo.storm import storm_producer
@@ -321,23 +259,13 @@ async def run_ticket(stem: str, checkout: Checkout, dispatch: Dispatch) -> int:
         storm_producer(root=checkout.config.state_dir / BOX_DIR, fs=checkout.fs,
                        journal=checkout.journal, clock=checkout.clock).recover()
         ticket = await _admit(stem, checkout)
-        if checkout.control is not None:
-            tier, _ = capability(ticket, checkout.journal.read())
-            drought = checkout.control.providers.drought(checkout.config, tier, 'implement')
-            if drought:
-                checkout.control.providers.park(stem, drought)
-                return EXIT_TICKET
         checkout.journal.append(EventType.STATE_TRANSITION, {"to": "running"}, ticket=stem)
         terminal = await dispatch(ticket)
         if terminal not in TERMINAL_STATES:
             raise ValueError(f"stage seam returned {terminal!r}, not a terminal state {sorted(TERMINAL_STATES)}")
         return EXIT_MERGED if terminal == "merged" else EXIT_TICKET
     finally:
-        try:
-            if checkout.control is not None:
-                await checkout.control.providers.close()
-        finally:
-            lock.release()
+        lock.release()
 
 
 async def verdict(stem: str, checkout: Checkout, *, kill: bool) -> int:

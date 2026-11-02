@@ -46,7 +46,8 @@ async def graph(root, monkeypatch, **kwargs):
     rig.exec.reply = reply("decision")
     owner = serve.Serve(rig.checkout, read=lambda stem: (root / f"tickets/{stem}/ticket.md").read_text()
             if (root / f"tickets/{stem}/ticket.md").is_file() else None,
-        stems=lambda: (p.parent.name for p in (root / "tickets").glob("*/ticket.md")), **kwargs)
+        stems=lambda: (p.parent.name for p in (root / "tickets").glob("*/ticket.md")),
+        **{"prepare": rig.prepare, "llm": rig.llm, **kwargs})
     rig.owner = owner
     return rig
 
@@ -224,7 +225,8 @@ def test_serve_cli_uses_production_composition(root, monkeypatch):
         return await original(self)
     monkeypatch.setattr(serve.Serve, "run", run)
     monkeypatch.setattr(cli, "_serve_signals", lambda stop: (stop(), lambda: None)[1])
-    assert cli.main(["serve"], cwd=root, env=ENV) == 0
+    assert cli.main(["serve"], cwd=root, env=ENV) == 2
+    assert cli.main(["serve"], cwd=root, env=ENV, llm=FakeLLM([])) == 0
     assert len(built) == 1 and len(built[0].workers) == 4
     assert "tempo.serve" in import_closure(sources())
 
@@ -243,7 +245,7 @@ async def test_serve_holds_lock_through_cleanup(root, monkeypatch):
     await until(rig, owner.ready.is_set)
     with pytest.raises(LockHeld):
         contender.acquire()
-    other = serve.Serve(rig.checkout, read=owner.read, stems=owner.stems)
+    other = serve.Serve(rig.checkout, read=owner.read, stems=owner.stems, prepare=rig.prepare, llm=rig.llm)
     try:
         with pytest.raises(LockHeld):
             await other.run()
@@ -509,7 +511,7 @@ async def test_serve_signal_stop_and_restart_recovery(root, monkeypatch, mode):
     assert not any(e.body.get("kind") in {"control_decision", "kill_applied"} for e in rig.journal.read())
     calls, _, _ = script(monkeypatch)
     old = rig.owner
-    rig.owner = serve.Serve(rig.checkout, read=old.read, stems=old.stems)
+    rig.owner = serve.Serve(rig.checkout, read=old.read, stems=old.stems, prepare=rig.prepare, llm=rig.llm)
     restarted = asyncio.create_task(rig.owner.run())
     try:
         await until(rig, lambda: len(terminals(rig, "work")) == 2)
@@ -579,7 +581,7 @@ async def test_serve_suspended_run_cleanup_and_restart(root, monkeypatch, mode):
     assert rig.owner.writers["work"].continuations == {}
     assert retained.ctx.worktree("work").exists() and not terminals(rig, "work")
     old = rig.owner
-    rig.owner = serve.Serve(rig.checkout, read=old.read, stems=old.stems)
+    rig.owner = serve.Serve(rig.checkout, read=old.read, stems=old.stems, prepare=rig.prepare, llm=rig.llm)
     restarted = asyncio.create_task(rig.owner.run())
     try:
         await until(rig, lambda: len(calls) == 2 and calls[-1][-1] == 1)
@@ -730,7 +732,7 @@ async def test_serve_author_uses_shared_journal(root, monkeypatch):
         "  - {tier: max, surface: review, candidates: [{provider: claude}]}\n"))
     rig.checkout = replace(rig.checkout, config=load_config(None, cwd=root))
     old = rig.owner
-    rig.owner = serve.Serve(rig.checkout, read=old.read, stems=old.stems)
+    rig.owner = serve.Serve(rig.checkout, read=old.read, stems=old.stems, prepare=rig.prepare, llm=rig.llm)
     async def driving(self, stage, consumed, **kwargs):
         assert self.journal is self.effects._journal is rig.journal
         assert rig.owner.control.author_driver is self
@@ -923,7 +925,7 @@ async def start_admission(rig, monkeypatch):
         rig.owner = build(*args, **kwargs)
         return rig.owner
     monkeypatch.setattr(cli, "build_serve", built)
-    run = asyncio.create_task(serve.serve(rig.checkout, prepare=rig.prepare))
+    run = asyncio.create_task(serve.serve(rig.checkout, prepare=rig.prepare, llm=rig.llm))
     await until(rig, lambda: rig.owner.ready.is_set())
     return run
 
@@ -1469,7 +1471,8 @@ async def test_serve_reconciles_notifications_at_startup_and_poll(root, monkeypa
     finally:
         await finish(rig, run)
     prior = rig.owner
-    rig.owner = cli.build_serve(rig.checkout, read=prior.read, stems=prior.stems)
+    rig.owner = cli.build_serve(rig.checkout, read=prior.read, stems=prior.stems, prepare=rig.prepare,
+                                llm=rig.llm)
     restarted = asyncio.create_task(rig.owner.run())
     try:
         await until(rig, lambda: (rig.checkout.config.state_dir / "heartbeat").exists()
@@ -1542,7 +1545,8 @@ async def test_serve_failed_notify_backoff_and_restart(root, monkeypatch):
         await finish(rig, run)
     (root / "notify-fails").unlink()
     prior = rig.owner
-    rig.owner = cli.build_serve(rig.checkout, read=prior.read, stems=prior.stems)
+    rig.owner = cli.build_serve(rig.checkout, read=prior.read, stems=prior.stems, prepare=rig.prepare,
+                                llm=rig.llm)
     restarted = asyncio.create_task(rig.owner.run())
     try:
         await until(rig, lambda: len(notify_completions(rig)) == 1)

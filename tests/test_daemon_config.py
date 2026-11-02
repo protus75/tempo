@@ -59,20 +59,15 @@ caps: {retry: 4}
 box_policy: {failure_report: draft}
 """])
 def test_snapshot_preserves_all_validated_config_values(tmp_path, extras):
-    text = VALID.replace("[{provider: claude, model: sonnet}]",
-                         "[{provider: claude, model: sonnet}, {provider: claude}]")
-    if extras:
-        text = text.replace("kind: cli", "kind: cli\n    auth: PROVIDER_TOKEN")
-    put_config(tmp_path, text + extras)
+    put_config(tmp_path, VALID + extras)
     source = load_config(None, cwd=tmp_path)
     snapshot = snapshot_config(source)
     assert python_values(snapshot) == source.model_dump(mode="python")
     assert_detached(source, snapshot)
     assert snapshot.state_dir == tmp_path / ".tempo"
     assert snapshot.worktree_root == tmp_path / ("elsewhere" if extras else ".tempo/worktrees")
-    assert snapshot.providers[0].auth == ("PROVIDER_TOKEN" if extras else None)
-    assert snapshot.providers[0].limits.quota_window_minutes == 60
-    assert snapshot.routing[0].candidates[1].model is None
+    assert snapshot.hosts["claude"].quota_window_minutes == 60
+    assert snapshot.hosts["claude"].pins["review"] == "opus"
     assert snapshot.report_inbox == (tmp_path / "inbox" if extras else None)
     assert snapshot.notify == (("notify-send", "tempo") if extras else None)
     assert snapshot.context_files == ((Path("docs/first.md"), Path("docs/second.md")) if extras else ())
@@ -117,17 +112,16 @@ def test_snapshot_is_recursively_immutable_and_detached(tmp_path):
 
     refuse_mutation(snapshot)
     source.state_dir = Path("changed")
-    source.providers[0].models_by_tier.medium = "changed"
-    source.providers[0].limits.concurrency = 9
+    source.hosts["claude"].models_by_tier.medium = "changed"
+    source.hosts["claude"].pins["review"] = "changed"
     source.scheduler.max_unmerged = 8
-    source.routing[0].candidates[0].model = "changed"
     source.review.mechanical[0].argv.append("changed")
     source.review.mechanical[1].trigger.append("changed/")
     source.review.trigger_map["tempo/"].append("changed")
     del source.review.gate_severity["scope_fence"]
     source.box_policy["suggestion"] = "confirmed"
     source.merge.strategies.clear()
-    source.providers.clear()
+    source.hosts.clear()
     source.context_files.append(Path("changed"))
     assert python_values(snapshot) == expected
 
@@ -172,7 +166,7 @@ async def test_dispatch_captures_once_and_keeps_snapshot_until_completion(tmp_pa
     await started.wait()
     source.scheduler.max_unmerged = 99
     source.review.trigger_map["tempo/"].clear()
-    source.routing[0].candidates.clear()
+    source.hosts["claude"].pins.clear()
     put_config(tmp_path, VALID + "scheduler: {max_unmerged: 7}\n")
     release.set()
     assert await caller is terminal
@@ -193,15 +187,15 @@ async def test_next_dispatch_observes_valid_config_edits(tmp_path, tickets):
 
     admission = DaemonAdmission(snapshot_dispatch(lambda: load_config(None, cwd=tmp_path), bind))
     assert await admission.dispatch(tickets[0]) == "merged"
-    changed = VALID.replace("model: sonnet", "model: opus").replace(
+    changed = VALID.replace("pins: {review: opus}", "pins: {review: haiku-max}").replace(
         "gate_severity: {scope_fence: hard}", "gate_severity: {scope_fence: soft}")
-    put_config(tmp_path, changed + "drain: {max_ticket_minutes: 120}\nscheduler: {max_unmerged: 4}\n")
+    put_config(tmp_path, changed + "tickets: {max_minutes: 120}\nscheduler: {max_unmerged: 4}\n")
     assert await admission.dispatch(tickets[1]) == "merged"
     before, after = snapshots
     assert before is not after
-    assert (before.drain.max_ticket_minutes, after.drain.max_ticket_minutes) == (90, 120)
+    assert (before.tickets.max_minutes, after.tickets.max_minutes) == (90, 120)
     assert (before.scheduler.max_unmerged, after.scheduler.max_unmerged) == (2, 4)
-    assert (before.routing[0].candidates[0].model, after.routing[0].candidates[0].model) == ("sonnet", "opus")
+    assert (before.hosts["claude"].pins["review"], after.hosts["claude"].pins["review"]) == ("opus", "haiku-max")
     assert (before.review.gate_severity["scope_fence"], after.review.gate_severity["scope_fence"]) == ("hard", "soft")
     assert_idle(admission)
 
@@ -253,8 +247,8 @@ async def test_waiting_dispatch_captures_after_admission(tmp_path, tickets):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("invalid", [None, "bad: [", VALID + "notify: null\n",
     VALID.replace("schema_version: 1", "schema_version: 2"), VALID + "unknown: value\n",
-    VALID.replace("provider: claude", "provider: missing"),
-    VALID.replace("surface: implement", "surface: review").replace("kind: cli", "kind: api")])
+    VALID.replace("pins: {review: opus}", "pins: {review: sonnet}"),
+    VALID.replace("models: {claude: opus}", "models: {codex: opus}")])
 async def test_invalid_reload_never_binds_or_uses_stale_config(tmp_path, tickets, invalid):
     put_config(tmp_path)
     bound, called = [], []

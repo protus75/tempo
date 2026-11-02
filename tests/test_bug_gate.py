@@ -269,6 +269,9 @@ def test_bug_gate_check_wiring(ctx, monkeypatch, case):
 
 @pytest.mark.parametrize('failure', [False, True])
 def test_bug_gate_base_cleanup(ctx, monkeypatch, failure):
+    from tempo.redact import Redactor
+    ctx.driver.redactor = ctx.driver.spool._redactor = Redactor({"FAKE_KEY": SECRET})
+
     async def scenario():
         ticket = await bug_ready(ctx)
         branch = await ctx.git.rev_parse(ctx.repo, STEM)
@@ -278,7 +281,7 @@ def test_bug_gate_base_cleanup(ctx, monkeypatch, failure):
         async def execute(argv, **kw):
             calls.append((argv, kw))
             if argv == list(ticket.regression):
-                assert 'FAKE_KEY' not in kw['env'] and kw['env']['PATH'] == ctx.env['PATH']
+                assert kw['env']['PATH'] == ctx.env['PATH']
                 assert kw['timeout'] == ticket.stuck_minutes * 60.0
                 if failure and kw['cwd'] != ctx.worktree(STEM):
                     raise TimeoutError(SECRET)

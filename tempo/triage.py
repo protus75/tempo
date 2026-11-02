@@ -284,7 +284,7 @@ async def _settle_pass(checkout, driver, box, spec, history, pass_no):
         result = await driver.run(
             LlmStage(surface="triage", emits=TriageReply, gates=[], render=render_message), message,
             ticket=None, run_seq=message.seq, attempt=pass_no, workspace=checkout.repo,
-            tier=checkout.config.routing_default_tier, effort=spec.meta.effort, stuck_budget=TRIAGE_STUCK_S)
+            tier=spec.meta.tier, effort=spec.meta.effort, stuck_budget=TRIAGE_STUCK_S)
         if result.outcome != "ok":
             line = f"{message.id}: {result.outcome}; remains pending"
         else:
@@ -341,7 +341,7 @@ def report_intake(checkout: Checkout) -> Box:
                          journal=checkout.journal, clock=checkout.clock)
     box.recover()
     log = EngineLog(checkout.config.state_dir / "engine.log",
-                    Redactor.from_config(checkout.config, checkout.env), checkout.clock)
+                    Redactor({}), checkout.clock)
     ingest(box, root=checkout.repo, inbox=checkout.config.report_inbox,
            diagnostic=lambda error: log.event("report_intake_refused", error=error))
     return box

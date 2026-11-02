@@ -27,16 +27,14 @@ ENV = {
 
 CONFIG = """schema_version: 1
 state_dir: .tempo/state
-providers:
-  - name: claude
-    kind: cli
-    package: test-cli
-    models_by_tier: {low: m, medium: m, high: m, max: m}
-    limits: {concurrency: 1}
-routing:
-  - {tier: medium, surface: implement, candidates: [{provider: claude}]}
 review: {}
 merge: {}
+hosts:
+  claude:
+    models_by_tier: {low: sonnet, medium: sonnet, high: sonnet, max: sonnet}
+    pins: {review: opus}
+orchestrator:
+  models: {claude: opus}
 engine_plane_safety_inventory: [config.yaml]
 """
 
@@ -410,36 +408,25 @@ def test_retro_no_merge(root, capsys, completed_report):
 def test_retro_success(root, capsys, monkeypatch):
     from tempo import runner
     from tempo.llm import FakeLLM
-    from tempo.retro import Retro, project_window
+    from tempo.retro import project_window
     import tempo.__main__ as module
     llm = FakeLLM(['{"proposals": []}'])
-    config = root / "config.yaml"
-    config.write_text(config.read_text().replace("review: {}", "  - {tier: medium, surface: retro, candidates: [{provider: claude}]}\nreview: {}"))
-    seen = []
-    from tempo.providers import ProviderLLM
-    async def preflight(self):
-        contender = Lockfile(self._config.state_dir, instance_id="other", clock=Clock())
-        with pytest.raises(LockHeld):
-            contender.acquire()
-        seen.append(self.session)
-        return []
-    async def call(self, request, served, **kwargs):
-        contender = Lockfile(self._config.state_dir, instance_id="model", clock=Clock())
-        with pytest.raises(LockHeld):
-            contender.acquire()
-        return await llm.call(request)
-    monkeypatch.setattr(ProviderLLM, "preflight", preflight)
-    monkeypatch.setattr(ProviderLLM, "_invoke", call)
-    original = Retro.__call__
-    async def invoke(self, *, forced=False):
-        assert forced
-        driver = self.driver()
-        assert isinstance(driver.llm, ProviderLLM)
-        assert driver.llm.session is self.checkout.control.providers is seen[0]
-        return await original(self, forced=forced)
-    monkeypatch.setattr(Retro, "__call__", invoke)
+
+    class Held:
+        kind = "cli"
+
+        async def call(self, request):
+            contender = Lockfile(root / ".tempo/state", instance_id="model", clock=Clock())
+            with pytest.raises(LockHeld):
+                contender.acquire()
+            return await llm.call(request)
+
+        def abort_current(self):
+            pass
+
     journal(root).append(EventType.STATE_TRANSITION, {"to": "merged"}, ticket="one")
-    assert module.main(["retro"], cwd=root, env=ENV, clock=Clock()) == 0
+    assert module.main(["retro"], cwd=root, env=ENV, clock=Clock(),
+                       pipeline=lambda c: runner.bind(c, Held())) == 0
     assert capsys.readouterr().out == "retro: committed tickets/retro/000001.md\n"
     assert len(llm.requests) == 1
     assert project_window(journal(root).read()).boundary == "retro/1"
@@ -462,24 +449,10 @@ def test_retro_no_commit(root, capsys, monkeypatch, suppressed, later_merge):
         writer = runner.bind(c, llm)
         writer.stages.driver.retry_cap = 0
         return writer
-    prepared = []
     if later_merge:
         j.append(EventType.STATE_TRANSITION, {"to": "merged"}, ticket="later")
-        async def prepare(c):
-            prepared.append(c)
-            return factory(c)
-        monkeypatch.setattr(runner, "prepare_pipeline", prepare)
     head = git_out(root, "rev-parse", "HEAD")
-    if suppressed and not later_merge:
-        async def forbidden(c):
-            pytest.fail("suppressed retro prepared providers")
-        monkeypatch.setattr(runner, "prepare_pipeline", forbidden)
-        assert main(["retro"], cwd=root, env=ENV, clock=Clock()) == 1
-    elif later_merge:
-        assert main(["retro"], cwd=root, env=ENV, clock=Clock()) == 1
-        assert len(prepared) == 1
-    else:
-        assert cli(root, "retro", stages=factory) == 1
+    assert cli(root, "retro", stages=factory) == 1
     assert git_out(root, "rev-parse", "HEAD") == head
     assert capsys.readouterr().out == "retro: no report committed; inspect status and the Suggestion Box\n"
     assert len(llm.requests) == (0 if suppressed and not later_merge else 1)
@@ -525,35 +498,29 @@ def test_doctor_cli(root, capsys):
     assert [line.split(":", 1)[0] for line in lines[1:]] == [f"PASS {n}" for n in ("venv", "git", "config", "lock", "journal")]
 
 
-def core_config(root, routes):
+def core_config(root, hosts):
     import yaml
 
     config = yaml.safe_load(CONFIG)
-    claude = config["providers"][0]
-    # Both providers are declared even when only one is routed.
-    config["providers"].append({**claude, "name": "codex", "package": "other-cli"})
-    config["routing"] = [
-        {"tier": tier, "surface": surface, "candidates": [{"provider": name} for name in names]}
-        for tier, surface, names in routes
-    ]
+    entry = config["hosts"]["claude"]
+    config["hosts"] = {host: entry for host in hosts}
+    config["orchestrator"]["models"] = {host: "opus" for host in hosts}
     path = root / "config.yaml"
     path.write_text(yaml.safe_dump(config))
     return path
 
 
-@pytest.mark.parametrize("routes, expected", [
-    ([("medium", "implement", ["claude"])], {"CLAUDE.md"}),
-    ([("medium", "implement", ["codex"])], {"AGENTS.md"}),
-    ([("medium", "implement", ["claude", "codex"])], {"CLAUDE.md", "AGENTS.md"}),
-    ([("medium", "implement", ["codex", "codex", "claude"]),
-      ("high", "review", ["claude", "codex"])], {"CLAUDE.md", "AGENTS.md"}),
+@pytest.mark.parametrize("hosts, expected", [
+    (["claude"], {"CLAUDE.md"}),
+    (["codex"], {"AGENTS.md"}),
+    (["claude", "codex"], {"CLAUDE.md", "AGENTS.md"}),
 ])
-def test_core_routed_conduct_files(tmp_path, monkeypatch, routes, expected):
+def test_core_host_conduct_files(tmp_path, monkeypatch, hosts, expected):
     import tempo.__main__ as module
     from tests.test_hostfiles import RecordingFS
     from tempo import hostfiles
 
-    core_config(tmp_path, routes)
+    core_config(tmp_path, hosts)
     fs = RecordingFS()
     monkeypatch.setattr(module, "LocalFileSystem", lambda: fs)
     assert cli(tmp_path, "core") == 0
@@ -574,7 +541,7 @@ def test_core_refusal_and_no_git(tmp_path, monkeypatch, capsys):
     from tempo import gates, hostfiles
     from tempo.seams import LocalFileSystem
 
-    config = core_config(tmp_path, [("medium", "implement", ["claude", "codex"])])
+    config = core_config(tmp_path, ["claude", "codex"])
     clean, corrupt = tmp_path / "CLAUDE.md", tmp_path / "AGENTS.md"
     project = b"# Project\r\nkeep every byte"
     clean.write_bytes(project)
@@ -582,7 +549,7 @@ def test_core_refusal_and_no_git(tmp_path, monkeypatch, capsys):
     before = {p: p.read_bytes() for p in tmp_path.iterdir()}
     def forbidden(*args, **kwargs):
         pytest.fail("core constructed git, journal, provider, pipeline, or gate work")
-    for name in ("Git", "Journal", "SubprocessExec", "ProviderLLM", "ProviderSession", "build_control"):
+    for name in ("Git", "Journal", "SubprocessExec", "build_control"):
         monkeypatch.setattr(module, name, forbidden)
     monkeypatch.setattr(gates, "run_gates", forbidden)
     replacements = []
@@ -618,7 +585,6 @@ def test_core_refusal_and_no_git(tmp_path, monkeypatch, capsys):
 @pytest.mark.parametrize("explicit", [False, True])
 def test_migrate_config_before_load(tmp_path, monkeypatch, capsys, explicit):
     import tempo.__main__ as module
-    from tempo.providers import ProviderLLM
     from tests.test_config import MigrationFS
 
     directory = tmp_path / "elsewhere" if explicit else tmp_path
@@ -632,9 +598,8 @@ def test_migrate_config_before_load(tmp_path, monkeypatch, capsys, explicit):
     monkeypatch.setattr(module, "LocalFileSystem", lambda: fs)
     def forbidden(*args, **kwargs):
         pytest.fail("migration invoked git, process, provider, journal, or pipeline work")
-    for name in ("Git", "Journal", "SubprocessExec", "ProviderLLM", "ProviderSession", "build_control"):
+    for name in ("Git", "Journal", "SubprocessExec", "build_control"):
         monkeypatch.setattr(module, name, forbidden)
-    monkeypatch.setattr(ProviderLLM, "call", forbidden)
     args = (["--config", str(path)] if explicit else []) + ["migrate-config"]
     assert main(args, cwd=tmp_path, env=ENV, pipeline=forbidden) == 0
     backup = path.with_name(path.name + ".bak")
@@ -656,21 +621,20 @@ def test_migrate_config_before_load(tmp_path, monkeypatch, capsys, explicit):
         assert (tmp_path / "config.yaml").read_bytes() == b"unselected invalid config"
 
 
-def test_core_and_gate_share_routed_paths(tmp_path, monkeypatch):
-    from tempo import hostfiles, providers, __main__ as module
+def test_core_and_gate_share_host_paths(tmp_path, monkeypatch):
+    from tempo import hostfiles, __main__ as module
     from tests.test_hostfiles import RecordingFS
     from tests.test_stages import evidence
     from tempo.config import load_config
-    config_path = core_config(tmp_path, [('medium', 'implement', ['codex', 'claude', 'codex'])])
+    config_path = core_config(tmp_path, ['codex', 'claude'])
     config = load_config(config_path, cwd=tmp_path)
-    resolver = providers.routed_conduct_paths
+    resolver = hostfiles.conduct_paths
     calls = []
     def resolved(config, root):
         paths = resolver(config, root)
         calls.append(paths)
         return paths
-    monkeypatch.setattr(providers, 'routed_conduct_paths', resolved)
-    monkeypatch.setattr(module, 'routed_conduct_paths', resolved)
+    monkeypatch.setattr(hostfiles, 'conduct_paths', resolved)
     project = b'# project\r\nbytes\xff without newline'
     for path in resolver(config, tmp_path):
         path.write_bytes(project)

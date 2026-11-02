@@ -15,7 +15,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from tempo import control, drain, hostfiles, runner, serve, triage
-from tempo.checkout import SPECS_DIR, Checkout, Refusal, call_timeout
+from tempo.checkout import SPECS_DIR, Checkout, Refusal
 from tempo.config import ConfigError, ConfigSnapshot, load_config, migrate_config
 from tempo.control import PauseConsumer
 from tempo.daemon import DaemonCore, daemon_core
@@ -24,7 +24,7 @@ from tempo.git import Git
 from tempo.journal import Journal, JournalCorruption
 from tempo.lockfile import LockHeld, Lockfile
 from tempo.notify import NOTIFY_TIMEOUT_S, NotificationReconciler
-from tempo.providers import ProviderLLM, ProviderSession, ProviderSetupError, routed_conduct_paths, child_env
+from tempo.llm import LLM
 from tempo.redact import Redactor
 from tempo.restart import Restart
 from tempo.seams import Clock, ExecutableNotFound, LocalFileSystem, SubprocessExec
@@ -52,9 +52,7 @@ def build_control(checkout: Checkout) -> PauseConsumer:
                          files=lambda: (checkout.config.state_dir / "control/inbox").glob("*"),
                          read=Path.read_bytes, recover=box.recover,
                          storm_holds=StormLedger(journal=checkout.journal, clock=checkout.clock).holds)
-    timers = Timers(journal=checkout.journal, clock=checkout.clock, sleep=checkout.sleep)
-    consumer.providers = ProviderSession(checkout.config, journal=checkout.journal,
-        clock=checkout.clock, sleep=checkout.sleep, timers=timers)
+    consumer.timers = Timers(journal=checkout.journal, clock=checkout.clock, sleep=checkout.sleep)
     consumer.load_config = lambda: load_config(None, cwd=checkout.repo)
     return consumer
 
@@ -64,7 +62,7 @@ def build_daemon_core(
     read: Callable[[str], str | None], debounce: float,
     quarantined: Callable[[], Set[str]], drought_parked: Callable[[], Set[str]],
     completed_unmerged: Callable[[], int],
-    prepare: Callable[[Checkout], Awaitable[runner.Dispatch]] = runner.prepare_pipeline,
+    prepare: Callable[[Checkout], Awaitable[runner.Dispatch]],
 ) -> DaemonCore:
     """Compose the production core without starting consumers or preparing a dispatch."""
     consumer = checkout.control or build_control(checkout)
@@ -76,20 +74,7 @@ def build_daemon_core(
 
         async def dispatch(ticket: Ticket) -> str:
             callback = await prepare(local)
-            tier, _ = runner.capability(ticket, checkout.journal.read())
-            drought = (consumer.providers.drought(snapshot, tier, 'implement')
-                       if consumer.providers.active else None)
-            if drought:
-                consumer.providers.park(ticket.stem, drought)
-                core.scheduler.update(ticket)
-                return 'infra_error'
-            result = await callback(ticket)
-            history = checkout.journal.read()
-            body = next((e.body for e in reversed(history)
-                if e.type == 'state_transition' and e.ticket == ticket.stem), {})
-            if 'provider_drought' in body:
-                core.scheduler.update(ticket)
-            return result
+            return await callback(ticket)
 
         return dispatch
 
@@ -101,44 +86,30 @@ def build_daemon_core(
         completed_unmerged=completed_unmerged, max_unmerged=checkout.config.scheduler.max_unmerged,
         before_dispatch=consumer.checkpoint, control=consumer,
     )
-    timers = consumer.providers.timers
-    restart = Restart(checkout, timers=timers,
+    restart = Restart(checkout, timers=consumer.timers,
                       owned=lambda: core.admission.active is not None or core.admission.task is not None)
     core.admission.restart = restart
     core.admission._before_dispatch = StartupBoundary(restart, consumer).checkpoint
-    def provider_holds():
-        held = set(drought_parked())
-        latest = {}
-        for event in checkout.journal.read():
-            if event.type == 'state_transition' and event.ticket is not None:
-                latest[event.ticket] = event.body
-        for stem, body in latest.items():
-            if route := body.get('provider_drought'):
-                snapshot = load_config(config_path, cwd=checkout.repo)
-                if consumer.providers.drought(snapshot, route['tier'], route['surface']):
-                    held.add(stem)
-        return held
-    core.scheduler.drought_parked = provider_holds
     return core
 
 
-def build_serve(checkout: Checkout, *, config_path=None, read=None,
-                stems=None, prepare=runner.prepare_pipeline, signals=None, failure=None) -> serve.Serve:
+def build_serve(checkout: Checkout, *, prepare, llm, config_path=None, read=None,
+                stems=None, signals=None, failure=None) -> serve.Serve:
     """Compose filesystem delivery at the same root as every other real seam."""
     def read_ticket(stem):
         path = checkout.repo / ticket_path(stem)
         return path.read_text() if path.is_file() else None
     return serve.Serve(checkout, config_path=config_path, read=read or read_ticket,
         stems=stems or (lambda: (p.parent.name for p in (checkout.repo / "tickets").glob("*/ticket.md"))),
-        prepare=prepare, signals=signals, failure=failure)
+        prepare=prepare, llm=llm, signals=signals, failure=failure)
 
 
 def build_notifications(checkout: Checkout, *, config_path: Path | None, log) -> NotificationReconciler:
     executor = SubprocessExec()  # Never alias active work.
     def compose(config):
         return CommandNotifications(executor, cwd=checkout.repo,
-            env=child_env(checkout.env, config, serving=None), timeout=NOTIFY_TIMEOUT_S,
-            scrub=Redactor.from_config(config, checkout.env).scrub)
+            env=dict(checkout.env), timeout=NOTIFY_TIMEOUT_S,
+            scrub=Redactor({}).scrub)
     return NotificationReconciler(journal=checkout.journal, clock=checkout.clock,
         config_path=config_path or checkout.repo / "config.yaml",
         load=lambda: load_config(config_path, cwd=checkout.repo), compose=compose, log=log)
@@ -174,8 +145,13 @@ def main(
     cwd: Path | None = None,
     env: Mapping[str, str] | None = None,
     clock: Clock = _clock,
-    pipeline: runner.Pipeline = runner.pipeline,
+    pipeline: Callable[[Checkout], runner.Dispatch] | None = None,
+    llm: LLM | None = None,
 ) -> int:
+    """`pipeline` and `llm` are the fake-model seams the scripted verbs run on until P5 removes them.
+
+    Tempo runs no agent CLI (AGENT_PLAN.md R15), so with neither supplied those verbs refuse.
+    """
     args = _parser().parse_args(argv)
     repo = Path(cwd) if cwd is not None else Path.cwd()
     env = dict(os.environ) if env is None else env
@@ -193,12 +169,12 @@ def main(
             return 0 if all(r.passed for r in results) else 2
         config = load_config(args.config, cwd=repo)
         if args.verb == "core":
-            hostfiles.refresh(routed_conduct_paths(config, repo), LocalFileSystem())
+            hostfiles.refresh(hostfiles.conduct_paths(config, repo), LocalFileSystem())
             return 0
         exec_ = SubprocessExec()
         checkout = Checkout(
             repo=repo, config=config, env=env, exec_=exec_,
-            git=Git(exec_, env=child_env(env, config), timeout=GIT_TIMEOUT_S),
+            git=Git(exec_, env=dict(env), timeout=GIT_TIMEOUT_S),
             journal=Journal(config.state_dir, clock), fs=LocalFileSystem(), clock=clock,
         )
         if args.verb == "status":
@@ -208,32 +184,29 @@ def main(
             return asyncio.run(_control(checkout, args.verb))
         if args.verb in {"confirm", "reject"}:
             return asyncio.run(_verdict(checkout, args.stem, args.verb))
+        if (pipeline if args.verb in {"run", "drain", "retro"} else llm) is None:
+            raise Refusal(f"`{args.verb}` would need an agent CLI, and tempo runs none",
+                          "run tickets with /tempo-run in the VS Code chat")
         if args.verb == "triage":
             async def one_pass() -> list[tuple[str, str]]:
                 lock = Lockfile(config.state_dir, instance_id=await checkout.git.describe(repo), clock=clock)
                 lock.acquire()
-                session = build_control(checkout).providers
+                timers = build_control(checkout).timers
                 try:
-                    llm = ProviderLLM(config, exec_=exec_, fs=checkout.fs, env=env,
-                                      cwd=repo, timeout=call_timeout(config),
-                                      session=session)
-                    session.timers.reconstruct()
-                    session.timers.fire_due()
-                    problems = await llm.preflight() if session.active else []
-                    if problems:
-                        raise ProviderSetupError('; '.join(problems))
+                    timers.reconstruct()
+                    timers.fire_due()
                     return await triage.triage_pass(checkout, llm)
                 finally:
-                    try:
-                        await session.close()
-                    finally:
-                        lock.release()
+                    lock.release()
 
             lines = asyncio.run(one_pass())
             print("\n".join(line for _, line in lines) if lines else "no pending suggestions")
             return 0
         if args.verb == "serve":
-            return asyncio.run(serve.serve(checkout, config_path=args.config, signals=_serve_signals))
+            async def prepare(c: Checkout) -> runner.Dispatch:
+                return runner.bind(c, llm)
+            return asyncio.run(serve.serve(checkout, config_path=args.config, signals=_serve_signals,
+                                           prepare=prepare, llm=llm))
         checkout = replace(checkout, control=build_control(checkout))
         checkout.control.load_config = lambda: load_config(args.config, cwd=repo)
         dispatch = pipeline(checkout)
@@ -253,7 +226,7 @@ def main(
             print(report.render(), end="")
             return report.exit_code
         return asyncio.run(runner.run_ticket(args.stem, checkout, dispatch))
-    except (ConfigError, Refusal, LockHeld, IntakeRefused, JournalCorruption, ProviderSetupError,
+    except (ConfigError, Refusal, LockHeld, IntakeRefused, JournalCorruption,
             ExecutableNotFound, hostfiles.MarkerCorruption) as e:
         road = (" -- repair the selected config and retry retro"
                 if args.verb == "retro" and isinstance(e, ConfigError) else "")
@@ -289,10 +262,7 @@ async def _retro(checkout, dispatch):
         print("retro: no report committed; inspect status and the Suggestion Box")
         return 1
     finally:
-        try:
-            await checkout.control.providers.close()
-        finally:
-            lock.release()
+        lock.release()
 
 
 async def _status(checkout: Checkout):

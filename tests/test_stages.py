@@ -63,18 +63,14 @@ ENV = {
 
 CONFIG = """schema_version: 1
 state_dir: .tempo/state
-providers:
-  - name: fake
-    kind: cli
-    package: test-cli
-    auth: FAKE_KEY
-    models_by_tier: {low: m, medium: m, high: m, max: m}
-    limits: {concurrency: 1}
-routing:
-  - {tier: medium, surface: implement, candidates: [{provider: fake}]}
-  - {tier: medium, surface: review, candidates: [{provider: fake}]}
 review: {}
 merge: {}
+hosts:
+  codex:
+    models_by_tier: {low: m, medium: m, high: m, max: m}
+    pins: {review: r}
+orchestrator:
+  models: {codex: o}
 engine_plane_safety_inventory: [config.yaml]
 """
 
@@ -127,9 +123,9 @@ def git(root: Path, *args: str) -> str:
 def adopt_conduct(root: Path) -> list[str]:
     """Render each fixture's actual routes from its own project bytes before committing its base."""
     from tempo.hostfiles import render
-    from tempo.providers import routed_conduct_paths
+    from tempo.hostfiles import conduct_paths
 
-    paths = routed_conduct_paths(load_config(None, cwd=root), root)
+    paths = conduct_paths(load_config(None, cwd=root), root)
     for path in paths:
         path.write_bytes(render(path.read_bytes() if path.exists() else b""))
     return [p.relative_to(root).as_posix() for p in paths]
@@ -235,7 +231,7 @@ def test_implement_check_review_all_ok_with_artifacts_and_provenance(repo):
     assert read_review((canonical / "review.md").read_text()) == review
     assert Invoice.model_validate_json((canonical / "checks.json").read_text()) == invoice
     run_md = (canonical / "run.md").read_text()
-    assert "## Outcome\n\nok\n" in run_md and "- provider: fake\n- model: fake\n- spec: implement 1.6" in run_md
+    assert "## Outcome\n\nok\n" in run_md and "- provider: fake\n- model: fake\n- spec: implement 1.7" in run_md
     assert git(repo, "diff", "--name-only", f"main...{STEM}").split() == ["tempo/thing.py"]
     outbox = config.worktree_root / STEM / "tickets" / STEM
     assert sorted(p.name for p in outbox.iterdir()) == ["ticket.md"]  # lifted and unlinked
@@ -373,13 +369,6 @@ def test_invalid_review_reply_is_reprompted_with_its_validation_finding(repo):
 
     assert outcomes(result)["review"] == "ok"
     assert "approve carries an empty findings list" in llm.requests[2].rendered
-
-
-def test_verification_children_never_inherit_a_provider_key(repo):
-    result, _, config = run(repo, [agent({"tempo/thing.py": "ok\n"}), verdict()])
-
-    spool = (config.state_dir / "spools" / STEM / str(result.attempt) / "check" / "verify-02.txt").read_text()
-    assert "PATH=/usr/bin:/bin" in spool and "FAKE_KEY" not in spool and SECRET not in spool
 
 
 def test_a_fresh_run_tears_down_the_prior_worktree_and_branch(repo):

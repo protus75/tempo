@@ -6,30 +6,41 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel
 
-from tempo import __main__ as cli, caps, daemon, driver, merge, providers, runner, stages
+from tempo import __main__ as cli, caps, daemon, merge, runner, stages
 from tempo.config import ConfigError, ConfigSnapshot, load_config
 from tempo.daemon import DaemonAdmission
-from tempo.driver import Driver, LlmStage
 from tempo.git import Git
 from tempo.journal import EventType, Journal
-from tempo.llm import FakeLLM
+from tempo.llm import FakeLLM, LLMResult
 from tempo.mergequeue import CONFLICT_FACTS, MergeQueue
-from tempo.providers import ProviderLLM, child_env
-from tempo.redact import Redactor
 from tempo.scheduler import Scheduler
-from tempo.stages import StageContext
 from tempo.tickets import INTAKE_SIGNAL, validate_ticket
 from tempo.watcher import WATCHER_PARSE_FAILURE, Watcher
-from tests.test_cli import root, write
+from tests.test_cli import root, write  # noqa: F401 -- fixture
 from tests.test_daemon_admission import assert_idle
 from tests.test_daemon_config import assert_detached, python_values
-from tests.test_providers import CONFIG, ENV, claude_ok, codex_ok, jsonl
 from tests.test_scheduler import Time, import_closure, text, turn
-from tests.test_mergequeue import ctx as admission_context, ready
+from tests.test_mergequeue import ctx as admission_context, ready  # noqa: F401 -- fixture
 from tempo import control
-from tempo.checkout import Checkout, Refusal
+from tempo.checkout import Checkout
+
+
+CONFIG = """\
+schema_version: 1
+state_dir: state
+review: {}
+merge: {}
+hosts:
+  claude:
+    models_by_tier: {low: sonnet, medium: sonnet, high: sonnet, max: sonnet}
+    pins: {review: opus}
+orchestrator:
+  models: {claude: opus}
+engine_plane_safety_inventory: []
+"""
+
+ENV = {"PATH": "/usr/bin", "HOME": "/home/op"}
 
 
 class ScriptFS:
@@ -44,89 +55,39 @@ class ScriptFS:
 
 
 class ScriptExec:
+    """The rig's process seam: tempo runs no agent CLI, so any child it is asked for is a test failure."""
+
     def __init__(self, fs):
         self.fs = fs
         self.calls = []
         self.hook = None
-        self.latest = "1.2.3"
         self.reply = "ok"
-        self.refuse_probe = False
 
     async def run(self, argv, *, cwd, env, timeout, stdin_path=None, on_spawn=None, on_stdout_line=None):
-        prompt = self.fs.files[stdin_path].decode() if stdin_path else None
-        self.calls.append((list(argv), cwd, dict(env), prompt, timeout))
+        self.calls.append((list(argv), cwd, dict(env), None, timeout))
         if self.hook is not None:
             await self.hook(argv)
-        if argv[1:] == ["--version"]:
-            return 0, "1.2.3", ""
-        if argv[0] == "pnpm":
-            return 0, self.latest, ""
-        assert argv[0] in {"claude", "codex"} and prompt is not None
-        if on_spawn is not None:
-            on_spawn(123)
-        if self.refuse_probe and prompt == providers.PROBE_PROMPT:
-            return 1, jsonl({"type": "turn.failed", "error": {"message": "model not supported"}}), ""
-        reply = "ok" if prompt == providers.PROBE_PROMPT else self.reply
-        out = claude_ok(reply) if argv[0] == "claude" else codex_ok(reply)
-        if on_stdout_line is not None:
-            for line in out.splitlines(keepends=True):
-                on_stdout_line(line)
-        return 0, out, ""
+        raise AssertionError(f"unexpected child process {argv}")
 
     def kill_group(self, pgid):
         raise AssertionError("no scripted child survives its invocation")
 
 
-@pytest.mark.asyncio
-async def test_production_watchdog_shares_active_executor(root, monkeypatch):
-    from tempo.drain import drain
-    from tests.test_restart_timers import repository
-    from tests.test_serve import until, finish, terminals
+class ScriptLLM:
+    """The rig's model: every call answers with the exec seam's current `reply`."""
 
-    contexts = []
-    async def drive(ctx, ticket, **kwargs):
-        assert ctx.driver.llm._exec is ctx.exec_
-        ctx.exec_.reply = '{"text":"done"}'
-        for surface, identity in (("implement", ticket.stem), ("triage", None)):
-            result = await ctx.driver.run(
-                LlmStage(surface=surface, emits=Reply, gates=[], render=lambda *_: "probe"), None,
-                ticket=identity, attempt=0, workspace=ctx.repo, tier="medium", effort="low",
-                stuck_budget=1200,
-                run_seq=5 + len(contexts) if identity is None else None)
-            assert result.outcome == 'ok'
-            d = ctx.driver.detector
-            assert d.call.detector is d
-            assert d.notify.notifications.exec_ is not ctx.exec_
-            assert ctx.driver.llm.abort_current.__self__._exec is ctx.exec_
-            assert ctx.driver.llm._adapters[d.call.identity[0]]._exec is ctx.exec_
-        contexts.append(ctx)
-        ctx.driver.journal.append(EventType.STATE_TRANSITION, {'to': 'already_satisfied'}, ticket=ticket.stem)
-        return 'already_satisfied'
+    kind = "cli"
 
-    class Reply(BaseModel):
-        text: str
+    def __init__(self, exec_):
+        self.exec = exec_
+        self.requests = []
 
-    monkeypatch.setattr(runner, 'drive', drive)
-    rig = await repository(root, monkeypatch)
-    await rig.add('bootstrap')
-    checkout = replace(rig.checkout, control=cli.build_control(rig.checkout))
-    dispatch = await runner.prepare_pipeline(checkout)
-    report = await drain(checkout, dispatch)
-    assert report.exit_code == 0 and contexts[0].exec_ is checkout.exec_
-    assert contexts[0].driver.detector.notify.notifications.exec_ is not contexts[0].exec_
-    from tempo.seams import LocalFileSystem
-    serving = rig
-    rig.fs.publish = LocalFileSystem().publish
-    rig.owner = cli.build_serve(rig.checkout)
-    write(root, 'continuous', text())
-    run = asyncio.create_task(serving.owner.run())
-    try:
-        await until(serving, lambda: bool(terminals(serving, 'continuous')))
-        assert contexts[-1].exec_ is serving.checkout.exec_
-        assert len(serving.owner.workers) == 4 and len(serving.owner.tasks.tasks) == 3
-        assert serving.owner.notifications.compose(serving.checkout.config).exec_ is not contexts[-1].exec_
-    finally:
-        await finish(serving, run)
+    async def call(self, req):
+        self.requests.append(req)
+        return LLMResult(text=self.exec.reply, provider="claude", model="sonnet")
+
+    def abort_current(self):
+        pass
 
 
 class CoreRig:
@@ -143,18 +104,23 @@ class CoreRig:
         initial = load_config(config_path, cwd=root)
         self.checkout = Checkout(
             root, initial, ENV, self.exec,
-            Git(self.exec, env=child_env(ENV, initial), timeout=30),
+            Git(self.exec, env=dict(ENV), timeout=30),
             self.journal, self.fs, self.time, self.time.sleep,
         )
         self.files = {}
         self.quarantine, self.drought = set(), set()
         self.unmerged = 0
         self.calls, self.locals = [], []
-        kwargs = {} if prepare is None else {"prepare": prepare}
+        self.llm = ScriptLLM(self.exec)
+
+        async def bound(checkout):
+            return runner.bind(checkout, self.llm)
+
+        self.prepare = prepare or bound
         self.core = cli.build_daemon_core(
             self.checkout, config_path=config_path, read=self.files.get, debounce=5,
             quarantined=lambda: self.quarantine, drought_parked=lambda: self.drought,
-            completed_unmerged=lambda: self.unmerged, **kwargs,
+            completed_unmerged=lambda: self.unmerged, prepare=self.prepare,
         )
 
     def put_config(self, config):
@@ -476,7 +442,7 @@ async def test_production_core_reloads_config_only_after_admission(tmp_path):
     waiting = asyncio.create_task(rig.core.admission.dispatch(next_ticket))
     await turn()
     assert len(locals) == 1
-    rig.put_config(CONFIG.replace("x-med", "x-edited") + "scheduler: {max_unmerged: 5}\n")
+    rig.put_config(CONFIG.replace("pins: {review: opus}", "pins: {review: edited}") + "scheduler: {max_unmerged: 5}\n")
     release.set()
     await cleaning.wait()
     assert len(locals) == 1 and not waiting.done()
@@ -485,7 +451,7 @@ async def test_production_core_reloads_config_only_after_admission(tmp_path):
     before, after = [local.config for local in locals]
     assert before is not after
     assert (before.scheduler.max_unmerged, after.scheduler.max_unmerged) == (2, 5)
-    assert (before.providers[1].models_by_tier.medium, after.providers[1].models_by_tier.medium) == ("x-med", "x-edited")
+    assert (before.hosts["claude"].pins["review"], after.hosts["claude"].pins["review"]) == ("opus", "edited")
     rig.put_config("bad: [")
     with pytest.raises(ConfigError):
         await rig.core.admission.dispatch(next_ticket)
@@ -589,315 +555,6 @@ async def test_production_core_unwinds_errors_and_cancellation(tmp_path, monkeyp
         assert await rig.core.scheduler.dispatch_next() is second_ticket
     assert_idle(rig.core.admission)
     assert rig.core.scheduler.active is None and calls[-1] is second_ticket
-
-
-def observe_preparation(monkeypatch):
-    trace, snapshots, contexts = [], [], []
-    capture = daemon.snapshot_config
-    construct = ProviderLLM.__init__
-    preflight = ProviderLLM.preflight
-    bind = runner.bind
-    from_config = Driver.from_config
-    redact = Redactor.from_config
-    severity = driver.merge_severity
-
-    def snapshot(config):
-        value = capture(config)
-        snapshots.append(value)
-        trace.append("capture")
-        return value
-
-    def provider(self, config, **kwargs):
-        assert config is snapshots[-1]
-        trace.append("provider")
-        construct(self, config, **kwargs)
-
-    async def probe(self):
-        assert self._config is snapshots[-1]
-        trace.append("preflight-start")
-        result = await preflight(self)
-        trace.append("preflight-end")
-        return result
-
-    def binding(checkout, llm):
-        assert trace[-1] == "preflight-end"
-        assert checkout.config is llm._config is snapshots[-1]
-        trace.append("bind")
-        return bind(checkout, llm)
-
-    def driving(cls, config, **kwargs):
-        assert config is snapshots[-1]
-        trace.append("driver")
-        return from_config(config, **kwargs)
-
-    def redacting(cls, config, env):
-        assert config is snapshots[-1]
-        trace.append("redactor")
-        return redact(config, env)
-
-    def merging(config):
-        assert config is snapshots[-1]
-        trace.append("severity")
-        return severity(config)
-
-    original_context = runner.StageContext
-
-    def context(**kwargs):
-        assert kwargs["config"] is snapshots[-1]
-        ctx = original_context(**kwargs)
-        contexts.append(ctx)
-        trace.append("context")
-        return ctx
-
-    compose = runner.compose_pipeline
-
-    def queue(ctx, *, escalate, control):
-        assert trace[-1] == "context" and ctx is contexts[-1]
-        value = compose(ctx, escalate=escalate, control=control)
-        assert value.ctx is ctx and value.escalate is escalate
-        trace.append("queue")
-        return value
-
-    monkeypatch.setattr(daemon, "snapshot_config", snapshot)
-    monkeypatch.setattr(ProviderLLM, "__init__", provider)
-    monkeypatch.setattr(ProviderLLM, "preflight", probe)
-    monkeypatch.setattr(runner, "bind", binding)
-    monkeypatch.setattr(Driver, "from_config", classmethod(driving))
-    monkeypatch.setattr(Redactor, "from_config", classmethod(redacting))
-    monkeypatch.setattr(driver, "merge_severity", merging)
-    monkeypatch.setattr(runner, "StageContext", context)
-    monkeypatch.setattr(runner, "compose_pipeline", queue)
-    return trace, snapshots, contexts
-
-
-@pytest.mark.asyncio
-async def test_production_core_uses_real_snapshot_pipeline(tmp_path, monkeypatch):
-    trace, snapshots, contexts = observe_preparation(monkeypatch)
-    rig = CoreRig(tmp_path, config=CONFIG.replace("review: {}", "review: {gate_severity: {scope_fence: soft}}")
-                  + "caps: {retry: 2}\n")
-    ticket = await rig.add("work")
-    assert trace == []
-    reads = []
-    original_env, original_resolve = providers.child_env, providers.resolve
-
-    def filtered(env, config, serving=None):
-        assert config is snapshots[-1]
-        if serving is not None:
-            assert serving is next(p for p in config.providers if p.name == serving.name)
-        reads.append("env")
-        return original_env(env, config, serving)
-
-    def routed(config, tier, surface):
-        assert config is snapshots[-1]
-        reads.append("route")
-        return original_resolve(config, tier, surface)
-
-    monkeypatch.setattr(providers, "child_env", filtered)
-    monkeypatch.setattr(providers, "resolve", routed)
-
-    class Reply(BaseModel):
-        text: str
-
-    called = []
-
-    async def before_host_work(ctx, original):
-        called.append(original)
-        assert original is ticket and ctx is contexts[0] and isinstance(ctx, StageContext)
-        assert rig.core.admission.active is original and rig.core.admission.task is asyncio.current_task()
-        snapshot = snapshots[0]
-        assert ctx.config is snapshot and isinstance(ctx.driver, Driver)
-        llm = ctx.driver.llm
-        assert isinstance(llm, ProviderLLM) and llm._config is snapshot
-        for p in snapshot.providers:
-            adapter = llm._adapters[p.name]
-            assert type(adapter) is providers.ADAPTERS[p.name]
-            assert adapter.provider is p and adapter._config is snapshot
-            assert adapter._exec is ctx.exec_ is rig.exec and adapter._fs is ctx.fs is rig.fs
-        assert providers.resolve(snapshot, "medium", "implement").model == "x-med"
-        served = providers.resolve(snapshot, "medium", "review")
-        assert served.provider is snapshot.providers[0] and served.model == "c-max"
-        assert providers.child_env(ENV, snapshot) == {k: v for k, v in ENV.items() if not k.endswith("_KEY")}
-        assert ctx.driver.severity["scope_fence"] == "soft" and ctx.driver.retry_cap == 2
-        assert caps.remaining(snapshot.caps, (), original.stem, "retry") == 2
-        assert caps.spent(snapshot.caps, (), original.stem) is None
-        assert caps.next_rung(snapshot, "medium", "low") == {"tier": "high", "effort": "low"}
-        rig.exec.reply = json.dumps({"text": ENV["CLAUDE_KEY"] + " " + ENV["CODEX_KEY"]})
-        result = await ctx.driver.run(
-            LlmStage(surface="review", emits=Reply, gates=[], render=lambda *_: rig.exec.reply),
-            None, ticket=original.stem, attempt=0, workspace=tmp_path,
-            tier="medium", effort="low", stuck_budget=60)
-        assert result.outcome == "ok" and result.provider == "claude" and result.model == "c-max"
-        assert result.artifact.text == "[REDACTED:CLAUDE_KEY] [REDACTED:CODEX_KEY]"
-        return "original-terminal"
-
-    monkeypatch.setattr(runner, "drive", before_host_work)
-    assert await rig.core.scheduler.dispatch(ticket) == "original-terminal"
-    assert called == [ticket] and len(snapshots) == len(contexts) == 1
-    assert trace[:4] == ["capture", "provider", "redactor", "preflight-start"]
-    assert trace[4:] == ["preflight-end", "bind", "driver", "redactor", "severity", "context", "queue"]
-    assert set(reads) == {"env", "route"}
-    model_calls = [call for call in rig.exec.calls if call[3] is not None]
-    assert len(model_calls) == 6  # Five distinct probes, then one read-only driver call.
-    for argv, cwd, env, prompt, _ in model_calls:
-        serving, other = ("CLAUDE_KEY", "CODEX_KEY") if argv[0] == "claude" else ("CODEX_KEY", "CLAUDE_KEY")
-        assert env[serving] == ENV[serving] and other not in env and cwd == tmp_path
-        assert "bypassPermissions" not in argv and "--dangerously-bypass-approvals-and-sandbox" not in argv
-        assert all(ENV[name] not in prompt for name in (serving, other))
-    for data in rig.fs.files.values():
-        assert all(ENV[name].encode() not in data for name in ("CLAUDE_KEY", "CODEX_KEY"))
-    assert all(ENV[name] not in str(rig.journal.read()) for name in ("CLAUDE_KEY", "CODEX_KEY"))
-    assert_idle(rig.core.admission)
-
-
-@pytest.mark.asyncio
-async def test_production_core_awaits_preflight_inside_admission(tmp_path, monkeypatch):
-    trace, snapshots, contexts = observe_preparation(monkeypatch)
-    rig = CoreRig(tmp_path)
-    first_ticket, second_ticket = await rig.add("first"), await rig.add("second")
-    started, release = asyncio.Event(), asyncio.Event()
-    called = []
-
-    async def hook(argv):
-        assert asyncio.current_task() is rig.core.admission.task
-        if not started.is_set():
-            assert trace == ["capture", "provider", "redactor", "preflight-start"]
-            started.set()
-            await release.wait()
-
-    async def stop(ctx, ticket):
-        assert ctx.config is snapshots[-1] and trace[-1] == "queue"
-        called.append(ticket)
-        return "merged"
-
-    rig.exec.hook = hook
-    monkeypatch.setattr(runner, "drive", stop)
-    assert trace == [] and rig.exec.calls == [] and not contexts
-    first = asyncio.create_task(rig.core.admission.dispatch(first_ticket))
-    await started.wait()
-    owned = rig.core.admission.task
-    waiter = asyncio.create_task(rig.core.admission.dispatch(second_ticket))
-    cancelled = asyncio.create_task(rig.core.admission.dispatch(second_ticket))
-    await turn()
-    cancelled.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await cancelled
-    assert len(snapshots) == 1 and not contexts and not called and not waiter.done()
-    assert rig.core.admission.task is owned and not owned.cancelling()
-    rig.put_config(CONFIG.replace("x-med", "x-edited"))
-    release.set()
-    assert await asyncio.gather(first, waiter) == ["merged", "merged"]
-    assert called == [first_ticket, second_ticket]
-    assert len(snapshots) == len(contexts) == 2 and snapshots[0] is not snapshots[1]
-    assert [s.providers[1].models_by_tier.medium for s in snapshots] == ["x-med", "x-edited"]
-    assert [c.driver.llm._config for c in contexts] == snapshots
-    assert contexts[0].driver.llm is not contexts[1].driver.llm
-    for step in ("capture", "provider", "preflight-start", "preflight-end", "bind", "driver", "context", "queue"):
-        assert trace.count(step) == 2
-    probed = [argv[argv.index("-m") + 1] for argv, _, _, prompt, _ in rig.exec.calls
-              if argv[0] == "codex" and prompt is not None]
-    assert probed == ["x-med", "x-low", "x-edited", "x-low"]
-    assert_idle(rig.core.admission)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["refusal", "error", "cancel"])
-async def test_production_core_unwinds_preflight_refusal_and_cancellation(tmp_path, monkeypatch, failure):
-    trace, snapshots, contexts = observe_preparation(monkeypatch)
-    rig = CoreRig(tmp_path)
-    first_ticket, second_ticket = await rig.add("first"), await rig.add("second")
-    assert trace == []
-    started, cleaning, finish = (asyncio.Event() for _ in range(3))
-    error = ValueError("version probe failed")
-    called = []
-
-    async def hook(argv):
-        if failure == "error":
-            raise error
-        if failure == "cancel":
-            try:
-                started.set()
-                await asyncio.Event().wait()
-            finally:
-                cleaning.set()
-                await finish.wait()
-
-    async def stop(ctx, ticket):
-        called.append(ticket)
-        return "merged"
-
-    rig.exec.hook = hook
-    rig.exec.refuse_probe = failure == "refusal"
-    monkeypatch.setattr(runner, "drive", stop)
-    if failure == "cancel":
-        first = asyncio.create_task(rig.core.admission.dispatch(first_ticket))
-        await started.wait()
-        owned = rig.core.admission.task
-        first.cancel()
-        await cleaning.wait()
-        second = asyncio.create_task(rig.core.admission.dispatch(second_ticket))
-        await turn()
-        assert len(snapshots) == 1 and not contexts and not called and not second.done()
-        assert rig.core.admission.task is owned and rig.core.admission.active is first_ticket
-        rig.exec.hook = None
-        finish.set()
-        with pytest.raises(asyncio.CancelledError):
-            await first
-        assert owned.done() and owned.cancelled() and owned not in asyncio.all_tasks()
-        assert await second == "merged"
-    else:
-        with pytest.raises(Refusal if failure == "refusal" else ValueError) as caught:
-            await rig.core.admission.dispatch(first_ticket)
-        if failure == "refusal":
-            message = str(caught.value)
-            assert "provider preflight failed" in message and "failed its probe" in message
-            assert "pnpm add -g test-cli@latest" in message
-            assert "fix each named provider, then run the same command again" in message
-        else:
-            assert caught.value is error
-        assert not contexts and not called and "bind" not in trace
-        assert_idle(rig.core.admission)
-        rig.exec.hook, rig.exec.refuse_probe = None, False
-        assert await rig.core.admission.dispatch(second_ticket) == "merged"
-    assert called == [second_ticket] and len(contexts) == 1 and len(snapshots) == 2
-    assert trace.count("bind") == trace.count("context") == 1
-    assert_idle(rig.core.admission)
-
-
-@pytest.mark.parametrize("refuse", [False, True])
-def test_bootstrap_pipeline_prepares_before_dispatch(tmp_path, monkeypatch, refuse):
-    rig = CoreRig(tmp_path)
-    rig.checkout = replace(rig.checkout, control=rig.core.control)
-    ticket = asyncio.run(rig.add("work"))
-    bound, called = [], []
-    original_bind = runner.bind
-
-    def bind(checkout, llm):
-        assert checkout is not rig.checkout and llm._config is checkout.config
-        assert isinstance(checkout.config, ConfigSnapshot)
-        assert checkout.control.providers is rig.core.control.providers
-        assert len([call for call in rig.exec.calls if call[3] is not None]) == 5
-        bound.append(checkout)
-        return original_bind(checkout, llm)
-
-    async def stop(ctx, original):
-        assert original is ticket and ctx.config is bound[0].config
-        called.append(original)
-        return "merged"
-
-    monkeypatch.setattr(runner, "bind", bind)
-    monkeypatch.setattr(runner, "drive", stop)
-    rig.exec.refuse_probe = refuse
-    callback = runner.pipeline(rig.checkout)
-    assert bound == called == [] and rig.exec.calls == []
-    if refuse:
-        with pytest.raises(Refusal, match="provider preflight failed"):
-            asyncio.run(callback.prepare())
-        assert bound == called == []
-    else:
-        asyncio.run(callback.prepare())
-        assert len(bound) == 1 and called == []
-        assert asyncio.run(callback(ticket)) == "merged" and called == [ticket]
-    assert_idle(rig.core.admission)
 
 
 def capture_pipeline_queue(monkeypatch):
@@ -1280,7 +937,7 @@ async def test_production_refuses_failed_rework_publication(admission_context, m
     assert await ctx.git._run(ctx.repo, "show", f"HEAD:tickets/{ticket.stem}/ticket.md") == text
     assert not (ctx.repo / "tickets/piece-one/ticket.md").exists()
     assert not (ctx.repo / "tickets/piece-two/ticket.md").exists()
-    assert caps.draws(events, ticket.stem, "diagnosis") == 0
+    assert caps.draws(events, ticket.stem, "decisions") == 0
     assert caps.draws(events, ticket.stem, "retry") == (ctx.config.caps.retry if failure == "spent" else 0)
     if failure == "spent":
         assert ctx.driver.llm.requests == []
@@ -1635,12 +1292,12 @@ async def test_production_pause_defers_snapshot_and_effects_without_preempting(t
     assert completed == effects == ["first"] and len(snapshots) == len(prepared) == 1
     assert_idle(rig.core.admission)
     assert not waiting.done()
-    rig.put_config(CONFIG.replace("x-med", "edited-after-release"))
+    rig.put_config(CONFIG.replace("pins: {review: opus}", "pins: {review: edited-after-release}"))
     publish_request(state, ControlRequest("90-resume", life, "resume", "10-pause"), LocalFileSystem())
     wake.set()
     assert await waiting == "merged"
     assert completed == effects == ["first", "second"] and len(snapshots) == len(prepared) == 2
-    assert prepared[-1].config.providers[1].models_by_tier.medium == "edited-after-release"
+    assert prepared[-1].config.hosts["claude"].pins["review"] == "edited-after-release"
 
 
 @pytest.mark.asyncio
@@ -1930,7 +1587,7 @@ async def test_production_serve_graph_is_reachable(root, monkeypatch):
     from tests.test_serve import graph, until, finish
     rig = await graph(root, monkeypatch)
     before = asyncio.all_tasks()
-    owner = Serve(rig.checkout, read=rig.owner.read, stems=rig.owner.stems)
+    owner = Serve(rig.checkout, read=rig.owner.read, stems=rig.owner.stems, prepare=rig.prepare, llm=rig.llm)
     assert asyncio.all_tasks() == before and owner.tasks.tasks == ()
     assert rig.journal.read() == [] and owner.core.restart.timers.journal is rig.journal
     rig.owner = owner

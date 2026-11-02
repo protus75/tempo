@@ -18,7 +18,7 @@ from tempo.seams import LocalFileSystem, SubprocessExec
 from tempo.timers import Timers
 from tests.test_cli import ENV, root
 from tests.test_daemon_composition import CoreRig, assert_startup_pause_wiring
-from tests.test_providers import CONFIG
+from tests.test_daemon_composition import CONFIG
 from tests.test_scheduler import Time, turn
 from tempo import stages
 
@@ -240,7 +240,7 @@ async def test_recovery_alert_through_serve_entrypoint(root, monkeypatch):
 
     monkeypatch.setattr(stages, "harvest_orphan", harvest)
     baseline = asyncio.all_tasks()
-    task = asyncio.create_task(serve.serve(rig.checkout, signals=signals))
+    task = asyncio.create_task(serve.serve(rig.checkout, signals=signals, prepare=rig.prepare, llm=rig.llm))
     try:
         await entered.wait()
         assert calls == [] and dead.exists()

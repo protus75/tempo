@@ -24,7 +24,7 @@ from tempo.gates import Gate, GateReport, merge_severity, run_gates
 from tempo.journal import Journal, run_seq as journal_run_seq
 from tempo.llm import LLM, AgentEffort, AgentTier, LLMAborted, LLMRequest, LLMResult
 from tempo.llmeffect import llm_call
-from tempo.providers import ProviderCallError, ProviderDrought, ProviderLLM, WRITING_SURFACES, child_env
+from tempo.providers import WRITING_SURFACES, ProviderCallError
 from tempo.redact import Redactor
 from tempo.seams import Clock, CommandNotifications, FileSystem, LocalFileSystem, Sleep, SubprocessExec
 
@@ -63,11 +63,6 @@ class _StuckBudget(Exception):
     pass
 
 
-@dataclass(frozen=True)
-class ProviderDroughtResult(StageResult):
-    provider_drought: dict | None = None
-
-
 @dataclass
 class _Tally:
     calls: int = 0
@@ -93,7 +88,6 @@ class _Invocation:
     task: asyncio.Task
     race: _Race | None = None
     abort: asyncio.Task | None = None
-    detector: Any = None
 
 
 async def _observe(task: asyncio.Future) -> Any:
@@ -137,8 +131,6 @@ class Driver:
         self.severity = severity
         self.retry_cap = retry_cap
         self._active: _Invocation | None = None
-        self.detector = None
-        self._watch_identity = None
         self._notify_config = None
 
     @classmethod
@@ -152,8 +144,8 @@ class Driver:
         sleep: Sleep,
         fs: FileSystem | None = None,
     ) -> "Driver":
-        """The production wiring: the redactor is built from config BEFORE any writer exists."""
-        redactor = Redactor.from_config(config, env)
+        """The production wiring: the redactor exists BEFORE any writer."""
+        redactor = Redactor({})
         driver = cls(
             llm=llm,
             journal=Journal(config.state_dir, clock),
@@ -204,14 +196,8 @@ class Driver:
                 await _observe(self._abort(invocation))
             raise
         finally:
-            try:
-                if invocation.detector is not None:
-                    await _observe(asyncio.create_task(invocation.detector.close_notifications()))
-            finally:
-                if self._active is invocation and (
-                    invocation.abort is None or invocation.abort.done()
-                ):
-                    self._active = None
+            if self._active is invocation and (invocation.abort is None or invocation.abort.done()):
+                self._active = None
 
     async def _run(
         self, stage: LlmStage, consumed: Any, *, ticket: str | None, attempt: int,
@@ -224,8 +210,6 @@ class Driver:
             raise ValueError("run_seq requires ticket=None")
         seq = run_seq if run_seq is not None else journal_run_seq(self.journal.read(), stem)
         spool_stem = f"{stem}/{run_seq}" if run_seq is not None else stem
-        self.begin_watch(owner=stem, ticket=ticket, run_sequence=seq, surface=stage.surface,
-                         stuck_budget=stuck_budget, attempt=attempt)
         started = self.clock()
         deadline = started.timestamp() + stuck_budget
         ctx = {"stem": stem, "attempt": attempt, "surface": stage.surface}
@@ -235,22 +219,13 @@ class Driver:
         def done(outcome: Outcome, artifact: BaseModel | None = None) -> StageResult:
             self.log.event("stage_end", **ctx, outcome=outcome, calls=tally.calls)
             last = tally.last
-            detector = self.detector
-            meter = detector.call if detector is not None else None
             provider, model = (last.provider, last.model) if last else (None, None)
-            if meter is not None and (last is None or outcome in {'infra_error', 'timeout'}):
-                provider, model = meter.identity
             return StageResult(outcome=outcome, artifact=artifact, findings=tally.findings,
                                provider=provider, model=model)
 
-        async def failed(exc, call, name, *, pre_call=False):
+        async def failed(exc, call, name):
             self.spool.write(spool_stem, attempt, f"{name}/error.txt", f"{type(exc).__name__}: {exc}")
             self.log.event('llm_error', **call, error=f'{type(exc).__name__}: {exc}')
-            if isinstance(exc, ProviderDrought):
-                tally.calls -= int(pre_call)
-                tally.findings = []
-                result = done('infra_error')
-                return ProviderDroughtResult(**vars(result), provider_drought=exc.record)
             tally.findings = await self.provider_failure(exc, owner=stem, ticket=ticket, sequence=seq,
                                                         surface=stage.surface, workspace=workspace)
             return done('infra_error')
@@ -275,35 +250,34 @@ class Driver:
             try:
                 recorded = await self.race(
                     lambda: llm_call(
-                        self.effects, self.watched_llm(), req, self.redactor, ticket=ticket,
+                        self.effects, self.llm, req, self.redactor, ticket=ticket,
                         stem=stem, run_seq=seq, attempt=attempt, call_seq=call_seq,
                     ),
-                    deadline - self.clock().timestamp() + (self.detector.cap_wait() if self.detector else 0),
+                    deadline - self.clock().timestamp(),
                 )
             except _StuckBudget:
                 self.log.event("stuck_budget_kill", **call)
                 tally.findings = []
                 return done("timeout")
             except Exception as e:
-                return await failed(e, call, name, pre_call=True)
+                return await failed(e, call, name)
             result = LLMResult(**recorded)
             tally.last = result
             self.spool.write(spool_stem, attempt, f"{name}/output.txt", result.text)
 
-            try:
-                artifact = stage.emits.model_validate_json(unwrap_fence(result.text))
-            except ValidationError as e:
+            checked = check_reply(stage, result.text, workspace, self.severity)
+            artifact = checked.artifact
+            if artifact is None:
                 outcome = "invalid_artifact"
-                tally.findings = [_invalid(stage, e)]
-                self.log.event("artifact_invalid", **call, errors=e.error_count())
+                tally.findings = checked.hard
+                self.log.event("artifact_invalid", **call, errors=checked.errors)
                 continue
 
-            gated = run_gates(stage.gates, artifact, workspace, severity=self.severity)
-            hard_findings = [f for report in gated.hard_failures for f in report.findings]
+            hard_findings = list(checked.hard)
             if stage.review is not None:
                 try:
                     review = await self.race(lambda: stage.review(artifact, call_seq),
-                        deadline - self.clock().timestamp() + (self.detector.cap_wait() if self.detector else 0))
+                        deadline - self.clock().timestamp())
                 except _StuckBudget:
                     self.log.event("stuck_budget_kill", **call)
                     tally.findings = []
@@ -319,9 +293,8 @@ class Driver:
                 if any(f.code in stage.terminal_findings for f in hard_findings):
                     return done(outcome)
                 continue
-            if gated.passed:
-                tally.findings = gated.findings  # soft only
-                return done("ok", artifact)
+            tally.findings = checked.soft
+            return done("ok", artifact)
         return done(outcome)
 
     async def provider_failure(self, exc, *, owner, ticket, sequence, surface, workspace):
@@ -362,42 +335,6 @@ class Driver:
         if invocation is not None:
             await _observe(self._abort(invocation))
 
-    def begin_watch(self, *, owner, ticket, run_sequence, surface, stuck_budget, attempt):
-        from tempo.watchdog import Detector
-
-        identity = (owner, run_sequence, surface, attempt)
-        if self.detector is not None and identity == self._watch_identity:
-            if self._active is not None:
-                self._active.detector = self.detector
-            return
-        self.detector = None
-        self._watch_identity = identity
-        if isinstance(self.llm, ProviderLLM):
-            config, env = self._notify_config
-            def cap_wait():
-                return self.provider_wait(owner, run_sequence)
-            prior_wait = cap_wait()
-            self.detector = Detector(stuck_minutes=stuck_budget / 60,
-                clock=self.clock, sleep=self.sleep,
-                cap_wait=lambda: cap_wait() - prior_wait, log=self.log,
-                notify=watchdog_notifications(config, env, self.effects, self.log,
-                    redactor=self.redactor, cwd=self.llm._cwd,
-                    owner=owner, ticket=ticket, identity=surface))
-            if self._active is not None:
-                self._active.detector = self.detector
-
-    def provider_wait(self, owner, sequence):
-        if not isinstance(self.llm, ProviderLLM):
-            return 0
-        prefix = f'llm/{owner}/{sequence}/'
-        return sum(e.body['waited_seconds'] for e in self.journal.read()
-            if e.body.get('signal') == 'provider_cap_wait'
-            and e.body.get('call_key', '').startswith(prefix)) + self.llm.session.live_wait(prefix)
-
-    def watched_llm(self):
-        from tempo.watchdog import WatchedLLM
-        return WatchedLLM(self.llm, self.detector) if self.detector is not None else self.llm
-
     def _abort(self, invocation: _Invocation) -> asyncio.Task:
         if invocation.abort is None:
             async def abort() -> None:
@@ -427,10 +364,8 @@ class Driver:
     async def race(self, start: Callable[[], Awaitable[Any]], remaining: float) -> Any:
         if remaining <= 0:
             raise _StuckBudget
-        from tempo.watchdog import watch_deadline
-        timer = self.sleep(remaining) if self.detector is None else watch_deadline(self.detector, remaining)
+        timer = self.sleep(remaining)
         race = _Race(asyncio.ensure_future(start()), asyncio.ensure_future(timer))
-        detector = self.detector
         invocation = self._active
         if invocation is not None and invocation.task is asyncio.current_task():
             invocation.race = race
@@ -450,15 +385,13 @@ class Driver:
                         raise exc
                     raise
                 raise
-            if race.call.done() and (detector is None or detector.decide() != 'stuck'):
+            if race.call.done():
                 return race.call.result()
             await _observe(self._kill(race))
             raise _StuckBudget
         finally:
             if invocation is not None and invocation.race is race:
                 invocation.race = None
-            if invocation is None and detector is not None:
-                await _observe(asyncio.create_task(detector.close_notifications()))
 
     def _kill(self, race: _Race) -> asyncio.Task:
         if race.cleanup is None:
@@ -479,6 +412,26 @@ class Driver:
         return race.cleanup
 
 
+@dataclass(frozen=True)
+class Checked:
+    """Steps 5-6 of one reply: `artifact` is None when validation failed."""
+
+    artifact: BaseModel | None
+    hard: list[Finding]
+    soft: list[Finding]
+    errors: int = 0
+
+
+def check_reply(stage: LlmStage, text: str, workspace: Path, severity: Mapping[str, Severity]) -> Checked:
+    """Unwrap one fence, validate against `emits`, run the gates; shared by `Driver._run` and `submit`."""
+    try:
+        artifact = stage.emits.model_validate_json(unwrap_fence(text))
+    except ValidationError as e:
+        return Checked(None, [_invalid(stage, e)], [], e.error_count())
+    gated = run_gates(stage.gates, artifact, workspace, severity=severity)
+    return Checked(artifact, [f for report in gated.hard_failures for f in report.findings], gated.findings)
+
+
 def _invalid(stage: LlmStage, e: ValidationError) -> Finding:
     detail = "; ".join(f"{'.'.join(map(str, err['loc'])) or '<root>'}: {err['msg']}" for err in e.errors())
     return Finding(
@@ -493,5 +446,5 @@ def watchdog_notifications(config, env, effects, log, *, redactor, cwd, **contex
 
     return WatchdogNotifications(effects=effects,
         notifications=CommandNotifications(SubprocessExec(), cwd=cwd,
-            env=child_env(env, config, serving=None), timeout=NOTIFY_TIMEOUT_S,
+            env=dict(env), timeout=NOTIFY_TIMEOUT_S,
             scrub=redactor.scrub), argv=config.notify, log=log, **context)

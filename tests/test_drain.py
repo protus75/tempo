@@ -284,7 +284,7 @@ def test_the_budget_fold_counts_only_retry_named_draws(tmp_path):
     for _ in range(2):
         j.append(EventType.CAP_CONSUMED, {"cap": "retry", "ticket_sha": "old"}, ticket="red")
     for _ in range(5):  # other caps in the vocabulary never perturb the retry budget
-        j.append(EventType.CAP_CONSUMED, {"cap": "diagnosis", "ticket_sha": "old"}, ticket="red")
+        j.append(EventType.CAP_CONSUMED, {"cap": "decisions", "ticket_sha": "old"}, ticket="red")
     j.append(EventType.CAP_CONSUMED, {"cap": "retry", "ticket_sha": "old"}, ticket="someone-else")
     script = Script({"red": ["gate_failed"]})
     assert drain(root, script) == 0
@@ -372,7 +372,7 @@ def test_a_stuck_budget_over_the_per_ticket_ceiling_parks_at_dispatch(root, caps
     assert script.calls == ["fits"]
     assert tos(root, "too-long") == []
     out = capsys.readouterr().out
-    assert "too-long: `## Time budget` stuck 200m exceeds drain.max_ticket_minutes (90m)" in out
+    assert "too-long: `## Time budget` stuck 200m exceeds tickets.max_minutes (90m)" in out
     assert "lower `- stuck:`" in out
 
 
@@ -483,7 +483,7 @@ def test_rework_update_reenters_on_fresh_content(rework_repo, monkeypatch, mecha
     assert git_out(repo, "show", f"HEAD:tickets/{STEM}/ticket.md") == fresh[0]
     assert draws(events, STEM, "retry") == (0 if mechanical else 1)
     assert draws(events, STEM, "infra") == 1
-    assert draws(events, STEM, "diagnosis") == (0 if mechanical else 1)
+    assert draws(events, STEM, "decisions") == (0 if mechanical else 1)
     if not mechanical:
         draw = next(e for e in history if e.type == EventType.CAP_CONSUMED and e.body["cap"] == "retry")
         assert draw.body == {"cap": "retry", "ticket_sha": git_out(repo, "rev-parse", f"HEAD:tickets/{STEM}/ticket.md").strip()}
@@ -931,108 +931,6 @@ async def test_selected_retro_remains_killable_through_existing_control(root):
     assert report.killed and report.exit_code == 1 and llm.aborted == 1
     assert not list((root / "tickets/retro").glob("*.md"))
     assert not any(e.body.get("kind") == "retro_failed" for e in checkout.journal.read())
-
-
-@pytest.mark.parametrize("scenario", ["quiescence", "no-merge", "failure", "due"])
-def test_drain_retro_due_quiescence_and_pre_exit(tmp_path, monkeypatch, scenario):
-    from tempo import __main__ as cli, runner
-    from tempo.retro import Retro
-    from tests.test_providers import claude_ok
-
-    root = make_root(tmp_path)
-    config = (root / "config.yaml").read_text().replace("review: {}", "  - {tier: medium, surface: retro, candidates: [{provider: claude}]}\nreview: {}")
-    (root / "config.yaml").write_text(config)
-    git_out(root, "add", "config.yaml")
-    git_out(root, "commit", "-m", "retro route")
-    commit_ticket(root, "feature", confirmed(priority="P0"))
-    clock = Clock()
-    if scenario == "due":
-        for n in range(25):
-            journal(root).append(EventType.STATE_TRANSITION, {"to": "merged"}, ticket=f"prior-{n}")
-    invocations, dispatches, contexts, prompts = [], [], [], []
-    original_hook = Retro.__call__
-    async def hook(self, *, forced=False):
-        invocations.append((forced, list(dispatches)))
-        contender = Lockfile(self.checkout.config.state_dir, instance_id="retro-contender", clock=clock)
-        with pytest.raises(LockHeld):
-            contender.acquire()
-        return await original_hook(self, forced=forced)
-    monkeypatch.setattr(Retro, "__call__", hook)
-
-    class Process(SubprocessExec):
-        async def run(self, argv, **kwargs):
-            if argv[0] == "git":
-                return await super().run(argv, **kwargs)
-            if argv[1:] == ["--version"]:
-                return 0, "1.2.3", ""
-            if argv[0] == "pnpm":
-                return 0, "1.2.3", ""
-            assert argv[0] == "claude"
-            prompt = kwargs["stdin_path"].read_text()
-            if prompt == "Reply with the single word ok.":
-                return 0, claude_ok("ok"), ""
-            prompts.append((list(dispatches), prompt))
-            assert "current retro window" in prompt
-            if scenario == "failure":
-                return 1, "", "scripted retro outage"
-            out = claude_ok('{"proposals": []}')
-            if kwargs.get("on_spawn"):
-                kwargs["on_spawn"](123)
-            if kwargs.get("on_stdout_line"):
-                for line in out.splitlines(keepends=True):
-                    kwargs["on_stdout_line"](line)
-            return 0, out, ""
-    monkeypatch.setattr(cli, "SubprocessExec", Process)
-
-    async def drive(ctx, ticket, **kwargs):
-        dispatches.append(ticket.stem)
-        contexts.append(ctx)
-        if scenario == "no-merge":
-            terminal = "already_satisfied"
-            body = {"to": terminal}
-        else:
-            path = f"work/{ticket.stem}.py"
-            ctx.fs.write(root / path, b"ok\n")
-            await ctx.git.add(root, [path])
-            await ctx.git.commit(root, "admitted " + ticket.stem, only=[path])
-            terminal = "merged"
-            body = {"to": terminal, "commit": await ctx.git.rev_parse(root, "HEAD")}
-        ctx.driver.journal.append(EventType.STATE_TRANSITION, body, ticket=ticket.stem)
-        return terminal
-    monkeypatch.setattr(runner, "drive", drive)
-    prepared = runner.prepare_pipeline
-    owners = []
-    async def prepare(checkout):
-        writer = await prepared(checkout)
-        assert writer.stages.driver.llm.session is checkout.control.providers
-        owners.append(writer.stages.driver)
-        return writer
-    monkeypatch.setattr(runner, "prepare_pipeline", prepare)
-    seen = []
-    run_driver = __import__('tempo.driver', fromlist=['Driver']).Driver.run
-    async def recorded(self, stage, *args, **kwargs):
-        if stage.surface == "retro":
-            assert self in owners and kwargs["ticket"] is None
-            assert kwargs["workspace"] == root
-            seen.append(self)
-        return await run_driver(self, stage, *args, **kwargs)
-    monkeypatch.setattr("tempo.driver.Driver.run", recorded)
-    assert main(["drain"], cwd=root, env=ENV, clock=clock, pipeline=runner.pipeline) == 0
-    assert invocations[0] == (False, [])
-    if scenario == "no-merge":
-        assert seen == prompts == []
-    elif scenario == "failure":
-        assert dispatches == ["feature"] and len(seen) == 1
-        assert [order for order, _ in prompts] == [["feature"]]
-        failures = [e for e in journal(root).read() if e.body.get("kind") == "retro_failed"]
-        assert len(failures) == len(seen)
-    else:
-        assert seen and len(seen) == len(prompts)
-        if scenario == "due":
-            assert prompts[0][0] == [] and prompts[-1][0] == ["feature"]
-        else:
-            assert prompts[0][0] == ["feature"]
-        assert list((root / "tickets/retro").glob("*.md"))
 
 
 def machine_keeps(root, stem="held"):

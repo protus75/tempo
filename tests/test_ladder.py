@@ -16,24 +16,14 @@ from tests.test_terminal import author, clock, repo  # noqa: F401 -- fixture
 
 ROUTING = """schema_version: 1
 state_dir: .tempo/state
-providers:
-  - name: fake
-    kind: cli
-    package: test-cli
-    auth: FAKE_KEY
-    models_by_tier: {low: A, medium: A, high: B, max: B}
-    limits: {concurrency: 1}
-routing:
-  - {tier: low, surface: implement, candidates: [{provider: fake}]}
-  - {tier: medium, surface: implement, candidates: [{provider: fake}]}
-  - {tier: high, surface: implement, candidates: [{provider: fake}]}
-  - {tier: max, surface: implement, candidates: [{provider: fake}]}
-  - {tier: low, surface: review, candidates: [{provider: fake}]}
-  - {tier: medium, surface: review, candidates: [{provider: fake}]}
-  - {tier: high, surface: review, candidates: [{provider: fake}]}
-  - {tier: max, surface: review, candidates: [{provider: fake}]}
 review: {}
 merge: {}
+hosts:
+  codex:
+    models_by_tier: {low: A, medium: A, high: B, max: B}
+    pins: {review: C}
+orchestrator:
+  models: {codex: C}
 engine_plane_safety_inventory: [config.yaml]
 """
 
@@ -59,16 +49,12 @@ def run_drain(repo, script):
     return llm
 
 
-def test_next_rung_skips_same_model_and_missing_routes(repo):
+def test_next_rung_skips_the_same_host_model(repo):
     (repo / "config.yaml").write_text(ROUTING)
     config = load_config(None, cwd=repo)
-    assert next_rung(config, "low", "medium") == {"tier": "high", "effort": "medium"}
-    assert next_rung(config, "high", "medium") == {"tier": "high", "effort": "high"}
-    assert next_rung(config, "high", "max") is None
-    (repo / "config.yaml").write_text(ROUTING.replace(
-        "  - {tier: medium, surface: implement, candidates: [{provider: fake}]}\n", "").replace(
-        "  - {tier: medium, surface: review, candidates: [{provider: fake}]}\n", ""))
-    assert next_rung(load_config(None, cwd=repo), "low", "medium") == {"tier": "high", "effort": "medium"}
+    assert next_rung(config, "codex", "low", "medium") == {"tier": "high", "effort": "medium"}
+    assert next_rung(config, "codex", "high", "medium") == {"tier": "high", "effort": "high"}
+    assert next_rung(config, "codex", "high", "max") is None
 
 
 def test_escalation_rung_reaches_next_implement_without_editing_ticket(repo):
@@ -233,7 +219,7 @@ def test_split_dispatches_reviewed_rework(repo, monkeypatch, failure):
         assert history.index(mapping) < history.index(terminal) < history.index(retirement)
         assert all((repo / f"tickets/{s}/ticket.md").is_file() for s in ("piece-one", "piece-two"))
     assert producing == expected
-    assert draws(history, STEM, "diagnosis") == 1 and draws(history, STEM, "retry") == 0
+    assert draws(history, STEM, "decisions") == 1 and draws(history, STEM, "retry") == 0
     assert not (repo / f".tempo/state/worktrees/{STEM}").exists()
 
 
@@ -284,4 +270,4 @@ def test_rework_escalation_preserves_starting_capability_and_caps(repo, action):
         assert [(r.tier, r.effort) for r in llm.requests if r.surface == "implement"] == [
             ("high", "medium"), ("high", "high")]
         assert "agent_tier: high" not in (repo / f"tickets/{STEM}/ticket.md").read_text()
-    assert draws(events(repo), STEM, "diagnosis") == 1
+    assert draws(events(repo), STEM, "decisions") == 1

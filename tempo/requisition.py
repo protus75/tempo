@@ -12,7 +12,7 @@ from tempo.driver import Driver, _StuckBudget, unwrap_fence
 from tempo.gates import GateReport
 from tempo.llm import AgentTier, LLMRequest, LLMResult
 from tempo.llmeffect import llm_call
-from tempo.providers import ProviderCallError, ProviderDrought
+from tempo.providers import ProviderCallError
 from tempo.specs import REQ_RENDER_HEADROOM, RENDER_BOUND_CHARS, RenderOverBound, load_spec, render
 from tempo.stages import implement_inputs
 from tempo.tickets import Ticket, validate_ticket
@@ -109,18 +109,15 @@ async def review_ticket(driver: Driver, *, repo: Path, stem: str, text: str,
     driver.spool.write(spool_stem, attempt, f"{name}/prompt.md", prompt)
     req = LLMRequest(surface="requisition_review", rendered=prompt, tier=tier,
                      effort=spec.meta.effort, ticket=None, worktree=None)
-    if driver._active is None:
-        driver.begin_watch(owner=stem_slot, ticket=None, run_sequence=run_seq,
-            surface='requisition_review', stuck_budget=REQUISITION_STUCK_S, attempt=attempt)
     try:
         recorded = await driver.race(
-            lambda: llm_call(driver.effects, driver.watched_llm(), req, driver.redactor, ticket=stem,
+            lambda: llm_call(driver.effects, driver.llm, req, driver.redactor, ticket=stem,
                              stem=stem_slot, run_seq=run_seq, attempt=attempt, call_seq=call_seq),
             REQUISITION_STUCK_S,
         )
     except _StuckBudget:
         return snag("requisition review timed out", "timeout", road="retry the authoring review")
-    except (ProviderDrought, ProviderCallError):
+    except ProviderCallError:
         raise
     except Exception as exc:
         message = f"requisition review provider failed: {type(exc).__name__}: {exc}"
