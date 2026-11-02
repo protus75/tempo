@@ -6,9 +6,12 @@ tempo. Tempo is a port. It never builds itself:
   hardening, seeding tickets, phase exits, and the conductor.
 - Where the completed code contains that machinery, the port removes it (§2.5, P2).
 
-**Status:** revision 6. It applies the Kill, Cut, and two BuildIt rounds of review findings, and the
+**Status:** revision 7. It applies the Kill, Cut, and two BuildIt rounds of review findings, and the
 port-not-self-build correction, the review round on revision 5, and the no-human-in-the-loop rule,
-2026-11-01. Nothing runs until
+2026-11-01. Revision 7 adds chat-session conduct (§5.1, R14, D16). Revision 8 removes every agent CLI
+invocation: implement becomes a host subagent, and the supervisor that launched host CLIs is removed.
+Tempo runs inside each host's VS Code extension: the orchestrator is the extension's chat agent, with one
+subagent layer beneath it (R15, D17, D18). Nothing runs until
 you approve it. Each phase ends at a stop point, and nothing moves past a stop point without your OK.
 
 ## 1. Goal
@@ -23,15 +26,17 @@ you approve it. Each phase ends at a stop point, and nothing moves past a stop p
 | R2 | Subagents are single-depth only | §4.3, P4 |
 | R3 | Keep chupa's file creation and communication mechanism as the way agents communicate | §3, P4 |
 | R4 | Keep communication between agent sessions constrained and verified. Chupa's validation is kept unchanged. New checks are added only where a host subagent replaces a child process (§3.4). | §3.3, §3.4, P4 |
-| R5 | Run under Claude Code, GitHub Copilot, and Codex, each with its rule files in its native location | §5, P4 (live gate), P6, P7 |
+| R5 | Run in the VS Code extensions of Claude Code, GitHub Copilot, and Codex, each with its rule files in its native location | §5, P4 (live gate), P6, P7 |
 | R6 | New repository `tempo` | P0 |
 | R7 | Rename every chupa reference in carried-over code, specs, tests, and docs | P1 |
 | R8 | Port the working system: carry its code, not its build evidence (§2.3), and remove its self-build machinery (§2.5) | §2.3, §2.5, P1, P2 |
 | R9 | `uv build` produces a wheel for PyPI. The wheel ships the AI rules as data files, and `tempo init` places them in the host repo's top-level folders (§6 explains why an installer cannot) | §6, P6 |
 | R10 | `TEMPO_PLAN.md` holds the product features from SEED_PLAN.md (latest seed), filled with "tempo". The seed's build-process sections and passages are left out. It is amended as §10 lists. | P1, §10 |
 | R11 | Every operator tunable lives in `config.yaml` and is validated at load. Contract constants stay in code, pinned by tests (§4.4.1). | §4.4, P4 |
-| R12 | When a provider or host reports it hit its limit, work continues on an alternate. There is no cost accounting. Implement failover needs a second `routing` candidate, which the operator configures. | §4.4.5, §4.6, P2, P4 |
+| R12 | When a host reports it hit its limit, tempo journals a cooldown and the session ends with a handoff. `/tempo-run` resumes with no lost state. There is no host failover and no cost accounting. | §4.4.5, §4.6, P2, P4 |
 | R13 | **No human in the loop.** A human writes tickets. Tempo carries each one to merge, or to a terminal decision, with no human step. Every human checkpoint in chupa goes to the orchestrator or is removed (§2.6). The only stop is a failure that only a person can fix, such as an expired login (`auth_error`). | §2.6, §4.2, §4.6 |
+| R15 | **Agents only, no agent CLI.** Tempo never runs an agent CLI (`claude`, `codex`, `copilot`, or any other) as a child process, at any stage, in any phase from P4 on. **Everything runs in the host's VS Code extension:** the orchestrator is the extension's chat agent, started by the user in the chat panel, and every model call, implement included, is a subagent one layer beneath it (R2). Tempo never launches a session. Plain tools tempo runs (git, verification commands, test runners) are not agent CLIs and stay subprocesses. | §3.1, §3.2, §4.6, P4, P5 |
+| R14 | A human-present chat session on any host authors tickets instead of editing code, and keeps track of the user's open requests across side questions. The rules ship in every instruction file. | §5.1, P0, P1, P2, P6 |
 
 ## 2. Facts this plan rests on
 
@@ -200,8 +205,8 @@ orchestrator.
 
 ### 3.1 The one real change: who runs the call
 
-Chupa runs each read-only surface as a child CLI and reads its stdout. In tempo, the orchestrator
-spawns a host-native subagent instead. `Driver._run` is split at the point where the child process
+Chupa runs each surface as a child CLI and reads its stdout. In tempo, the orchestrator spawns a
+host-native subagent instead, for every surface, implement included (R15). `Driver._run` is split at the point where the child process
 ran. Nothing else in it changes.
 
 **`prepare(stem, surface)`** is a tool. It:
@@ -236,9 +241,9 @@ ran. Nothing else in it changes.
 - **retries with findings.** On a retry, it reads the findings that the last failed `submit` journaled in
   that effect's completion, and renders them into `retry_findings`.
 
-**Scope.** `prepare` and `submit` serve the five read-only surfaces that survive the conversion: review,
-requisition, triage, author, and retro. `diagnose` and `rework` stay on the old child-process path until
-P5 deletes them.
+**Scope.** `prepare` and `submit` serve the six surfaces that survive the conversion: implement (the one
+writing surface, §3.2), review, requisition, triage, author, and retro. `diagnose` and `rework` are never
+called from P4 on: the P4 orchestrator flow writes a handoff and stops on failure, and P5 deletes them.
 
 **Surfaces with no ticket** (triage, retro, and author before its ticket exists):
 - The stem is the one chupa's effect key already uses for that surface.
@@ -247,7 +252,8 @@ P5 deletes them.
 
 **The subagent** receives only the call id and those paths. It:
 - reads every part
-- does its work read-only, under the read root named in the prompt header
+- does its work under the read root named in the prompt header: read-only, except implement, which
+  writes inside its worktree (§3.2)
 - writes its reply JSON to `output.txt`
 
 Its final chat message is never acted on. The `SubagentStop` hook saves it to `call-NN/stop.txt`, for
@@ -311,26 +317,34 @@ any host-reported model.
 - the model-source note: `{resolved: <model>, host_reported: <model or null>}`. `host_reported` is
   filled only when a host's subagent hook payload carries a model field.
 
-**The old path.** The old child-process `Driver._run` path stays through P4 for two jobs: it is the
-parity-test reference, and it is what the not-yet-removed scripted modules (`drain`, `runner`, `diagnose`,
-`rework`) still call. P5 deletes it once they are gone.
+**The old path.** The old child-process `Driver._run` code stays through P4 only as the parity-test
+reference, and it runs only under the fake process-exec seam. No real agent CLI runs from P4 on. The
+not-yet-removed scripted modules (`drain`, `runner`, `diagnose`, `rework`) are not wired to the orchestrator
+and are not run live. P5 deletes them, the old path, and `providers.CliAdapter`.
 
-### 3.2 What stays a child process
+### 3.2 Implement is a subagent
 
-**Implement** stays chupa's writing surface. `providers.CliAdapter` runs it in the ticket worktree,
-unchanged:
-- the same argv, minus `--max-budget-usd`
-- env scrubbing
-- the stuck kill
-- process-group abort
+**Implement** stays chupa's writing surface, with chupa's `specs/implement.md`, but it runs as a host
+subagent through `prepare` → spawn → `submit`, like the read-only surfaces.
 
-**Two additions:**
-- Its argv disables project MCP servers and hooks. The exact flags are verified in the P4 live gate.
-- Its env carries no `TEMPO_SESSION`, so even if the worktree's `.mcp.json` loads, every tempo tool
-  refuses it (§4.1).
+**Worktree.** `start(stem)` creates the ticket worktree and branch through `git.py`, as chupa does
+(`.tempo/worktrees/<stem>`, branch `<stem>` from `main`). The prompt header names the worktree as the
+read and write root.
 
-It is exposed as `implement(stem)`, which returns a job id that `job(id)` polls (§4.1).
+**What the implement subagent may do** (enforced by hooks, §3.4):
+- read the worktree and the repo
+- write and edit files inside the worktree, except `tickets/<stem>/ticket.md`, which stays read-only (chupa's
+  no-self-editing rule)
+- run shell commands with their working directory inside the worktree, to build and test
+- never run git, an agent CLI, `gh`, a package publish, or anything that spawns, messages, or resumes an
+  agent
 
+**Who commits.** The subagent never runs git. Its `submit` validates the reply, then commits the
+worktree's changes to the ticket branch through `git.py` and records the head SHA. The outbox files under
+`tickets/<stem>/` stay uncommitted and are lifted as chupa does.
+
+**Limits replaced.** Chupa's stuck kill and process-group abort applied to a child process, which no longer
+exists. Their replacement is the call deadline (§4.4.3), with the ticket's `stuck_minutes` as the deadline.
 ### 3.3 Verification that is kept unchanged (R4)
 
 - **Schema validation.** Every reply is validated by the same pydantic `emits` models:
@@ -350,7 +364,11 @@ Chupa got confinement from argv: `--allowedTools Read,Grep,Glob,LS`, one fresh p
 stdout as the only channel. Tempo enforces the same in two places.
 
 **During the call, the hook is the only write barrier.** It enforces:
-- A subagent writes only its call's `output.txt`.
+- A read-only subagent writes only its call's `output.txt`. The implement subagent also writes inside its
+  worktree, minus its `ticket.md` (§3.2).
+- The implement subagent's shell commands must run in its worktree. The hook denies git, every agent CLI
+  binary, `gh`, and publish commands. Allowed commands still run unsandboxed, as chupa's implement child
+  did (chupa core: "fenced by gates, not jailed").
 - A subagent reads only under its call's recorded read root, plus the engine `specs/` and its call's parts.
 - A subagent never spawns, messages, or resumes an agent (R2).
 - The spawn prompt is exactly the call id and its paths, and the agent spawned is the one `prepare`
@@ -371,7 +389,8 @@ stdout as the only channel. Tempo enforces the same in two places.
   stays fast.
 - The snapshot's hash is journaled in the effect intent, not only kept in `call.json`.
 - `submit` refuses on any difference outside this call's own files, apart from journal entries written
-  by this call's `prepare` and `submit`.
+  by this call's `prepare` and `submit`. For implement, changes inside its worktree (except `ticket.md`
+  and the worktree's HEAD) are its work, not a confinement finding.
 
 A write that gets past a hook is caught before output is accepted, anywhere in the repo, the worktree, or
 `.tempo/`. Writes outside those trees are not covered.
@@ -392,13 +411,14 @@ A write that gets past a hook is caught before output is accepted, anywhere in t
   - At the spawn `PreToolUse`, the hook takes the call id from the spawn prompt.
   - At `SubagentStart`, it binds the subagent's id to that call.
 - **Subagents cannot use tempo tools.** Agent files list none. The hook denies any tempo MCP call from a
-  subagent, because the subagent inherits `TEMPO_SESSION`.
+  subagent.
 - **What the orchestrator may use.**
   - Allowed: tempo tools, the host spawn tool (spawn-checked), and file read and search tools.
   - Denied: shell, write, and edit.
-- **Sessions with no tempo session token.** Hooks enforce nothing unless `TEMPO_SESSION` is set or the
-  caller is a `tempo-*` agent. This covers you using a host by hand in the same repo. Unparseable
-  payloads are always denied.
+- **Which session is the orchestrator.** `begin_session` (§4.6) records the host's chat `session_id`
+  from the hook payload in the lockfile. Hooks apply the orchestrator rules to that chat session and the
+  subagent rules to `tempo-*` subagents. Every other chat session in the repo, such as one authoring
+  tickets, gets no tempo enforcement. Unparseable payloads are always denied.
 - **Codex, while a subagent marker is active.** Only these are allowed:
   - reads
   - that subagent's `output.txt` write
@@ -423,26 +443,27 @@ Each of these is confirmed by the P4 live gate before P5.
 Every tool is an existing effect-keyed function, or a thin wrapper over one.
 
 **Session token.**
-- The supervisor creates a token per session and records it in the lockfile, next to the current host.
-  Tools read the host from there for model resolution, agent names, and review parking.
-- It passes the token to the host process as `TEMPO_SESSION`. The generated MCP configs pass it
-  through to `tempo mcp`.
-- Every tool refuses when the token is missing or not the lockfile's current one.
+- The VS Code extension starts `tempo mcp` from the repo's MCP config whenever a chat opens, so a
+  running server does not by itself mean an orchestrator session.
+- `begin_session` (§4.6) takes the single-writer lockfile, creates a session token, and records it in the
+  lockfile with the host name and the chat `session_id`. Tools read the host from there for model
+  resolution and agent names.
+- `begin_session` in a second chat, on any host, finds the lock held and refuses, naming the holder.
+- Every tool except `begin_session` and `status` refuses when this server does not hold the lock.
 - This gives:
-  - a single writer across failover
-  - an implement child locked out of tempo tools
+  - a single writer across hosts
   - per-session counters for session limits
 
 **Long-running work is start-then-poll.**
-- `implement(stem)`, `check(stem)`, and `merge(stem)` return a job id at once.
+- `check(stem)` and `merge(stem)` return a job id at once. They run git and verification commands,
+  never an agent.
 - `job(id)` returns the job's state.
 - **Jobs outlive sessions.** Jobs run in detached worker processes, with their state kept in
   `.tempo/jobs/`. A job whose worker died reports `lost` and is recorded as `infra_error`, uncharged.
   Effect replay decides whether it re-runs.
 - **What P4 builds.** The Read and Run tools, plus `write_handoff`. P5 builds the Decide tools and the
   rest of Record.
-- **Single writer.** Every journal and git write takes one repo lock: tools, job workers, the
-  supervisor, and hooks. That lock is chupa's single-writer lock. The session token gates tools; the lock
+- **Single writer.** Every journal and git write takes one repo lock: tools, job workers, and hooks. That lock is chupa's single-writer lock. The session token gates tools; the lock
   serializes writers.
 - **`split` is two tools.**
   - `split_propose` runs rework's proposal checks and journals the proposal.
@@ -457,7 +478,8 @@ Every tool is an existing effect-keyed function, or a thin wrapper over one.
 | Kind | Tools |
 |---|---|
 | Read | `status` (includes open calls, so a resumed session recovers them), `list_eligible` (the mechanical half of `drain._select`: confirmed, deps settled, not held, caps remaining, no drought), `read_ticket`, `read_attempts` (`prior_attempts`), `read_box` |
-| Run | `start(stem)` (journals `{to: running}` and allocates `attempt`/`run_seq`, as `drain._run_one` did), `prepare`, `submit`, `implement`, `check`, `job`, `merge` |
+| Session | `begin_session` (takes the lock, §4.6); `write_handoff` releases it |
+| Run | `start(stem)` (journals `{to: running}`, allocates `attempt`/`run_seq` as `drain._run_one` did, and creates the worktree), `prepare`, `submit`, `check`, `job`, `merge` |
 | Decide | `retry`, `escalate` (offers only `caps.next_rung`'s rung), `reject`, `park`, `release_hold`, `reoffer`, `split_propose` / `split_commit` (see Split above), `confirm`. Each journals the same `state_transition` shape as `failure_terminal`: `{to, stage, reason, dispatch, rung}`. Each takes a required `lessons` argument, which the tool appends to `tickets/<stem>/decisions.md`. |
 | Record | `file_box`, `notify`, `write_handoff` (rewrites `tickets/orchestrator/handoff.md`) |
 
@@ -469,8 +491,7 @@ Every tool is an existing effect-keyed function, or a thin wrapper over one.
 - writing an existing `ticket.md`
 - `retry` once the same terminal reason has repeated `IDENTICAL_K` times. The reason is derived mechanically from the outcome, never from orchestrator text.
 - **at `max_tickets`:** `start` only
-- **past `max_minutes`:** every tool except `status`, `job`, `submit`, and `write_handoff`. The
-  supervisor's kill backs this up.
+- **past `max_minutes`:** every tool except `status`, `job`, `submit`, and `write_handoff`.
 - **one thing at a time:**
   - While a subagent call is open, every tool that writes or journals is refused except `submit`. That
     includes `start`, the Decide tools, `file_box`, `notify`, `write_handoff`, the jobs, and another
@@ -481,8 +502,8 @@ Every tool is an existing effect-keyed function, or a thin wrapper over one.
   (`concurrency: 1`), so this is no change in behavior.
 - **calls from a dead session:** a call opened under an earlier session token is abandoned.
   - The new session's `status` lists it.
-  - After a kill, the supervisor alone records it (`timeout`). Otherwise the next `prepare` on that
-    stem and surface records it as `infra_error`, uncharged.
+  - The next `prepare` on that stem and surface records it: `timeout` if its deadline has passed,
+    otherwise `infra_error`, uncharged.
   - It does not count as open.
 
 ### 4.2 Decisions moved from scripts to the orchestrator
@@ -497,7 +518,7 @@ Every tool is an existing effect-keyed function, or a thin wrapper over one.
 | `_dead_dependents` | re-scope or succession | detection, box filing |
 | serve box consumer | triage whenever any box message is pending (hardcoded) | — |
 | drain retro trigger | runs retro when `select_trigger` fires | trigger facts |
-| watchdog spiral warning | nothing; it was spend-based and is removed | stuck kill (time-based) |
+| watchdog spiral warning | nothing; it was spend-based and is removed | call deadline (time-based, §4.4.3) |
 
 P5 confirms that `IDENTICAL_K` compares `state_transition` reasons, not diagnose output, before
 `diagnose` is deleted.
@@ -508,8 +529,8 @@ P5 confirms that `IDENTICAL_K` compares `state_transition` reasons, not diagnose
 2. **Hooks.** Any spawn, message, or resume from a subagent is denied (§3.4).
 3. **Tests and live gate.** Each host's payloads are captured live in P4.
 
-The implement child cannot spawn tempo agents: it holds no session token, and argv turns off its agent
-features.
+The implement subagent is held to the same rules as every subagent: no spawn tool, hooks deny spawns
+and tempo tool calls, and its shell may not run an agent CLI (§3.4).
 
 ### 4.4 Configuration
 
@@ -530,19 +551,19 @@ pinning its value.
 
 #### 4.4.1 Kept as chupa has them
 
+Chupa's `providers[]` and `routing` rows configured child CLIs. They are removed in P4. Implement models
+come from `hosts.<host>.models_by_tier` (§4.4.2), like every other surface.
+
 | Parameter | Location | Default | Read by |
 |---|---|---|---|
-| Implement models per tier | `providers[].models_by_tier` | codex: low `gpt-6-luna`, medium/high `gpt-6.1-sol`, max `gpt-6-astra` | `implement` |
-| Implement candidates per tier, in failover order | `routing` rows, `surface: implement` | codex only (add a second for R12) | `implement` → `thresh` |
-| Provider concurrency, quota window | `providers[].limits.{concurrency, quota_window_minutes}` | `1`, `60` | `providers`, `thresh` |
-| Circuit breaker | `circuit_breaker.{k, cooldown_minutes}` | `3`, `10` | `thresh`, supervisor |
+| Circuit breaker | `circuit_breaker.{k, cooldown_minutes}` | `3`, `10` | `thresh` |
 | Starting tier and effort | ticket frontmatter `agent_tier`, `agent_effort` | `medium`/`medium` | `caps.capability` |
 | Ladder | `caps.next_rung` (code) | next tier with a distinct implement model, then effort +1; when exhausted, the orchestrator rejects or splits (§2.6) | `escalate` |
 | Repeated-failure threshold | `IDENTICAL_K` (constant) | 3 | `retry` refusal |
 | Re-prompts per call | `caps.retry` | 6 | `prepare`/`submit` |
 | Other per-ticket caps | `caps.{decisions, infra, premise_bounce}` | chupa defaults (`diagnosis` renamed `decisions`) | decide tools |
-| Ticket wall-clock limit | `tickets.max_minutes` (was `drain.max_ticket_minutes`) | chupa default | `implement` job, `list_eligible` |
-| Implement stuck limit | ticket `stuck_minutes` | chupa default | `implement` stuck kill |
+| Ticket wall-clock limit | `tickets.max_minutes` (was `drain.max_ticket_minutes`) | chupa default | `prepare`, `list_eligible` |
+| Implement stuck limit | ticket `stuck_minutes` | chupa default | implement call deadline |
 | Prompt size bound | `RENDER_BOUND_CHARS` 400,000, `REQ_RENDER_HEADROOM` 0.75 (constants) | same | `prepare` |
 | Diff budget | constants: 30 files / 1,500 inserted lines | same | `check` |
 
@@ -551,12 +572,12 @@ pinning its value.
 ```yaml
 hosts:
   claude:
-    models_by_tier: {low: claude-sonnet-5-5, medium: claude-sonnet-5-5, high: claude-opus-5-5, max: claude-opus-5-5}
+    models_by_tier: {low: claude-sonnet-5-5, medium: claude-sonnet-5-5, high: claude-sonnet-5-5, max: claude-sonnet-5-5}
     pins: {review: claude-opus-5-5}
     quota_window_minutes: 60
   codex:
-    models_by_tier: {low: gpt-6-luna, medium: gpt-6.1-sol, high: gpt-6.1-sol, max: gpt-6-astra}
-    pins: {}
+    models_by_tier: {low: gpt-6-luna, medium: gpt-6.1-sol, high: gpt-6.1-sol, max: gpt-6.1-sol}
+    pins: {review: gpt-6-astra}
     quota_window_minutes: 60
   # copilot:                       # operator fills in model ids to enable Copilot; checked like the others
   #   models_by_tier: {low: <id>, medium: <id>, high: <id>, max: <id>}
@@ -577,7 +598,7 @@ hosts:
   - Codex agent names use the mapped level, so duplicates collapse.
   - If two model ids clean up to the same agent name, config load refuses and names both.
 - **Reachable hosts.**
-  - Reachable hosts are those in `orchestrator.hosts`.
+  - Reachable hosts are those with an `orchestrator.models` entry.
   - Each needs a `hosts.<h>` entry and an `orchestrator.models.<h>` entry, or load refuses.
   - Review agents are not rendered for a host or tier that cannot run review.
   - `render` always writes hook files and `tempo:protocol` blocks.
@@ -585,21 +606,13 @@ hosts:
   - `render` deletes stale generated `tempo-*` agent files.
 - **Drift.** There is one staleness check, `render --check`, called by the drift test and by `doctor`.
   `prepare` refuses when the agent it would name does not exist.
-- **Review separation.**
-  - The resolved review model must not appear in the `models_by_tier` of any provider named in an
-    implement `routing` row.
-  - This is checked per host and tier.
-  - A host that cannot meet this does not run review. With the default implement routing, that is the
-    Codex host.
-  - While the session is on such a host, review calls park as `infra_error`/`provider_drought`,
-    uncharged, until a session runs on a host that can.
-  - Config load reports which hosts and tiers can run review.
-  - Config load refuses only when no host in `orchestrator.hosts` can run review at all.
-  - **Release.** A review parked this way clears automatically. `list_eligible` treats it as eligible
-    whenever the current host can run review.
-  - **A valid R12 setup.** For implement failover, add a second implement candidate whose models do not
-    include any host's review model. For example, Claude Sonnet for implement when review is pinned to
-    Claude Opus. The shipped `config.yaml` carries this example commented out.
+- **Review separation (D19).**
+  - Implement and review run on the same host now, so separation is by model: the review pin must not
+    appear in that host's `models_by_tier`. Config load refuses a host that breaks this.
+  - The defaults keep the strongest model of each host for review and cap implement below it. The
+    ladder (§4.4.1) then escalates effort once the tier models are used up.
+  - `served_review` and `ApprovalGate` are unchanged: they compare the recorded review model against the
+    recorded implement model.
 
 #### 4.4.3 Subagent timeouts
 
@@ -608,27 +621,29 @@ hosts:
   - the ticket's `stuck_minutes`, for review
   - `RETRO_STUCK_S`, a new constant set to chupa's `call_timeout` default, for retro
 - **Late reply.** `submit` after the deadline records `timeout`.
-- **Hung subagent.** A call past its deadline plus `SESSION_GRACE_S` is hung. The supervisor then kills
-  the session (§4.6).
+- **Hung subagent.** A call past its deadline is hung. The orchestrator stops it with the host's own
+  stop tool for a running subagent, then calls `submit`, which records `timeout`. The P4 live gate
+  confirms each host's stop tool. A host without one fails the gate.
 
 #### 4.4.4 Orchestrator session
 
 ```yaml
 orchestrator:
-  hosts: [claude, codex]           # failover order (§4.6); copilot added after the P4 live gate
-  models: {claude: claude-opus-5-5, codex: gpt-6-astra}
+  models: {claude: claude-opus-5-5, codex: gpt-6-astra}   # copilot added after the P4 live gate
   session:
     max_tickets: 5                 # tickets started before the session hands off
-    max_minutes: 240               # the supervisor kills the session after this plus SESSION_GRACE_S
+    max_minutes: 240               # tools refuse new work after this; the session hands off
 ```
 
 **How the orchestrator model reaches each host:**
 - Claude and Copilot: a `model:` field in the rendered orchestrator file.
-- Codex: `-c model=<id>` in the launch argv.
+- Codex: `model` in the rendered orchestrator profile. The P4 live gate confirms the location.
 
 #### 4.4.5 Provider limits, no cost
 
-- **Implement** keeps chupa's failover unchanged, minus cost.
+- **A limit inside a subagent** comes back from `submit` as `provider_drought` (§3.1). It arms
+  `provider-cooldown/<host>` using `hosts.<h>.quota_window_minutes`. The orchestrator writes the handoff,
+  and the session ends (§4.6).
 - **Removed:**
   - `est_cost_per_call_usd`
   - `--max-budget-usd`
@@ -637,7 +652,6 @@ orchestrator:
   - watchdog spend and spiral detection
   - retro, scorecard, and status spend and token measures
 - **Kept:** `provider` and `model` in effect completions, because `served_review` needs them.
-- **Host sessions** are handled by the supervisor (§4.6).
 
 #### 4.4.6 Not configurable, on purpose
 
@@ -649,9 +663,8 @@ orchestrator:
   then:
   - `READ_PART_CHARS`: the smallest whole-file Read size across hosts that pass the gate
   - `TOOL_CALL_S`: the shortest host MCP tool timeout, minus a margin
-  - `SESSION_GRACE_S`: the measured time for a host to exit after SIGTERM, plus a margin
+  - `LOCK_STALE_S`: several times `TOOL_CALL_S`, so a live session is never taken over
   - `RETRO_STUCK_S`: chupa's `call_timeout` default
-  - `NO_PROGRESS_SESSIONS`: 3
 
 ### 4.5 Session model
 
@@ -662,56 +675,39 @@ orchestrator:
   - `write_handoff` commits it through the single writer and journals the session number.
   - A handoff from an earlier session number is ignored.
 - This replaces drain, the daemon loop, and the self-upgrade re-exec.
+- The orchestrator loops inside one host session. It needs no fresh session for context: all state is
+  in files and the journal, so the host's own context compaction loses nothing that `status` cannot
+  give back.
 
-### 4.6 Supervisor
+### 4.6 Starting and ending sessions in VS Code (no supervisor)
 
-`tempo supervise` holds the lockfile and heartbeat and owns the session token. Its loop:
-1. Pick the first host in `orchestrator.hosts` that is not cooling down.
-2. Launch that host's orchestrator session, with `TEMPO_SESSION` set and output captured to
-   `<state>/spools/sessions/<n>/`.
-3. Watch it.
-4. Classify its exit.
-5. Repeat.
+There is no `tempo supervise`, and tempo launches no process that runs a model (R15). The orchestrator is
+the chat agent of the host's VS Code extension.
 
-| Host | Launch (verified in P4) |
-|---|---|
-| Claude Code | `claude -p --agent tempo-orchestrator <start prompt>` |
-| Codex | `codex exec -c model=<id> -c model_instructions_file=.codex/tempo-orchestrator.md <start prompt>` |
-| Copilot CLI | `copilot -p --agent tempo-orchestrator <start prompt>` (after the live gate) |
+**Start.** In the extension's chat panel, the user runs the tempo start command (`/tempo-run`; per-host
+files in §5). It loads the orchestrator rules into that chat. Its first tool call is `begin_session`,
+which takes the lock (§4.1), then `status`. Subagents spawned from that chat are the single layer
+beneath it. Starting is not a checkpoint inside the loop: the user writes tickets and starts the run,
+and no human step follows (R13).
 
-The supervisor classifies a session's exit output with `FAILURE_MARKERS`. The P4 live gate checks those
-markers against real output from each host.
+**Pre-start check.** `begin_session` refuses when the host's hook or MCP files fail `render --check`, so
+a repo where `tempo init` skipped a host's settings never runs without hooks.
 
-| How the session ended | Supervisor action |
-|---|---|
-| Normal (exit 0, and this session's number journaled by `write_handoff`) | next session; loop step 1 picks the host again |
-| Exit 0 without this session's handoff | treated as `unclassified` (next row) |
-| `quota_exhausted`, `rate_limited` | arm `provider-cooldown/<host>/<deadline>` using `hosts.<h>.quota_window_minutes`; next host |
-| `outage`, `unclassified`, crash | count toward that host's breaker (`circuit_breaker`); restart on the same host until the breaker opens, then the next host |
-| `auth_error` | journal, notify; the supervisor exits non-zero |
-| `model_error` | arm a cooldown for `circuit_breaker.cooldown_minutes`, notify; next host |
-| killed at `max_minutes`, or for a hung call | journal the open call as `timeout`; next session |
-| Queue quiescent (no eligible ticket, no pending box message) | idle. Launch no session; wait until the journal, the box, or a cooldown timer changes. Idle sessions never count toward no-progress. |
-| `NO_PROGRESS_SESSIONS` in a row with no journaled `state_transition`, while work was eligible | stop, journal, notify |
-| every host cooling down | wait for the earliest cooldown; journal, notify |
+**End.** The session ends with `write_handoff`, which also releases the lock, when:
+- the queue is quiescent (no eligible ticket, no pending box message)
+- `max_tickets` or `max_minutes` is reached
+- `submit` reports `provider_drought` (a cooldown is armed) or `auth_error` (journaled, notified)
+- the breaker opens on this host (`circuit_breaker`)
 
-**Pre-launch check.** The supervisor refuses to launch a host whose hook or MCP files fail
-`render --check`, so a repo where `tempo init` skipped a host's existing settings never runs without
-hooks.
+**A chat closed mid-run.** The lock records the chat `session_id` and a heartbeat that every tool call
+renews. `begin_session` takes over a lock whose heartbeat is older than `LOCK_STALE_S`.
 
-**Killing a session.** SIGTERM to the session's process group, wait `SESSION_GRACE_S`, then SIGKILL.
+**Resume.** The user runs `/tempo-run` again, in any host's extension. It resumes from `status`. A call
+left open is recorded by the next `prepare` (§4.1). A host still cooling down shows in `status`, and
+the orchestrator ends at once with a handoff naming the cooldown's end.
 
-**The start prompt** is fixed: "Resume from status. Follow the tempo-orchestrator rules. End with
-write_handoff."
-
-**Breaker counters are separate** for a host and the implement provider of the same name.
-
-**Cooldown keys are shared** between a host and the implement provider of the same name. On flat-rate
-plans one subscription serves both, so a Codex quota hit blocks both the Codex host and Codex implement.
-
-**Resuming after a stop.** A new session resumes from `status`. A `prepare` call left open is
-re-prepared under a new call id. The abandoned call is recorded as `infra_error`, uncharged, except after
-a `max_minutes` or hung-call kill, which records `timeout`.
+**Cooldown keys** are per host. On flat-rate plans one subscription serves the whole host, so one key
+covers every model on it.
 
 ## 5. Governing system for three hosts (R5)
 
@@ -722,14 +718,91 @@ does, and `prepare` renders it per call.
 | | Claude Code | GitHub Copilot | Codex |
 |---|---|---|---|
 | Instructions | `CLAUDE.md` | `.github/copilot-instructions.md` | `AGENTS.md` |
-| Orchestrator | `.claude/agents/tempo-orchestrator.md` | `.github/agents/tempo-orchestrator.agent.md` | `.codex/tempo-orchestrator.md` |
+| Orchestrator rules | `.claude/agents/tempo-orchestrator.md` | `.github/agents/tempo-orchestrator.agent.md` | `.codex/tempo-orchestrator.md` |
+| Start command in the VS Code chat (§4.6) | `.claude/commands/tempo-run.md` | `.github/prompts/tempo-run.prompt.md` | location confirmed in the P4 live gate |
 | Surface agents (generated, §4.4.2) | `.claude/agents/tempo-<surface>-<model>.md` | `.github/agents/tempo-<surface>-<model>.agent.md` | `.codex/agents/tempo-<surface>-<model>-<effort>.toml` |
 | Hooks | `.claude/settings.json` | `.github/hooks/tempo.json` | `.codex/hooks.json` |
-| MCP (tempo tools; passes `TEMPO_SESSION`) | `.mcp.json` | location confirmed in the P4 live gate | `.codex/config.toml` |
+| MCP (tempo tools) | `.mcp.json` | location confirmed in the P4 live gate | `.codex/config.toml` |
 | Caller identity | `agent_id`/`agent_type` | `parentAgentId`/`agentType` | markers, 1 thread |
 
 **Instruction files.** `CLAUDE.md`, `AGENTS.md`, and `.github/copilot-instructions.md` each carry
-chupa's managed `core` block, renamed `tempo:core`, plus a generated `tempo:protocol` block.
+chupa's managed `core` block, renamed `tempo:core`, a generated `tempo:protocol` block, and the
+`tempo:session` block (§5.1).
+
+### 5.1 Session conduct: chat sessions write tickets (R14)
+
+**The gap.** Chupa has chat rules (its `CLAUDE.md` rule set B), but they fall short in three ways:
+- They sit outside the managed `core` block, so `tempo init` would not ship them to host repos.
+- `AGENTS.md` leaves them out, so Codex and Copilot chats get none.
+- They have no ticket-first rule, and their open-threads rule is a one-liner. Boardgameui's
+  `CLAUDE.md` holds the rules that work in practice: ticket first, author identified work, announce
+  dives, instance plus cause, and track open threads. They are spread over about 300 lines there.
+
+**The fix.** A third managed block, `tempo:session`, comes from one source file, `tempo/rules/session.md`.
+`render` writes it into all three instruction files, so the hosts cannot drift apart. It is
+boardgameui's rules cut down to the minimum. Boardgameui-only machinery is left out: orchestrator
+lanes, phase waves, clone layout, and lint bundles.
+
+**Scope.** The block applies to a VS Code chat that is not running tempo. A chat that has run
+`/tempo-run` is the orchestrator and follows the orchestrator rules instead; hooks already fence it
+(§3.4). Every `tempo-*` subagent skips the block, because the implement subagent must edit code.
+
+**Proposed text** (ASCII in the shipped file):
+
+```markdown
+<!-- tempo:session begin -->
+## Chat session conduct
+
+Applies to a chat that is not running tempo. A chat that has run /tempo-run follows the
+tempo-orchestrator rules instead, and every tempo-* subagent skips this block.
+
+- **Ticket first.** Answer any request to change repo content (code, docs, config, rule files,
+  hooks) by authoring a ticket, never by editing. Run `tempo new <stem>`, fill
+  `tickets/<stem>/ticket.md` per `docs/tempo/tickets.md`, run `tempo lint <stem>` until it exits 0,
+  then stop and report the stem. Never edit tracked files outside `tickets/` from chat.
+  Only these exceptions apply: (1) the user says "edit directly", "skip the ticket", or the
+  equivalent in the same turn. Anger is not an override. (2) The user directs an edit to an
+  existing ticket file. (3) Read-only inspection.
+  If you edited without an exception, stop, say so, and offer to revert and refile as a ticket.
+  Why: a chat edit skips the gates, review, and record that make the work trustworthy.
+- **The ask is the confirmation.** Author a ticket the user asked for without asking "should I file
+  this?". Intake confirms it.
+- **Split by feature and edit surface.** One ticket per feature and set of files it changes, never
+  sized to fit a context. Ordering goes in `## Depends on` and `priority`, never in prose.
+- **Identified work becomes a ticket or an open thread, never prose.** Never write "we could file
+  a follow-up". For work the user did not request, name it in 1-2 sentences and ask: author now,
+  author after the current task, or skip. "After" makes it an open thread.
+- **Announce unsolicited dives.** Before an investigation the user did not ask for that will take
+  more than a couple of minutes, give one line on what and why and get now / after / skip. The
+  requested task always runs first.
+- **Instance first, cause captured.** A reported problem gets two tickets in one turn. The minimal
+  unblock comes first, and no cause diagnosis starts before it exists. Then a separate cause
+  ticket. The turn is not done until both files exist.
+- **Track open threads.** The user's main request is thread 1; answering a side question never
+  closes it. End every reply that leaves a question, option, or next step unresolved with
+  `Still open:` and one line per thread, every turn until the list is empty. A thread closes only
+  when the user resolves or dismisses it, or you finish it and say so. If unsure, it is open.
+- **Git safety.** Commit only files you authored, by explicit path. Never use a tree-wide
+  destructive verb (`clean`, `reset --hard`, `checkout -- .`). Never push unless told to.
+- **Terse.** Answer first. No hedging, filler, or restating the question.
+<!-- tempo:session end -->
+```
+
+**What the ticket-first rule needs from the code** (both in P6):
+- `tempo lint <stem>` validates an existing ticket with the same `validate_ticket` that `tempo new`
+  uses. Chupa can lint only a fresh template, so a chat could not check the ticket it filled in.
+- `docs/tempo/tickets.md` holds the ticket contract: frontmatter fields, body sections, and grammar.
+  It is extracted from TEMPO_PLAN §13 and shipped by `tempo init`, because host repos do not get
+  TEMPO_PLAN.
+
+**This repo.** Tempo never builds itself (D4), so ticket first cannot apply here. This repo's
+project-owned part of `CLAUDE.md` and `AGENTS.md` replaces it with **plan first**: a change request
+becomes an `AGENT_PLAN.md` edit, and the plan is approved before any code changes. Every other
+session rule applies unchanged.
+
+**Enforcement.** The rules are prose only, as in boardgameui, where prose works. A hook that denies
+chat edits outside `tickets/` is left out until a chat breaks the rule anyway. A hook cannot see a
+same-turn override, so it would need its own escape path.
 
 ## 6. Packaging (R9)
 
@@ -756,8 +829,8 @@ These were decided first, then revised by the review dispositions you accepted.
 
 - **D1 — orchestrator memory.** Decided. Lessons go into `tickets/<stem>/decisions.md` through the
   decide tools' `lessons` argument, and `prior_attempts` reads them.
-- **D2 — implement routing.** Decided. Implement stays routed by tier and provider through
-  `config.yaml`, and escalation picks the rung. Review separation is enforced by §4.4.2.
+- **D2 — implement routing.** Revised by D17. Implement models come from `hosts.<h>.models_by_tier`
+  like every surface, and escalation picks the rung. Chupa's `providers[]` and `routing` rows go.
 - **D3 — cost.** Decided. There is no cost accounting. The only provider concern is failing over on a
   limit (§4.4.5, §4.6).
 - **D4 — self-build.** Decided: tempo never builds itself. Its self-build machinery is removed in P2
@@ -768,11 +841,12 @@ These were decided first, then revised by the review dispositions you accepted.
 - **D6 — subagent model routing.** Decided: `hosts.<host>.models_by_tier` + `pins`, with generated
   agents (§4.4.2).
 - **D7 — effort per host.** Revised by Cut C4. Codex carries effort. Claude and Copilot carry none.
-- **D8 — subagent timeouts.** Decided: a deadline in `submit`, plus a supervisor kill.
+- **D8 — subagent timeouts.** Revised by D17: a deadline in `submit`, plus the host's own subagent stop
+  tool. The supervisor kill is gone with the supervisor.
   - The per-host prompt bound is removed (Cut C8).
   - It is added back only if a live run shows a host rejecting a prompt under `RENDER_BOUND_CHARS`.
 - **D9 — orchestrator session.** Revised by Cut C3 and Kill K9.
-  - Settings: `hosts` (failover order), `models`, `max_tickets`, and `max_minutes`.
+  - Settings: `models`, `max_tickets`, and `max_minutes`.
   - The triage threshold is hardcoded.
   - Context budget is not a session limit.
 - **D10 — Codex reply forging.** Decided: accept the risk. While a Codex subagent runs, the Codex
@@ -784,11 +858,25 @@ These were decided first, then revised by the review dispositions you accepted.
 - **D14 — the 22 scripted-layer test files.** Decided: carried, because several cover kept code (the
   stuck kill, process-group abort, cooldown timers, eligibility, pause). Each is deleted together with
   its module in P5.
-- **D15 — real-model run before P5.** Decided: at the end of P4, one real ticket on one host goes
-  through retry and escalate while `drain` still exists.
+- **D15 — real-model run before P5.** Revised by D17: at the end of P4, one real ticket on one host goes
+  through retry and escalate, fully through subagents. `drain` is not a fallback, because it runs CLIs.
+- **D17 — no agent CLI.** Decided (R15). Implement is a host subagent (§3.2). The supervisor,
+  `providers.CliAdapter`, and `routing` rows are removed. Git and verification
+  commands remain subprocesses.
+- **D18 — where sessions run.** Decided: in each host's VS Code extension. The user starts the
+  orchestrator with `/tempo-run` in the chat panel, and its subagents are the single layer beneath it.
+  No headless session, scheduler, or CLI launch.
+- **D19 — review separation on one host.** Decided: a model never reviews its own work. Each host's
+  strongest model is pinned to review, and implement is capped below it; config load refuses a host
+  whose review pin appears in its `models_by_tier` (§4.4.2).
 - **D11 — Copilot models.** Decided: they live in `config.yaml` under `hosts.copilot`, in the same
   format as the other hosts. The operator fills them in. The default config ships the section commented
   out.
+- **D16 — chat session conduct.** Proposed (§5.1). A `tempo:session` managed block in all three
+  instruction files carries boardgameui's chat rules in minimal form: ticket first, the ask is the
+  confirmation, identified work becomes a ticket or an open thread, announced dives, instance plus
+  cause, and tracked open threads. It is prose only, with no hook. This repo uses plan first instead
+  of ticket first.
 
 ## 8. Phases
 
@@ -797,7 +885,10 @@ series, one commit per removed module.
 
 ### P0 — Plan
 
-**Work:** The empty repo exists (done). This plan.
+**Work:**
+- The empty repo exists (done). This plan.
+- An interim `CLAUDE.md` and `AGENTS.md` for this repo. Each holds only the §5.1 session block, with
+  plan first in place of ticket first, so chats in this repo follow the rules before P1.
 
 **Exit:** You approve the plan.
 
@@ -807,6 +898,8 @@ series, one commit per removed module.
 - Carry over chupa's 54 `chupa/` modules as `tempo/`.
 - Carry over `specs/`, `config.yaml`, `docs/host-contract.md`, `CLAUDE.md`, `AGENTS.md`,
   `.gitignore`, `pyproject.toml`, and the 80 test files not listed in §2.3.
+  - Chupa's rule set B in `CLAUDE.md` is replaced by the P0 session block. `AGENTS.md` gains the same
+    block.
 - Also carry the test helper code that carried tests import. Nine carried test files import helpers
   from test files that are not carried. Move those helpers into `tests/helpers.py` rather than
   carrying the evidence tests.
@@ -840,6 +933,8 @@ series, one commit per removed module.
 **Work:**
 - Remove the §2.5 self-build machinery and GO gating from code, specs, config, `CLAUDE.md`, `AGENTS.md`,
   and `docs/host-contract.md`, tracing every caller.
+- Remove the "Supervising session" rule from `CLAUDE.md`. It names the conductor, drain, and Reject
+  queue, which P2 and P5 remove.
 - Apply the §2.6 human-checkpoint changes that live in carried, kept code. P5 completes those in removed
   modules.
 - Edit or delete the tests that exercise them. The code check found these across:
@@ -899,17 +994,18 @@ too. The move list above is a minimum, not the whole list.
 
 **Work:**
 - **(a)** Split `Driver._run` into `prepare`/`submit` (§3.1): prompt parts, the
-  state snapshot, stop classification, and the session token.
+  state snapshot, stop classification, and the session token. Implement moves onto the same path (§3.2),
+  with `submit` committing its worktree changes. Remove `providers[]` and `routing` from config.
 - **(b)** Start-then-poll tools and the `tempo mcp` server (§4.1).
 - **(c)** Hook policy and adapters for three hosts, failing closed on unparseable payloads (§3.4).
-- **(d)** Role definitions and `render` (§4.4.2, §5), the config edits (§4.4), and the supervisor
-  (§4.6).
+- **(d)** Role definitions and `render` (§4.4.2, §5), the config edits (§4.4), and session start and
+  end (§4.6).
   - P4's `render` writes the host files and the `tempo:protocol` block into the repo. P6 only packages
     them.
   - The orchestrator's instructions in P4 cover the call protocol in chupa's stage order:
     - `status` → `start`
     - requisition (`prepare`/spawn/`submit`)
-    - `implement` → `check`
+    - implement (`prepare`/spawn/`submit`) → `check`
     - review (`prepare`/spawn/`submit`)
     - `merge`
 
@@ -917,17 +1013,22 @@ too. The move list above is a minimum, not the whole list.
   - Add a plan §22 entry for each new contract constant.
   - Update `docs/host-contract.md`.
 - **(e)** Host fakes and a minimal fixture repo.
-- **(f) Live gate**, on each of Claude Code, Copilot CLI, and Codex:
+- **(f) Live gate**, in the VS Code extension of each of Claude Code, Copilot, and Codex:
+  - `/tempo-run` starts the orchestrator in the chat panel and `begin_session` records the chat's
+    `session_id`; hooks fence that chat and leave a second, plain chat alone
   - capture hook payloads for a subagent spawn, a read, a write, a shell command, a nested spawn, an
     agent message, and an orchestrator write. The unparseable and mismatch cases are made by altering the
     captured payloads. "Submit of an unissued call" is tested at the tool level.
   - run one `prepare` → spawn → `submit`
-  - confirm the launch argv, the MCP config location, and the limit exit markers
+  - run one implement subagent in a worktree: allowed writes and shell in the worktree; denied
+    writes outside it, `ticket.md` edits, git, and an agent CLI from its shell
+  - confirm the MCP config location, the limit markers in `stop.txt`, the host's subagent stop tool,
+    and that subagents spawned from the chat panel get the generated agent files and model
   - also capture: `SubagentStart` and `SubagentStop` payloads, a forced subagent limit hit, one round
-    trip with a prompt at `RENDER_BOUND_CHARS`, the non-interactive permission and MCP-approval flags,
-    and what each host does when a hook crashes or times out
+    trip with a prompt at `RENDER_BOUND_CHARS`, the extension's permission and MCP-approval settings for
+    a run with no prompts to the user, and what each host does when a hook crashes or times out
 - **(g) Real-model run (D15).** On one host that passed the gate, run one real ticket through retry and
-  escalate while `drain` still exists as the fallback.
+  escalate, every model call a subagent.
 
 **Exit:**
 - Per-host hook tests on the captured payloads cover:
@@ -945,10 +1046,10 @@ too. The move list above is a minimum, not the whole list.
 - Config tests: unknown key, unresolvable combination, review separation.
 - Constant pins.
 - A live-gate report per host, in `docs/livegate/<host>.md`.
-  - A host passes only if all of these are confirmed: the six hook cases, the round trip, the launch
-    argv, the MCP location, and the limit markers.
+  - A host passes only if all of these are confirmed: the six hook cases, the implement confinement
+    cases, the round trip, the MCP location, the limit markers, and the subagent stop tool.
   - **A host that fails the gate is dropped from the defaults until it is fixed.**
-  - R5 and the multi-host failover of R12 are met for the hosts that pass. A failed host is reported as
+  - R5 is met for the hosts that pass. A failed host is reported as
     an open gap; it does not block the others.
 - The (g) real-model run completes, and its decisions are reported.
   - Copilot is enabled when it passes **and** `hosts.copilot` is filled in.
@@ -967,28 +1068,40 @@ too. The move list above is a minimum, not the whole list.
   - ladder routing in `runner`
   - the `daemon` loop
   - `runner` dispatch
-  - the old `Driver._run` child path (§3.1)
+  - the old `Driver._run` child path (§3.1) and `providers.CliAdapter`. `FAILURE_MARKERS` stay, for
+    `stop.txt`.
 - Each removal also deletes its CLI command. At the end of P5, `__main__` joins the kept set and the
   import-graph test covers it.
 
 **Exit:**
 - A fake-host orchestrator session runs a ticket from intake to merge, and through each failure
   decision.
+- No code path in `tempo/` spawns an agent CLI. A test scans for the agent binary names in argv
+  construction.
 - A session killed mid-ticket resumes correctly from `status`.
 - Suite green after every removal.
 
 ### P6 — Governing files and packaging
 
-**Work:** Host files from `render`, `tempo init`, and pyproject shared-data.
+**Work:**
+- Host files from `render`, `tempo init`, and pyproject shared-data.
+- The `tempo:session` block (§5.1): `tempo/rules/session.md`, rendered into all three instruction
+  files with the same marker and idempotence contract as `tempo:core`.
+- `tempo lint <stem>`, and `docs/tempo/tickets.md` extracted from TEMPO_PLAN §13 (§5.1).
 
 **Exit:**
 - The wheel holds `share/tempo/rules/**`.
+- `tempo init` writes `tempo:session` into all three instruction files, and a second run is
+  byte-identical.
+- `tempo lint` exits 0 on a valid filled ticket, and on an invalid one exits nonzero with each finding
+  and its paved road.
 - `tempo init` into an empty repo produces the §5 layout plus a default `config.yaml`.
 - Installing from the wheel into a clean venv works.
 
 ### P7 — Live runs
 
-**Work:** On the P4 fixture repo, run real tickets on each host that passed the live gate.
+**Work:** On the P4 fixture repo, run real tickets from the VS Code extension of each host that passed
+the live gate.
 
 **Exit:**
 - Each host completes a ticket end to end with verified artifacts.
@@ -1005,10 +1118,13 @@ too. The move list above is a minimum, not the whole list.
     (D10).
 - **Model provenance is resolved, not attested (§3.3).** A host silently substituting a model is not
   detected.
-- **No spiral detection.** Only the stuck timeout, `max_minutes`, and the supervisor's no-progress stop
-  guard against thrashing.
-- **A host limit ends the whole session.** The call in flight loses its work and is re-prepared,
-  uncharged.
+- **No spiral detection.** Only the call deadline, `IDENTICAL_K`, and `max_minutes` guard against
+  thrashing.
+- **A host limit ends the whole session**, and it stays stopped until the user runs `/tempo-run` again. The call
+  in flight loses its work and is re-prepared, uncharged.
+- **Implement's shell is not sandboxed.** Hooks confine its working directory and deny git and agent
+  CLIs, and the `submit` snapshot catches writes in the repo and `.tempo/`. Writes elsewhere on the
+  machine are not caught, as with chupa's implement child.
 - **P1's failure count is unknown until run.** 37 of the 80 carried test files read chupa's plan text, and 9 import helpers from uncarried tests.
 - **The orchestrator's decisions meet a real model only in P7**, through the retry and escalate runs.
   Nothing measures them before then.
@@ -1025,7 +1141,8 @@ changes are made in the phase shown, so the plan and the code stay in step.
 - **P4 (§6, §8, §15):**
   - The read-only surface call becomes `prepare` + subagent + `submit`.
   - Configuration per §4.4.
-  - Session token, supervisor, and start-then-poll tools.
+  - Implement becomes a subagent surface; `providers[]` and `routing` are removed.
+  - Session token, session start and end (no supervisor), and start-then-poll tools.
 - **P5 (§9, §11, §12, §14):**
   - Dispatch, failure routing, the ladder walk, diagnose, rework, and the drain and daemon loops become
     orchestrator decisions through the §4.1 tools. Caps and refusals stay in tools.
@@ -1033,5 +1150,7 @@ changes are made in the phase shown, so the plan and the code stay in step.
   - Reserve `tickets/orchestrator/`.
   - Add `decisions.md` to the ticket dir listing.
   - Add `orchestrator` to the `source` vocabulary.
-- **P6 (§17):** Root agent files become three, each with `tempo:core` and `tempo:protocol`.
+- **P6 (§17):** Root agent files become three, each with `tempo:core`, `tempo:protocol`, and
+  `tempo:session`. Rule set B is replaced by the `tempo:session` block.
+- **P6 (§13):** Add the `lint <stem>` verb to touchpoint 1, idea intake.
 - **P6 (§18):** The "virtual project" rule ends at the release path, the PyPI wheel.
