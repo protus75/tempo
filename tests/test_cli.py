@@ -369,12 +369,13 @@ def test_python_dash_m_tempo_is_the_entry(root):
     assert proc.returncode == 2
 
 
-def test_project_stays_virtual():
+def test_the_tempo_command_is_the_cli_entry():
+    """Hooks and the orchestrator run `tempo` (AGENT_PLAN.md P4b); hatchling builds it (section 6)."""
     import tomllib
 
     pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
-    assert "scripts" not in pyproject["project"]
-    assert "build-system" not in pyproject
+    assert pyproject["project"]["scripts"] == {"tempo": "tempo.__main__:main"}
+    assert pyproject["build-system"]["build-backend"] == "hatchling.build"
     assert os.path.isfile(Path(__file__).resolve().parents[1] / "tempo" / "__main__.py")
 
 

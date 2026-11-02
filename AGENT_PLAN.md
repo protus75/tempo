@@ -1041,6 +1041,8 @@ gate:
     On any failure it writes the handoff and stops. The decision rules come in P5.
   - Add a plan §22 entry for each new contract constant.
   - Update `docs/host-contract.md`.
+  - Give `pyproject.toml` the hatchling build backend and the `tempo` script, so the fixture repo can
+    run `tempo` (`uv tool install --editable <tempo checkout>`). P6 adds the shared-data files.
 - **(e)** Host fakes and a minimal fixture repo.
 - **(f) Live gate**, in the VS Code extension of each of Claude Code, Copilot, and Codex:
   - `/tempo-run` starts the orchestrator in the chat panel and `begin_session` records the chat's
