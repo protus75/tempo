@@ -6,8 +6,9 @@ tempo. Tempo is a port. It never builds itself:
   hardening, seeding tickets, phase exits, and the conductor.
 - Where the completed code contains that machinery, the port removes it (§2.5, P2).
 
-**Status:** revision 5. It applies the Kill, Cut, and two BuildIt rounds of review findings, and the
-port-not-self-build correction, 2026-11-01. Nothing runs until
+**Status:** revision 6. It applies the Kill, Cut, and two BuildIt rounds of review findings, and the
+port-not-self-build correction, the review round on revision 5, and the no-human-in-the-loop rule,
+2026-11-01. Nothing runs until
 you approve it. Each phase ends at a stop point, and nothing moves past a stop point without your OK.
 
 ## 1. Goal
@@ -30,6 +31,7 @@ you approve it. Each phase ends at a stop point, and nothing moves past a stop p
 | R10 | `TEMPO_PLAN.md` holds the product features from SEED_PLAN.md (latest seed), filled with "tempo". The seed's build-process sections and passages are left out. It is amended as §10 lists. | P1, §10 |
 | R11 | Every operator tunable lives in `config.yaml` and is validated at load. Contract constants stay in code, pinned by tests (§4.4.1). | §4.4, P4 |
 | R12 | When a provider or host reports it hit its limit, work continues on an alternate. There is no cost accounting. Implement failover needs a second `routing` candidate, which the operator configures. | §4.4.5, §4.6, P2, P4 |
+| R13 | **No human in the loop.** A human writes tickets. Tempo carries each one to merge, or to a terminal decision, with no human step. Every human checkpoint in chupa goes to the orchestrator or is removed (§2.6). The only stop is a failure that only a person can fix, such as an expired login (`auth_error`). | §2.6, §4.2, §4.6 |
 
 ## 2. Facts this plan rests on
 
@@ -65,7 +67,7 @@ These come from read-only research on chupa at commit `63b89e4`.
 - **Merge.**
   - Merge needs an `ApprovedInvoice` whose `reviewed_sha` equals the branch head.
   - Gates: scope fence, verification, run record, diff budget, core drift, bug evidence.
-  - Merge adds: ticket schema, post-rebase, approval, seed safety.
+  - Merge adds: ticket schema, post-rebase, approval, seed safety. Seed safety is removed in P2 (§2.5).
 - **Findings across attempts.** Findings reach the next attempt only through files and the journal:
   `prior_attempts` and `_prior_findings` read `review.md`, `checks.json`, and the diagnosis lessons.
 
@@ -103,17 +105,6 @@ modules. Only 3 of 146 test files touch only kept modules.
 - `hosts/`
 - `CHUPA_PLAN.md`
 - chupa's `README.md` and `uv.lock`
-- 22 test files whose subject is the scripted layer that P5 removes, so carrying them would only mean
-  editing them to delete them:
-  - `test_drain`, `test_drain_reentry`, `test_drain_upgrade`
-  - `test_daemon_admission`, `test_daemon_composition`, `test_daemon_config`, `test_daemon_pause`,
-    `test_daemon_tasks`
-  - `test_diagnose`
-  - `test_kill_cli_activation`, `test_kill_executor_abort`, `test_kill_failure_suppression`,
-    `test_kill_signal_journal`, `test_kill_worker_stop`
-  - `test_rework`
-  - `test_seed_path`, `test_seed_successor`
-  - `test_serve`, `test_storm_hold`, `test_terminal`, `test_scheduler`, `test_restart_timers`
 - 66 evidence test files:
   - all `test_seeded_*`
   - all `test_phase*_exit`
@@ -157,13 +148,53 @@ Chupa's completed code still carries the machinery it used to build itself. Temp
 | `artifacts.py` | the eval-report and `ExitReceipt` schemas; the `unit` field on findings |
 | `requisition.py` | spec-gap plan-unit naming |
 | `caps` / `config` | the `hardening` cap |
-| `specs/implement.md`, `specs/requisition_review.md` | the `plan_contract`/`render` data blocks and plan-unit text |
+| `specs/implement.md`, `specs/requisition_review.md` | the `plan_contract` and `prior_review` data blocks, the seeding exception, and plan-unit text. The `render` block in `requisition_review.md` **stays**: it is how the reviewer sees the implement prompt. |
+| `specs.py` (rest) | `PlanContractError`, `plan_id`, `required_units`, `without_unit`, `lint_plan`, `_lint_registries`, and their constants |
+| `tickets.py` (rest) | `PLAN_FILE`, the `seed` source, `SEED_REFUSED_SECTIONS`, `_seed_cites`, `siblings`, the `plan=` parameter of `parse_ticket` |
+| `watcher.py`, `serve.py`, `__main__.py:261-263` | the plan text threaded into ticket parsing |
+| `author.py:244`, `requisition.py` | plan reads, `hardenable_units`, `validate_finding_units`, the `prior` parameter. `author.py:244` reads the plan unconditionally and crashes on a host without one. |
+| `stages.py` (rest) | `_review_seeds`, `_seeded_stems`, `_prior_seed_reviews`, `lift_seeds`, `_prior_review`, `APPROVED_SEEDS`, `SeedReview`, `Invoice.seeds`, the seeding branch of `check()`, `Evidence.plan_main`/`plan_head`, the plan read in `implement_stage` |
+| `stages.py`, `merge.py` | the registered-report ("outbox-only admission") lane, which existed only for the eval reports: `_registered_files`, `_validate_reports`, and their uses in `gather_evidence`, `VerificationGate`, `check()`, `write_squash`, and `lifted_report_paths` |
+| `merge.py`, `mergequeue.py` | `SeedOnMain`, `Candidate.seeds`/`seed_checks_text`, the seed parameters of `read_candidate`, the seed lines in `mergequeue` (410, 437-440, 454), and its `"bootstrap"` admission reason |
+| `driver.py:231-240` | `materialize_exit_window` |
+| `watchdog.py:11, 65-68` | plan-unit scope observation, which only fed spend and spiral detection. It is removed together with cost. |
+| `config.py` | `seeding.max_seeds_per_admission` |
+| `box.py` | bootstrap ingest: `BOOTSTRAP_ORIGIN`, `ingest_bootstrap`, `ingest_main_checkout`, the `__main__` block |
+| `hostfiles.py` `CORE_TEMPLATE` | the self-build lines ("The plan is the seed…", "Start a phase only after…"). `CoreDriftGate` checks hosts against this text, so the template and the gate change together. |
+| `journal.py` `SIGNAL_NAMES` | `hardening_round`, `review_baseline`, `diagnose_eval_start`, `drain_handoff` |
+| `journal.py:122`, `lockfile.py:49,77`, `seams.py:113`, `__main__.py` | self-upgrade re-exec hooks |
+| GO gating (D12) | `baseline.py`, the `review_baseline` signal and the `artifacts.py` baseline family, the `go` input of `policy.start_state`, and the supervised-merge `go_absent` hold in `mergequeue` |
+| `runner.py:578-590`, `drain.py:75-94` | the plan-unit release in the keep verb, and the `spec_gap_hold` and plan-unit branches of `premise_parked` |
+| docstrings, comments, `config.yaml`, `docs/host-contract.md` | §19 unit citations, "Phase N" and "dormant" staging notes, the bootstrap and seeding text, the "pending cutover" GO section |
 
 **Kept, because they are product behavior:**
-- `premise_failed`: the implement outcome for a ticket whose premise is false. The ticket parks until
-  its `ticket.md` changes.
+- `premise_failed`: the implement outcome for a ticket whose premise is false. Chupa parked the ticket
+  until a human edited it. In tempo the orchestrator writes a successor ticket or rejects it (§2.6).
 - `## On-demand`: repo paths the implementer may read.
 - `spec_gap`/`authoring_error` finding kinds, without the plan `unit`.
+  - The field and the spec text asking for it go in the same commit, or every reply fails validation.
+  - A `spec_gap` finding takes the generic failure path.
+
+**Removal follows the code, not this table.** P2 traces every caller before deleting. The table is the
+starting list, verified against chupa at `63b89e4`.
+
+### 2.6 Human checkpoints in chupa and what replaces them (R13)
+
+| Chupa checkpoint | Tempo |
+|---|---|
+| GO gating: engine-authored tickets start as drafts; supervised merges are held | removed (D12): authored tickets are confirmed once requisition review approves; merges pass on gates plus review |
+| Reject queue: failed tickets wait for an operator to keep or kill them | the orchestrator decides: retry, escalate, split into a successor ticket, or reject. No queue waits on a person. |
+| `abandon-human` diagnosis verdict | removed with diagnose; the orchestrator decides |
+| review or requisition `rma` ("a human must change the ticket") | the orchestrator writes a successor ticket through `split`, which gets requisition review |
+| `premise_failed` park until a human edits `ticket.md` | the orchestrator writes a successor ticket or rejects |
+| draft `confirm` verb | automatic |
+| operator `pause` / `resume` / `kill` | kept as optional emergency controls; never a step in the loop |
+
+**Spec text.** Text in the specs telling the model a human will act is reworded to name the
+orchestrator.
+
+**The only remaining stop** is a failure that only a person can fix, such as an expired login
+(`auth_error`). Tempo journals it, notifies, and stops (§4.6).
 
 ## 3. Communication design: chupa's mechanism, run by host subagents
 
@@ -193,9 +224,15 @@ ran. Nothing else in it changes.
     `reply: <path>`
   - the part paths
   - the reply path (`output.txt`)
-- **replays completed calls.** If the effect key is already completed, `prepare` returns the call
-  marked completed, and no spawn is needed. `submit` then re-runs the artifact writer from the journaled
-  result.
+- **replays completed calls**, but only when the latest completed `call_seq` succeeded. `prepare` then
+  returns the call marked completed, and no spawn is needed. `submit` re-runs the artifact writer from
+  the journaled result.
+  - If the latest completion was a charged failure, `prepare` opens `call_seq` + 1 with that
+    completion's findings.
+  - Chupa's `Effects.run` writes intent and completion inside one call. Tempo splits it into `begin`
+    (in `prepare`) and `complete` (in `submit`), with the same journal events.
+  - A second intent on a key with no completion is allowed: chupa already re-executes such a key
+    (`effects.py`).
 - **retries with findings.** On a retry, it reads the findings that the last failed `submit` journaled in
   that effect's completion, and renders them into `retry_findings`.
 
@@ -241,6 +278,20 @@ Steps 5-8 are `unwrap_fence`, strict validation against `emits`, `run_gates`, an
 **Notify.** The "notify" in the table calls chupa's existing notification function directly. The
 `notify` tool is P5.
 
+**Timing rules.**
+- `output.txt` is read only once `stop.txt` exists, or after the deadline. Before that, `submit`
+  returns `pending`.
+- The deadline is judged on the time recorded in `stop.txt`, not when `submit` is called.
+- A call whose validation worker has started never times out.
+
+**Limit hits inside a subagent.** A `provider_drought` outcome from `submit`:
+- arms `provider-cooldown/<host>`
+- counts against `caps.infra`, so a session cannot loop on an exhausted quota
+
+**Provider value.** For a subagent call, the effect completion records `provider` = the host name and
+`model` = the resolved model. `served_review` and `ApprovalGate` compare those against implement's
+provider and model.
+
 **Charged vs uncharged.**
 - A charged outcome completes the effect, and the next `prepare` uses the next `call_seq`.
 - An uncharged outcome (`infra_error`, an abandoned call) does not complete the effect. It is journaled
@@ -285,7 +336,7 @@ It is exposed as `implement(stem)`, which returns a job id that `job(id)` polls 
 - **Schema validation.** Every reply is validated by the same pydantic `emits` models:
   `ReviewVerdict`, `RequisitionReply`, `TriageReply`, `AuthorReply`, `RetroArtifact`.
 - **Gates.** `run_gates`, with gate-contract checks, severity, and paved roads.
-- **Check and merge gates.** Unchanged.
+- **Check and merge gates.** Unchanged, except the self-build pieces §2.5 removes: seed safety, the plan-unit fence anchor, and the registered-report lane. After P2 the scope fence checks path entries only.
 - **Review pinned to the SHA.** `ApprovalGate` and the `served_review` provenance checks are kept.
   - The model in the call record is the one `prepare` resolved and told the host to run. It is
     **resolved, not attested**: hosts do not report which model actually ran.
@@ -300,7 +351,7 @@ stdout as the only channel. Tempo enforces the same in two places.
 
 **During the call, the hook is the only write barrier.** It enforces:
 - A subagent writes only its call's `output.txt`.
-- A subagent reads only the ticket worktree, the engine `specs/`, and its call's parts.
+- A subagent reads only under its call's recorded read root, plus the engine `specs/` and its call's parts.
 - A subagent never spawns, messages, or resumes an agent (R2).
 - The spawn prompt is exactly the call id and its paths, and the agent spawned is the one `prepare`
   named.
@@ -308,21 +359,33 @@ stdout as the only channel. Tempo enforces the same in two places.
 - Every hook denies a payload it cannot parse, on all three hosts.
 
 **After the call, `submit` is the check.**
-- `prepare` snapshots the repo and the ticket worktree:
+- `prepare` snapshots the repo, the ticket worktree, and `.tempo/`:
   - HEAD
-  - `git status --porcelain --untracked-files=all --ignored`, excluding `.tempo/`
-  - a content hash of every listed path
+  - `git status --porcelain --untracked-files=all`
+  - a content hash of every changed or untracked file
+  - a content hash of everything under `.tempo/` except this call's own files (`output.txt`,
+    `stop.txt`, `call.json`)
   - the journal's last sequence number
-- `submit` compares against that snapshot. It refuses on any difference outside `output.txt`, apart
-  from journal entries written by this call's own tools.
 
-A write that gets past a hook is therefore caught before any output is accepted.
+  Gitignored build and venv folders are excluded by name (`.venv/`, build outputs), so the snapshot
+  stays fast.
+- The snapshot's hash is journaled in the effect intent, not only kept in `call.json`.
+- `submit` refuses on any difference outside this call's own files, apart from journal entries written
+  by this call's `prepare` and `submit`.
+
+A write that gets past a hook is caught before output is accepted, anywhere in the repo, the worktree, or
+`.tempo/`. Writes outside those trees are not covered.
 
 **State, reads, and calls:**
 - `<state>` is `.tempo/`. It is gitignored, and the snapshot excludes it.
 - **Subagent shell commands.** Codex subagents read through the shell.
   - The hook allows plain read commands (`cat`, `sed -n`, `head`, `tail`, `rg`, `grep`) on the allowed
     roots and denies every other shell command.
+  - Commands are parsed as argv. The hook denies:
+    - any shell metacharacter (`| ; & > < $ \``)
+    - `sed` scripts containing `w`, `W`, or `e`
+    - `rg --pre` and `--pre-glob`
+    - any path argument outside the read roots
   - A Codex subagent writes `output.txt` with Codex's own patch tool, allowed only for that file.
   - A write that gets through is still caught by the `submit` snapshot.
 - **One open call per session, on every host.**
@@ -378,6 +441,16 @@ Every tool is an existing effect-keyed function, or a thin wrapper over one.
   Effect replay decides whether it re-runs.
 - **What P4 builds.** The Read and Run tools, plus `write_handoff`. P5 builds the Decide tools and the
   rest of Record.
+- **Single writer.** Every journal and git write takes one repo lock: tools, job workers, the
+  supervisor, and hooks. That lock is chupa's single-writer lock. The session token gates tools; the lock
+  serializes writers.
+- **`split` is two tools.**
+  - `split_propose` runs rework's proposal checks and journals the proposal.
+  - The orchestrator then runs requisition review on each proposed ticket through `prepare`, spawn,
+    and `submit`.
+  - `split_commit` publishes the approved tickets.
+
+  A tool cannot spawn a subagent.
 - No tool call blocks longer than `TOOL_CALL_S`, a code constant set in P4 below the shortest host MCP
   tool timeout.
 
@@ -385,7 +458,7 @@ Every tool is an existing effect-keyed function, or a thin wrapper over one.
 |---|---|
 | Read | `status` (includes open calls, so a resumed session recovers them), `list_eligible` (the mechanical half of `drain._select`: confirmed, deps settled, not held, caps remaining, no drought), `read_ticket`, `read_attempts` (`prior_attempts`), `read_box` |
 | Run | `start(stem)` (journals `{to: running}` and allocates `attempt`/`run_seq`, as `drain._run_one` did), `prepare`, `submit`, `implement`, `check`, `job`, `merge` |
-| Decide | `retry`, `escalate` (offers only `caps.next_rung`'s rung), `reject`, `park`, `release_hold`, `reoffer`, `split` (runs rework's existing proposal checks plus requisition review), `confirm`. Each journals the same `state_transition` shape as `failure_terminal`: `{to, stage, reason, dispatch, rung}`. Each takes a required `lessons` argument, which the tool appends to `tickets/<stem>/decisions.md`. |
+| Decide | `retry`, `escalate` (offers only `caps.next_rung`'s rung), `reject`, `park`, `release_hold`, `reoffer`, `split_propose` / `split_commit` (see Split above), `confirm`. Each journals the same `state_transition` shape as `failure_terminal`: `{to, stage, reason, dispatch, rung}`. Each takes a required `lessons` argument, which the tool appends to `tickets/<stem>/decisions.md`. |
 | Record | `file_box`, `notify`, `write_handoff` (rewrites `tickets/orchestrator/handoff.md`) |
 
 **Refusals, enforced in the tool:**
@@ -394,21 +467,22 @@ Every tool is an existing effect-keyed function, or a thin wrapper over one.
 - merge without an approval for the admitted SHA
 - `submit` for an unissued call
 - writing an existing `ticket.md`
-- `retry` once the same terminal reason has repeated `IDENTICAL_K` times
+- `retry` once the same terminal reason has repeated `IDENTICAL_K` times. The reason is derived mechanically from the outcome, never from orchestrator text.
 - **at `max_tickets`:** `start` only
 - **past `max_minutes`:** every tool except `status`, `job`, `submit`, and `write_handoff`. The
   supervisor's kill backs this up.
 - **one thing at a time:**
-  - While a subagent call is open, `implement`, `check`, `merge`, `write_handoff`, and another `prepare`
-    are all refused.
+  - While a subagent call is open, every tool that writes or journals is refused except `submit`. That
+    includes `start`, the Decide tools, `file_box`, `notify`, `write_handoff`, the jobs, and another
+    `prepare`. `status` and `job` (read-only) stay allowed.
   - While any job is running, including one left from an earlier session, `prepare` is refused.
 
   The `submit` snapshot then only ever sees the call's own changes. Chupa also ran serially
   (`concurrency: 1`), so this is no change in behavior.
 - **calls from a dead session:** a call opened under an earlier session token is abandoned.
   - The new session's `status` lists it.
-  - The next `prepare` on that stem and surface records it as `infra_error`, uncharged, or `timeout` if
-    the supervisor killed the session.
+  - After a kill, the supervisor alone records it (`timeout`). Otherwise the next `prepare` on that
+    stem and surface records it as `infra_error`, uncharged.
   - It does not count as open.
 
 ### 4.2 Decisions moved from scripts to the orchestrator
@@ -463,7 +537,7 @@ pinning its value.
 | Provider concurrency, quota window | `providers[].limits.{concurrency, quota_window_minutes}` | `1`, `60` | `providers`, `thresh` |
 | Circuit breaker | `circuit_breaker.{k, cooldown_minutes}` | `3`, `10` | `thresh`, supervisor |
 | Starting tier and effort | ticket frontmatter `agent_tier`, `agent_effort` | `medium`/`medium` | `caps.capability` |
-| Ladder | `caps.next_rung` (code) | next tier with a distinct implement model, then effort +1, then the Reject queue | `escalate` |
+| Ladder | `caps.next_rung` (code) | next tier with a distinct implement model, then effort +1; when exhausted, the orchestrator rejects or splits (§2.6) | `escalate` |
 | Repeated-failure threshold | `IDENTICAL_K` (constant) | 3 | `retry` refusal |
 | Re-prompts per call | `caps.retry` | 6 | `prepare`/`submit` |
 | Other per-ticket caps | `caps.{decisions, infra, premise_bounce}` | chupa defaults (`diagnosis` renamed `decisions`) | decide tools |
@@ -521,6 +595,11 @@ hosts:
     uncharged, until a session runs on a host that can.
   - Config load reports which hosts and tiers can run review.
   - Config load refuses only when no host in `orchestrator.hosts` can run review at all.
+  - **Release.** A review parked this way clears automatically. `list_eligible` treats it as eligible
+    whenever the current host can run review.
+  - **A valid R12 setup.** For implement failover, add a second implement candidate whose models do not
+    include any host's review model. For example, Claude Sonnet for implement when review is pinned to
+    Claude Opus. The shipped `config.yaml` carries this example commented out.
 
 #### 4.4.3 Subagent timeouts
 
@@ -612,8 +691,13 @@ markers against real output from each host.
 | `auth_error` | journal, notify; the supervisor exits non-zero |
 | `model_error` | arm a cooldown for `circuit_breaker.cooldown_minutes`, notify; next host |
 | killed at `max_minutes`, or for a hung call | journal the open call as `timeout`; next session |
-| `NO_PROGRESS_SESSIONS` in a row with no journaled `state_transition` | stop, journal, notify |
+| Queue quiescent (no eligible ticket, no pending box message) | idle. Launch no session; wait until the journal, the box, or a cooldown timer changes. Idle sessions never count toward no-progress. |
+| `NO_PROGRESS_SESSIONS` in a row with no journaled `state_transition`, while work was eligible | stop, journal, notify |
 | every host cooling down | wait for the earliest cooldown; journal, notify |
+
+**Pre-launch check.** The supervisor refuses to launch a host whose hook or MCP files fail
+`render --check`, so a repo where `tempo init` skipped a host's existing settings never runs without
+hooks.
 
 **Killing a session.** SIGTERM to the session's process group, wait `SESSION_GRACE_S`, then SIGKILL.
 
@@ -693,6 +777,15 @@ These were decided first, then revised by the review dispositions you accepted.
   - Context budget is not a session limit.
 - **D10 — Codex reply forging.** Decided: accept the risk. While a Codex subagent runs, the Codex
   orchestrator could write `output.txt` itself (§3.4, §9).
+- **D12 — GO gating.** Decided: removed. Automation is the point (R13). Engine-authored tickets are
+  confirmed after requisition review, and merges pass on gates plus review.
+- **D13 — no human in the loop.** Decided (R13, §2.6). Every human checkpoint moves to the orchestrator
+  or is removed. The only stop is `auth_error`.
+- **D14 — the 22 scripted-layer test files.** Decided: carried, because several cover kept code (the
+  stuck kill, process-group abort, cooldown timers, eligibility, pause). Each is deleted together with
+  its module in P5.
+- **D15 — real-model run before P5.** Decided: at the end of P4, one real ticket on one host goes
+  through retry and escalate while `drain` still exists.
 - **D11 — Copilot models.** Decided: they live in `config.yaml` under `hosts.copilot`, in the same
   format as the other hosts. The operator fills them in. The default config ships the section commented
   out.
@@ -713,39 +806,65 @@ series, one commit per removed module.
 **Work:**
 - Carry over chupa's 54 `chupa/` modules as `tempo/`.
 - Carry over `specs/`, `config.yaml`, `docs/host-contract.md`, `CLAUDE.md`, `AGENTS.md`,
-  `.gitignore`, `pyproject.toml`, and the 58 test files not listed in §2.3.
+  `.gitignore`, `pyproject.toml`, and the 80 test files not listed in §2.3.
+- Also carry the test helper code that carried tests import. Nine carried test files import helpers
+  from test files that are not carried. Move those helpers into `tests/helpers.py` rather than
+  carrying the evidence tests.
 - Write `TEMPO_PLAN.md` from SEED_PLAN.md filled with "tempo", keeping only the product features. The
   exact cut list is posted for approval first:
-  - drop §0 cold start, §19 phases and registries, §21 bootstrap blocks, and §22 build provenance
+  - drop §0 cold start, §19 phases and registries, §21 bootstrap blocks, and §22's build provenance
+  - keep the seed's section numbers, with gaps
+  - keep §22 as "Contract constants", for the entries that P4 adds
   - drop the self-build passages inside the feature sections: seeding tickets, plan entry units, plan
     hardening, phase exits, GO-grade corpus building
-- Generate `README.md` from TEMPO_PLAN's README block.
-- Rename chupa → tempo in identifiers, markers, `.chupa/`, and data sentinels.
+- Generate `README.md` from TEMPO_PLAN's README block, as a one-off extraction.
+- Rename chupa → tempo in identifiers, markers, `.chupa/`, data sentinels, and file names.
+  - The rename preserves case: chupa→tempo, Chupa→Tempo, CHUPA→TEMPO.
+  - It is a one-off script and is not committed.
+- Regenerate `uv.lock` with `uv lock`.
+- Name the project `tempo-agents` in `pyproject.toml`. It stays virtual until P6.
 - Run the full suite. Classify every failure as one of:
-  - (a) pinned to chupa's plan text — becomes input to P2
+  - (a) pinned to chupa's plan text or build evidence — becomes input to P2. After the rename the engine
+    reads `TEMPO_PLAN.md` as a plan-contract source, so these failures are expected until P2 removes
+    the plan reads.
   - (b) a real break — fixed now
 
 **Exit:**
 - The failure list, with causes and proposed handling, is approved.
-- No "chupa" string remains in carried code, specs, tests, or docs.
-- `python -m tempo status` runs.
+- No "chupa" string remains in carried files. This is checked case-insensitively; `AGENT_PLAN.md` is
+  excluded.
+- `python -m tempo status` exits 0 at the repo root with an empty `.tempo/`.
 
 ### P2 — Strip self-build machinery and cost
 
 **Work:**
-- Remove the §2.5 self-build machinery from code, specs, and config.
-  - Its tests go in the same commit: `test_hardening`, plus the plan-unit, seed, and phase-exit tests
-    inside `test_specs`, `test_tickets`, `test_requisition`, `test_stages`, `test_merge`, and
-    `test_gates`.
-  - Each test deletion is listed for approval first.
+- Remove the §2.5 self-build machinery and GO gating from code, specs, config, `CLAUDE.md`, `AGENTS.md`,
+  and `docs/host-contract.md`, tracing every caller.
+- Apply the §2.6 human-checkpoint changes that live in carried, kept code. P5 completes those in removed
+  modules.
+- Edit or delete the tests that exercise them. The code check found these across:
+  - `test_hardening`
+  - `test_host_contract`, `test_watchdog_activation`, `test_vocabularies`
+  - the entry-unit tests in `test_baseline`, `test_bug_gate`, `test_cli`, `test_config`, `test_hostfiles`,
+    `test_inbox`, `test_retro`, `test_retro_box`, `test_scorecard`, `test_status`,
+    `test_supervised_merge_hold`
+  - the seed, plan-unit, exit-window, report-lane, and GO cases in `test_specs`, `test_tickets`,
+    `test_requisition`, `test_stages`, `test_merge`, `test_mergequeue`, `test_gates`, `test_closed_sets`,
+    `test_reject_queue`, `test_driver`, `test_watchdog`, `test_box`,
+    `test_storm_notification_activation`, `test_author`, `test_policy`
+
+  Shared fixtures that contain `## Plan contract` or write a plan file are edited, not deleted. Each
+  deletion and edit is listed for approval first.
 - Remove cost accounting (§4.4.5) from code, tests, and specs.
 - Resolve the P1 (a) failures. Each is either self-build pinning, and removed with its code, or a
   feature test, pointed at TEMPO_PLAN.md.
 
 **Exit:**
 - Full suite green.
-- No reference to plan units, seeding, hardening, phase exits, or cost remains in `tempo/` or
-  `specs/`.
+- No reference to plan units, seeding, hardening, phase exits, GO, or cost remains in `tempo/`,
+  `specs/`, `config.yaml`, `CLAUDE.md`, `AGENTS.md`, or `docs/`. This is checked by a word-bounded grep,
+  with the remaining hits reviewed by meaning.
+- No code path reads `TEMPO_PLAN.md`.
 
 ### P3 — Cut the links
 
@@ -804,6 +923,11 @@ too. The move list above is a minimum, not the whole list.
     captured payloads. "Submit of an unissued call" is tested at the tool level.
   - run one `prepare` → spawn → `submit`
   - confirm the launch argv, the MCP config location, and the limit exit markers
+  - also capture: `SubagentStart` and `SubagentStop` payloads, a forced subagent limit hit, one round
+    trip with a prompt at `RENDER_BOUND_CHARS`, the non-interactive permission and MCP-approval flags,
+    and what each host does when a hook crashes or times out
+- **(g) Real-model run (D15).** On one host that passed the gate, run one real ticket through retry and
+  escalate while `drain` still exists as the fallback.
 
 **Exit:**
 - Per-host hook tests on the captured payloads cover:
@@ -824,6 +948,9 @@ too. The move list above is a minimum, not the whole list.
   - A host passes only if all of these are confirmed: the six hook cases, the round trip, the launch
     argv, the MCP location, and the limit markers.
   - **A host that fails the gate is dropped from the defaults until it is fixed.**
+  - R5 and the multi-host failover of R12 are met for the hosts that pass. A failed host is reported as
+    an open gap; it does not block the others.
+- The (g) real-model run completes, and its decisions are reported.
   - Copilot is enabled when it passes **and** `hosts.copilot` is filled in.
 
 ### P5 — Orchestrator replaces the scripts
@@ -831,7 +958,9 @@ too. The move list above is a minimum, not the whole list.
 **Work:**
 - Decide and record tools (§4.1).
 - Confirm where `IDENTICAL_K` gets its data.
-- Remove one scripted module per commit, listing each one's test deletions first:
+- Remove one scripted module per commit, listing each one's test deletions first. The 22 carried
+  scripted-layer test files (D14) are deleted with their modules; tests of kept code inside them are
+  first moved to the kept module's tests:
   - `drain`
   - `stages.diagnose` + `specs/diagnose.md`
   - rework routing + `specs/rework.md`
@@ -880,7 +1009,7 @@ too. The move list above is a minimum, not the whole list.
   guard against thrashing.
 - **A host limit ends the whole session.** The call in flight loses its work and is re-prepared,
   uncharged.
-- **P1's failure count is unknown until run.** 37 of the 58 carried test files read chupa's plan text.
+- **P1's failure count is unknown until run.** 37 of the 80 carried test files read chupa's plan text, and 9 import helpers from uncarried tests.
 - **The orchestrator's decisions meet a real model only in P7**, through the retry and escalate runs.
   Nothing measures them before then.
 
