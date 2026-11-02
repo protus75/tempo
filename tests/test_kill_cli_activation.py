@@ -27,14 +27,14 @@ from tests.test_stages import agent, implement_reply, verdict
 
 
 def applications(journal):
-    events = [e for e in journal.read() if e.body.get("kind") == daemon.KILL_APPLIED]
+    events = [e for e in journal.read() if e.body.get("kind") == control.KILL_APPLIED]
     assert all(e.type == EventType.SIGNAL and e.ticket is None and e.key is None for e in events)
     assert all(set(e.body) == {"kind", "request_id", "lifecycle_id"} for e in events)
     return [e.body for e in events]
 
 
 def applied(id, life):
-    return {"kind": daemon.KILL_APPLIED, "request_id": id, "lifecycle_id": life}
+    return {"kind": control.KILL_APPLIED, "request_id": id, "lifecycle_id": life}
 
 
 def test_live_kill_publishes_only_bound_request(root, monkeypatch, capsys):
@@ -46,7 +46,7 @@ def test_live_kill_publishes_only_bound_request(root, monkeypatch, capsys):
     try:
         with monkeypatch.context() as patch:
             for obj, name in ((Journal, "append"), (entry, "build_control"),
-                              (Lockfile, "release"), (daemon, "control_inbox")):
+                              (Lockfile, "release"), (control, "control_inbox")):
                 patch.setattr(obj, name, forbidden)
             assert invoke(root, "kill") == 0
         assert capsys.readouterr().out == "kill submitted: kill_1-A\n"
@@ -122,7 +122,7 @@ def test_kill_discovery_and_lifecycle_races_fail_closed(root, monkeypatch, capsy
         [request] = requests(root)
         assert request["lifecycle_id"] == "previous" and request["hold_id"] is None
         journal = Journal(owner.state_dir, Clock())
-        consumer = daemon.PauseConsumer(journal=journal, lifecycle_id="replacement",
+        consumer = control.PauseConsumer(journal=journal, lifecycle_id="replacement",
             state_dir=owner.state_dir, fs=LocalFileSystem(), sleep=lambda _: turn(),
             files=lambda: (owner.state_dir / "control/inbox").glob("*"), read=Path.read_bytes)
         consumer.inbox.consume()
@@ -225,7 +225,7 @@ def exercise_live_cli_kill(root, monkeypatch):
         llm.driver.sleep = Timer()
         append = checkout.journal.append
         def recorded(type, body, **kwargs):
-            if body.get("kind") == daemon.KILL_APPLIED:
+            if body.get("kind") == control.KILL_APPLIED:
                 trace.append("applied")
             return append(type, body, **kwargs)
         monkeypatch.setattr(checkout.journal, "append", recorded)
@@ -367,7 +367,7 @@ async def kill_between_calls(root, monkeypatch, kind):
         assert applications(c.journal) == [applied("kill", live.consumer.inbox.lifecycle_id)]
         events = c.journal.read()
         accepted = next(i for i, e in enumerate(events) if e.body.get("kind") == control.CONTROL_DECISION)
-        assert all(e.body.get("kind") == daemon.KILL_APPLIED for e in events[accepted + 1:])
+        assert all(e.body.get("kind") == control.KILL_APPLIED for e in events[accepted + 1:])
         assert audit_journal(c.journal) == []
         assert cleaned == [True] and orphans(events) == ["work"]
         assert writer.ctx.worktree("work").exists()
@@ -406,7 +406,7 @@ class ActiveKill:
                     self.cleaned = True
                     if self.failure is not None:
                         raise self.failure
-                await daemon._protected_cleanup(asyncio.create_task(cleanup()))
+                await control.protected_cleanup(asyncio.create_task(cleanup()))
         monkeypatch.setattr(runner, "drive", observed)
 
     async def start(self):
@@ -487,7 +487,7 @@ async def test_kill_application_is_once_and_identity_bound(root, monkeypatch, po
             for body in expected:
                 journal.append(EventType.SIGNAL, body)
         def reconstruct(lifecycle=life):
-            return daemon.PauseConsumer(journal=journal, lifecycle_id=lifecycle, state_dir=state,
+            return control.PauseConsumer(journal=journal, lifecycle_id=lifecycle, state_dir=state,
                 fs=c.fs, sleep=c.sleep, files=lambda: (), read=Path.read_bytes)
         recovered = reconstruct()
         recovered.inbox.recover()
@@ -497,7 +497,7 @@ async def test_kill_application_is_once_and_identity_bound(root, monkeypatch, po
         append = journal.append
         if point in {"before-append", "after-append"}:
             def failed(type, body, **kwargs):
-                if body.get("kind") == daemon.KILL_APPLIED:
+                if body.get("kind") == control.KILL_APPLIED:
                     if point == "after-append":
                         append(type, body, **kwargs)
                     raise OSError("application append failed")
@@ -627,7 +627,7 @@ async def test_kill_cleanup_is_atomic_and_failures_propagate(root, monkeypatch, 
     error = RuntimeError("cleanup refused")
     if failure == "application":
         def fail(type, body, **kwargs):
-            if body.get("kind") == daemon.KILL_APPLIED:
+            if body.get("kind") == control.KILL_APPLIED:
                 raise error
             return append(type, body, **kwargs)
         monkeypatch.setattr(c.journal, "append", fail)

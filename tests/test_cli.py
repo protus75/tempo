@@ -12,7 +12,7 @@ from tempo.__main__ import main
 from tempo.git import Git
 from tempo.journal import EventType, Journal
 from tempo.lockfile import Lockfile, LockHeld
-from tempo.runner import Refusal
+from tempo.checkout import Refusal
 from tempo.seams import SubprocessExec
 
 ENV = {
@@ -73,7 +73,6 @@ uv run pytest
 Needs a new dependency.
 
 ## Time budget
-- expected: 10m
 - stuck: 20m
 """
 

@@ -20,7 +20,7 @@ FINDING = {"code": "premise", "message": "the premise is false", "paved_road": "
 def reply(outcome: str, problems: list[str] | None) -> str:
     data = {
         "outcome": outcome, "summary": "handled the ticket", "surprises": "none",
-        "dead_ends": "none", "predicted_vs_actual": "none",
+        "dead_ends": "none",
         "findings": [FINDING] if outcome == "premise_failed" else [],
     }
     if problems is not None:

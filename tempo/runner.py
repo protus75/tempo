@@ -4,81 +4,42 @@ single-writer lockfile, and the stage-dispatch seam, all in the one process hold
 Exit codes (section 18): 0 merged, 1 a non-ok ticket terminal, 2 an engine-plane refusal.
 """
 
-import asyncio
 import sys
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
-from datetime import datetime
-from pathlib import Path
-from typing import TYPE_CHECKING, assert_never, cast
+from collections.abc import Awaitable, Callable
+from dataclasses import replace
+from typing import assert_never
 
-if TYPE_CHECKING:
-    from tempo.daemon import PauseConsumer
-
-import yaml
 
 from tempo.artifacts import Finding, Harvest, StageResult
 from tempo.box import BOX_DIR
 from tempo.storm import arrival_id
+from tempo.backlog import dead_dependents, settled_dependencies, ticket_state
+from tempo.checkout import SPECS_DIR, Checkout, Refusal, call_timeout
 from tempo.caps import capability, consume, next_rung, spent, spent_reason
-from tempo.config import Config, ConfigSnapshot, snapshot_config
+from tempo.config import snapshot_config
 from tempo.driver import Driver
 from tempo.effects import Effects
-from tempo.git import Git
-from tempo.journal import TERMINAL_STATES, Dispatch as JournalDispatch, Event, EventType, Journal, dispatch_of
+from tempo.journal import TERMINAL_STATES, Dispatch as JournalDispatch, Event, EventType, dispatch_of
 from tempo.llm import LLM
 from tempo.lockfile import Lockfile
 from tempo.merge import compose_pipeline, merge
 from tempo.providers import ProviderLLM
 from tempo.reconcile import reconcile
-from tempo.seams import Clock, FileSystem, GroupExec, Sleep
-from tempo.stages import (DiagnosisMaterial, StageContext, diagnose, lift_outbox,
-                          run_stages, write_diagnosis)
+from tempo.stages import (DiagnosisMaterial, StageContext, diagnose, harvest, harvest_orphan, run_stages,
+                          run_wall_seconds, write_diagnosis)
 from tempo.status import last_states, reject_queue
 from tempo.tickets import (INTAKE_SIGNAL, Ticket, TicketInvalid, intake,
-                           parse_ticket, split_frontmatter, stamp, stem_findings, ticket_path, validate_ticket)
+                           stamp, stem_findings, ticket_path, validate_ticket)
 
 EXIT_MERGED = 0
 EXIT_TICKET = 1
 EXIT_REFUSED = 2
 
-# Engine plane: the prompt specs ship with the engine, not the host checkout it runs against.
-SPECS_DIR = Path(__file__).resolve().parent.parent / "specs"
-HARVEST_TAIL_CHARS = 4_000
 IDENTICAL_K = 3
 
 # The stage seam: drives the validated ticket through the stages and merge, journals the run's single
 # terminal transition (section 11), and returns that terminal state.
 Dispatch = Callable[[Ticket], Awaitable[str]]
-
-
-
-# The provider backstop is the drain ceiling every ticket stuck budget fits under (section 9.7):
-# the ticket's own stuck budget is the bound the driver enforces, never a shorter per-call cap.
-def call_timeout(config: Config) -> float:
-    return config.drain.max_ticket_minutes * 60.0
-
-class Refusal(Exception):
-    """An engine-plane refusal (exit 2): nothing was dispatched."""
-
-    def __init__(self, message: str, paved_road: str) -> None:
-        super().__init__(f"{message} -- {paved_road}")
-
-
-@dataclass(frozen=True)
-class Checkout:
-    """The composed seams one invocation runs against; the stage pipeline is built from it."""
-
-    repo: Path
-    config: Config | ConfigSnapshot
-    env: Mapping[str, str]
-    exec_: GroupExec
-    git: Git
-    journal: Journal
-    fs: FileSystem
-    clock: Clock
-    sleep: Sleep = asyncio.sleep
-    control: "PauseConsumer | None" = None
 
 
 Pipeline = Callable[[Checkout], Dispatch]
@@ -251,7 +212,7 @@ async def failure_terminal(ctx: StageContext, ticket: Ticket, *, outcome: str, s
                            verdict: str | None = None, provider_drought: dict | None = None) -> str:
     """Preserve the producing terminal, then retire a published split before wiping and returning."""
     from tempo.rework import ReworkOrder
-    from tempo.daemon import storm_producer
+    from tempo.storm import storm_producer
 
     reason = ",".join(sorted({f.code for f in findings})) or outcome
     terminal = {"to": outcome, "stage": stage, "reason": reason}
@@ -340,53 +301,6 @@ async def failure_terminal(ctx: StageContext, ticket: Ticket, *, outcome: str, s
     return "rejected" if split else outcome
 
 
-def run_wall_seconds(ctx: StageContext, stem: str) -> float | None:
-    """Wall-clock seconds since the stem's latest `running` transition; None when it never ran."""
-    started = next((e.ts for e in reversed(ctx.driver.journal.read()) if e.type == EventType.STATE_TRANSITION
-                    and e.ticket == stem and e.body.get("to") == "running"), None)
-    return None if started is None else (ctx.driver.clock() - datetime.fromisoformat(started)).total_seconds()
-
-
-async def harvest(
-    ctx: StageContext, stem: str, *, attempt: int, stage: str | None, terminal: str,
-    findings: list[Finding], wall_seconds: float | None, kind: str = "harvest",
-) -> None:
-    """Extract the allowlisted failed-run record and lift it through the one outbox lane."""
-    spool = ctx.config.state_dir / "spools" / stem / str(attempt)
-    errors = list(spool.rglob("error.txt")) if spool.is_dir() else []
-    newest_error = max(errors, key=lambda p: (p.stat().st_mtime_ns, str(p))) if errors else None
-    reason = None if findings else (newest_error.read_text(errors="replace") if newest_error else terminal)
-    # Prompts are inputs, not stage logs: Review's prompt carries the unreviewed code diff.
-    logs = sorted(p for p in spool.rglob("*") if p.is_file() and p.name != "prompt.md") if spool.is_dir() else []
-    stage_log_tail = "".join(p.read_text(errors="replace") for p in logs)[-HARVEST_TAIL_CHARS:]
-    providers = ctx.config.state_dir / "spools" / "providers" / stem
-    events = list(providers.rglob("events.jsonl")) if providers.is_dir() else []
-    newest_events = max(events, key=lambda p: (p.stat().st_mtime_ns, str(p))) if events else None
-    events_tail = (newest_events.read_text(errors="replace") if newest_events else "")[-HARVEST_TAIL_CHARS:]
-    record = f"tickets/{stem}/run.md"
-    artifact = Harvest(
-        attempt=attempt, stage=stage, terminal=terminal, findings=findings, reason=reason,
-        diff_stat=await ctx.git.diff_stat(ctx.repo, "main", stem),
-        stage_log_tail=stage_log_tail, events_tail=events_tail,
-        wall_seconds=wall_seconds,
-        run_record=record if (ctx.repo / record).is_file() else None,
-    )
-    path = ctx.worktree(stem) / "tickets" / stem / "attempts" / str(attempt) / "harvest.json"
-    ctx.fs.write(path, (artifact.model_dump_json(indent=2) + "\n").encode())
-    await lift_outbox(ctx, stem, kind, attempt=attempt, only=f"attempts/{attempt}/harvest.json")
-
-
-async def harvest_orphan(checkout: Checkout, stem: str, attempt: int) -> None:
-    """Use the run-terminal harvest with an effects context; an orphan makes no model call."""
-    driver = Driver.from_config(checkout.config, llm=cast(LLM, None), env=checkout.env,
-                                clock=checkout.clock, sleep=checkout.sleep, fs=checkout.fs)
-    driver.journal = checkout.journal
-    driver.effects = Effects(checkout.journal)
-    ctx = StageContext(repo=checkout.repo, config=checkout.config, env=checkout.env, exec_=checkout.exec_,
-                       git=checkout.git, fs=checkout.fs, driver=driver, specs_dir=SPECS_DIR)
-    await harvest(ctx, stem, attempt=attempt, stage=None, terminal="abandoned", findings=[], wall_seconds=None)
-
-
 async def run_ticket(stem: str, checkout: Checkout, dispatch: Dispatch) -> int:
     if findings := stem_findings(stem):
         raise Refusal(findings[0].message, findings[0].paved_road)
@@ -402,7 +316,7 @@ async def run_ticket(stem: str, checkout: Checkout, dispatch: Dispatch) -> int:
             checkout.control.providers.timers.fire_due()
         if hasattr(dispatch, 'prepare'):
             await dispatch.prepare()
-        from tempo.daemon import storm_producer
+        from tempo.storm import storm_producer
 
         storm_producer(root=checkout.config.state_dir / BOX_DIR, fs=checkout.fs,
                        journal=checkout.journal, clock=checkout.clock).recover()
@@ -452,7 +366,7 @@ async def verdict(stem: str, checkout: Checkout, *, kill: bool) -> int:
             changed = await reject_ticket(stem, checkout)
             print(f"rejected {stem}" if changed else f"already rejected {stem}")
             return EXIT_MERGED
-        if path.is_file() and _ticket_state(path) == "draft":
+        if path.is_file() and ticket_state(path) == "draft":
             checkout.fs.write(path, stamp(path.read_text(), "state", "confirmed").encode())
             await checkout.git.add(checkout.repo, [rel])
             await checkout.git.commit(checkout.repo, f"tempo({stem}): confirmed", only=[rel])
@@ -481,28 +395,9 @@ async def verdict(stem: str, checkout: Checkout, *, kill: bool) -> int:
 
 def committed_draft(checkout, stem: str) -> bool:
     path = checkout.repo / ticket_path(stem)
-    return (path.is_file() and _ticket_state(path) == "draft" and any(
+    return (path.is_file() and ticket_state(path) == "draft" and any(
         e.ticket == stem and e.body.get("signal") == INTAKE_SIGNAL
         for e in checkout.journal.read()))
-
-
-async def confirm_draft(stem: str, request_id: str, ctx) -> None:
-    rel = ticket_path(stem)
-    text = await ctx.git._run(ctx.repo, "show", f"main:{rel}")
-    ticket = validate_ticket(stem, text, ctx.repo)
-    if ticket.frontmatter.state not in ("draft", "confirmed") or (ctx.repo / rel).read_text() != text:
-        raise ValueError("restore the committed draft before publishing a fresh confirmation")
-    async def commit():
-        if ticket.frontmatter.state == "confirmed":
-            return {"commit": (await ctx.git._run(ctx.repo, "log", "-1", "--format=%H", "main", "--", rel)).strip()}
-        ctx.fs.write(ctx.repo / rel, stamp(text, "state", "confirmed").encode())
-        await ctx.git.add(ctx.repo, [rel])
-        await ctx.git.commit(ctx.repo, f"tempo({stem}): confirmed", only=[rel])
-        return {"commit": await ctx.git.rev_parse(ctx.repo, "HEAD")}
-    result = await Effects(ctx.driver.journal).run(commit, key=f"ticket-plane/{stem}/confirmed/{request_id}", ticket=stem)
-    if not any(e.ticket == stem and e.body.get("signal") == "draft_confirmed"
-               and e.body.get("commit") == result["commit"] for e in ctx.driver.journal.read()):
-        ctx.driver.journal.append(EventType.SIGNAL, {"signal": "draft_confirmed", **result}, ticket=stem)
 
 
 async def reject_ticket(stem: str, checkout: Checkout) -> bool:
@@ -510,7 +405,7 @@ async def reject_ticket(stem: str, checkout: Checkout) -> bool:
     rel = ticket_path(stem)
     path = checkout.repo / rel
     last = last_states(checkout.journal.read()).get(stem)
-    if path.is_file() and _ticket_state(path) != "rejected":
+    if path.is_file() and ticket_state(path) != "rejected":
         checkout.fs.write(path, stamp(path.read_text(), "state", "rejected").encode())
         await checkout.git.add(checkout.repo, [rel])
         await checkout.git.commit(checkout.repo, f"tempo({stem}): rejected", only=[rel])
@@ -518,38 +413,8 @@ async def reject_ticket(stem: str, checkout: Checkout) -> bool:
         checkout.journal.append(EventType.SIGNAL,
                                 {"signal": "reject_verdict", "verdict": "kill", "actor": "operator"}, ticket=stem)
         checkout.journal.append(EventType.STATE_TRANSITION, {"to": "rejected"}, ticket=stem)
-    await _dead_dependents(stem, checkout)
+    await dead_dependents(stem, checkout)
     return last != "rejected"
-
-
-def _ticket_state(path: Path) -> str | None:
-    split = split_frontmatter(path.read_text())
-    return yaml.safe_load(split[0]).get("state") if split else None
-
-
-async def _dead_dependents(dead: str, checkout: Checkout) -> None:
-    history = checkout.journal.read()
-    from tempo.rework import dead_dependencies
-
-    last = last_states(history)
-    deaths = dead_dependencies(history)
-    from tempo.daemon import storm_producer
-
-    box = storm_producer(root=checkout.config.state_dir / BOX_DIR, fs=checkout.fs,
-                         journal=checkout.journal, clock=checkout.clock)
-    for path in sorted((checkout.repo / "tickets").glob("*/ticket.md")):
-        stem = path.parent.name
-        if stem == dead or _ticket_state(path) != "confirmed" or last.get(stem) in {"merged", "already_satisfied", "rejected"}:
-            continue
-        ticket = parse_ticket(stem, path.read_text(), checkout.repo)
-        for dependency in sorted(set(ticket.depends) & deaths):
-            if not any(e.type == EventType.SIGNAL and e.ticket == stem
-                   and e.body.get("signal") == "dead_dependency" and e.body.get("dead") == dependency
-                       for e in history):
-                box.enqueue(message_class="failure_report", origin=stem, stage="depends", outcome="rejected",
-                            summary=f"{stem} depends on {dependency}, which was rejected or abandoned; re-wire, re-scope, or reject it",
-                            occurrence_id=arrival_id("dead-dependency", stem, dependency))
-                checkout.journal.append(EventType.SIGNAL, {"signal": "dead_dependency", "dead": dependency}, ticket=stem)
 
 
 async def _admit(stem: str, checkout: Checkout) -> Ticket:
@@ -576,8 +441,6 @@ async def _admit(stem: str, checkout: Checkout) -> Ticket:
     if ticket.frontmatter.state != "confirmed":
         raise Refusal(f"{stem} is `state: {ticket.frontmatter.state}`, not confirmed",
                       f"set `state: confirmed` in {ticket_path(stem)} to dispatch it, or author a new stem")
-    from tempo.rework import settled_dependencies
-
     settled = settled_dependencies(checkout.journal.read())
     if unmerged := [d for d in ticket.depends if d not in settled]:
         raise Refusal(f"{stem} depends on unmerged {', '.join(unmerged)}",

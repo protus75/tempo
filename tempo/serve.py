@@ -6,10 +6,12 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from tempo import runner, triage
+from tempo import backlog, runner, triage
+from tempo.checkout import Checkout, Refusal, call_timeout
 from tempo.config import ConfigError, snapshot_config
 from tempo.daemon import DaemonTasks, HeartbeatCycle, TicketWriter, WorkerFailureObserver
-from tempo.daemon import WorkerStop, _protected_cleanup, checkpoint_push
+from tempo.control import protected_cleanup
+from tempo.daemon import WorkerStop, checkpoint_push
 from tempo.daemon import _stop_workers
 from tempo.effects import Effects
 from tempo.enginelog import EngineLog
@@ -67,13 +69,13 @@ class Responsiveness:
                 await asyncio.gather(ping, return_exceptions=True)
             if not task.done():
                 task.cancel()
-            await _protected_cleanup(asyncio.gather(task, return_exceptions=True))
+            await protected_cleanup(asyncio.gather(task, return_exceptions=True))
 
 
 class Serve:
     """One idle composition; only run acquires the lock and starts owned work."""
 
-    def __init__(self, checkout: runner.Checkout, *, config_path: Path | None = None,
+    def __init__(self, checkout: Checkout, *, config_path: Path | None = None,
                  read: Callable[[str], str | None],
                  stems: Callable[[], Iterable[str]],
                  prepare=runner.prepare_pipeline, signals: Callable | None = None,
@@ -244,7 +246,7 @@ class Serve:
                     return
                 async def confirm_draft(stem, request_id):
                     ctx = self.queue.ctx if self.queue is not None else runner.bind(self.checkout, None).ctx
-                    await runner.confirm_draft(stem, request_id, ctx)
+                    await backlog.confirm_draft(stem, request_id, ctx)
                 await self.control.inbox.settle_admissions(confirm_draft)
                 if self.queue is None:
                     return
@@ -280,7 +282,7 @@ class Serve:
                 if not self.box.pending():
                     return
                 llm = ProviderLLM(c.config, exec_=c.exec_, fs=c.fs, env=c.env, cwd=c.repo,
-                                  timeout=runner.call_timeout(c.config), session=self.control.providers)
+                                  timeout=call_timeout(c.config), session=self.control.providers)
                 problems = await llm.preflight() if self.control.providers.active else []
                 if problems:
                     raise ProviderSetupError('; '.join(problems))
@@ -306,7 +308,7 @@ class Serve:
                 task.cancel()
         for task in operations:
             cleanup = asyncio.gather(task, return_exceptions=True)
-            await _protected_cleanup(cleanup)
+            await protected_cleanup(cleanup)
             errors.extend(result for result in cleanup.result()
                           if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError))
         if errors:
@@ -321,8 +323,8 @@ class Serve:
             abort_error = exc
         finally:
             # Even a failed abort has unwound before worker cleanup. It cannot earn kill_applied.
-            await _protected_cleanup(_stop_workers(self.workers))
-            await _protected_cleanup(asyncio.create_task(self.notifications.close()))
+            await protected_cleanup(_stop_workers(self.workers))
+            await protected_cleanup(asyncio.create_task(self.notifications.close()))
         results = await asyncio.gather(self.background, self.observation, return_exceptions=True)
         errors = [task.exception() for task in self.workers if not task.cancelled()]
         errors += [r for r in results if isinstance(r, BaseException)]
@@ -360,7 +362,7 @@ class Serve:
                 await self.core.startup()
                 self.notifications.poll(startup=True)
             except Exception as exc:
-                raise runner.Refusal(f"serve startup recovery refused: {exc}",
+                raise Refusal(f"serve startup recovery refused: {exc}",
                                      "repair the recovery evidence and start serve again") from exc
             self.control.publish()
             if self.signals is not None:
@@ -379,7 +381,7 @@ class Serve:
                     # belong to this lifetime's cleanup, not another worker failure.
                     if not self.stopping and not self.control.projection.kill_requested:
                         pending_failure = exc
-                        code = (2 if isinstance(exc, (ConfigError, runner.Refusal, ProviderSetupError,
+                        code = (2 if isinstance(exc, (ConfigError, Refusal, ProviderSetupError,
                                                      JournalCorruption, ExecutableNotFound)) else 1)
                     self.stop()
                     raise
@@ -422,18 +424,18 @@ class Serve:
                     finally:
                         sleeping.cancel()
                         stopping.cancel()
-                        await _protected_cleanup(asyncio.gather(sleeping, stopping, return_exceptions=True))
+                        await protected_cleanup(asyncio.gather(sleeping, stopping, return_exceptions=True))
             except asyncio.CancelledError:
                 self.stop()
             except Exception as exc:
                 self.log.event("serve_failed", error=str(exc))
-                code = (2 if isinstance(exc, (ConfigError, runner.Refusal, ProviderSetupError,
+                code = (2 if isinstance(exc, (ConfigError, Refusal, ProviderSetupError,
                                              JournalCorruption, ExecutableNotFound)) else 1)
                 self.stop()
             cleanup = asyncio.create_task(self.control.apply_kill(self.cleanup)
                 if self.control.projection.kill_requested else self.cleanup())
             try:
-                await _protected_cleanup(cleanup)
+                await protected_cleanup(cleanup)
             except asyncio.CancelledError:
                 if cleanup.cancelled():
                     code = 1
@@ -444,8 +446,8 @@ class Serve:
             return code
         finally:
             try:
-                await _protected_cleanup(asyncio.create_task(self.notifications.close()))
-                await _protected_cleanup(asyncio.create_task(self.control.providers.close()))
+                await protected_cleanup(asyncio.create_task(self.notifications.close()))
+                await protected_cleanup(asyncio.create_task(self.control.providers.close()))
             finally:
                 try:
                     self.control.retire()
@@ -454,7 +456,7 @@ class Serve:
                     lock.release()
 
 
-async def serve(checkout: runner.Checkout, *, config_path: Path | None = None,
+async def serve(checkout: Checkout, *, config_path: Path | None = None,
                 read: Callable[[str], str | None] | None = None,
                 stems: Callable[[], Iterable[str]] | None = None,
                 prepare=runner.prepare_pipeline, signals: Callable | None = None,

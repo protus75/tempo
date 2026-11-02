@@ -18,6 +18,7 @@ from tests.test_journal import FakeClock, T0
 from tests.test_mergequeue import ctx as admission_context  # noqa: F401
 from tests.test_stages import STEM, TICKET, agent, verdict
 from tests.test_storm import SIG, snapshot
+from tempo import storm
 
 ARRIVAL = dict(message_class="failure_report", origin="one", summary="failed path/one 123",
                stage="implement", outcome="gate_failed")
@@ -26,7 +27,7 @@ ARRIVAL = dict(message_class="failure_report", origin="one", summary="failed pat
 def compose(state, clock=None, fs=None):
     clock = clock or FakeClock(T0)
     journal = Journal(state, clock)
-    box = daemon.storm_producer(root=state / "box", fs=fs or LocalFileSystem(),
+    box = storm.storm_producer(root=state / "box", fs=fs or LocalFileSystem(),
                                 journal=journal, clock=clock)
     return box, journal, clock
 
@@ -52,7 +53,7 @@ def test_new_and_dedup_arrivals_record_occurrences(tmp_path, monkeypatch):
 
     # Recompose so the bound callback is the observed predecessor writer.
     monkeypatch.setattr(StormLedger, "record", arrival)
-    box = daemon.storm_producer(root=box.root, fs=box.fs, journal=journal, clock=clock)
+    box = storm.storm_producer(root=box.root, fs=box.fs, journal=journal, clock=clock)
     first = box.enqueue(**ARRIVAL, occurrence_id="producer/1")
     assert first == (f"box-000001-{SIG[:8]}", True)
     before = snapshot(box.root)
@@ -210,7 +211,7 @@ def test_box_operations_without_arrivals_are_idle(tmp_path, monkeypatch):
     monkeypatch.setattr(journal, "read", read)
     monkeypatch.setattr(journal, "append", append)
     fs = Mock(wraps=LocalFileSystem())
-    box = daemon.storm_producer(root=tmp_path / "box", fs=fs, journal=journal, clock=clock)
+    box = storm.storm_producer(root=tmp_path / "box", fs=fs, journal=journal, clock=clock)
     assert box.root == tmp_path / "box" and box.fs is fs
     read.assert_not_called()
     append.assert_not_called()
@@ -232,8 +233,8 @@ def test_box_operations_without_arrivals_are_idle(tmp_path, monkeypatch):
 
 
 def assert_production_reachable(tmp_path, monkeypatch):
-    hook = Mock(wraps=daemon.storm_producer)
-    monkeypatch.setattr(daemon, "storm_producer", hook)
+    hook = Mock(wraps=storm.storm_producer)
+    monkeypatch.setattr(storm, "storm_producer", hook)
     rig = CoreRig(tmp_path)
     hook.assert_called_once()
     assert rig.journal.read() == [] and rig.exec.calls == []

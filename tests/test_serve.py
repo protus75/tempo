@@ -27,6 +27,7 @@ from tests.test_daemon_composition import sources
 from tests.test_restart_timers import orphan, repository
 from tests.test_scheduler import import_closure, text, turn
 from tests.test_triage import reply
+from tempo.checkout import Refusal
 
 
 async def until(rig, predicate):
@@ -273,14 +274,14 @@ async def test_serve_startup_precedes_all_work(root, monkeypatch):
     rig.owner.core.restart.timers.arm("overdue", rig.time() - timedelta(seconds=1), ticket=None)
     calls, _, _ = script(monkeypatch)
     write(root, "work", text())
-    original = runner.harvest_orphan
+    original = stages.harvest_orphan
     harvested, release = asyncio.Event(), asyncio.Event()
     async def harvest(checkout, stem, attempt):
         assert checkout.journal is rig.journal
         harvested.set()
         await release.wait()
         await original(checkout, stem, attempt)
-    monkeypatch.setattr(runner, "harvest_orphan", harvest)
+    monkeypatch.setattr(stages, "harvest_orphan", harvest)
     run = asyncio.create_task(rig.owner.run())
     await until(rig, harvested.is_set)
     assert calls == [] and not rig.owner.ready.is_set()
@@ -304,7 +305,7 @@ async def test_serve_recovery_refusal_starts_no_work(root, monkeypatch):
     rig = await graph(root, monkeypatch)
     rig.journal.append(EventType.TIMER_FIRED, {"timer_id": "unpaired", "deadline": rig.time().isoformat()})
     write(root, "work", text())
-    with pytest.raises(runner.Refusal, match="startup recovery refused"):
+    with pytest.raises(Refusal, match="startup recovery refused"):
         await rig.owner.run()
     assert rig.owner.workers == () and not rig.owner.core.restart.ready
     assert not any(e.body.get("signal") == "ticket_intake" for e in rig.journal.read())

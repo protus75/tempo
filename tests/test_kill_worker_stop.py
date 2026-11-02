@@ -13,6 +13,7 @@ from tests.test_daemon_composition import CoreRig, LiveDrain, assert_core_wiring
 from tests.test_driver import build
 from tests.test_kill_executor_abort import Writer, Timer, invoke, cancelled, turn
 from tests.test_kill_signal_journal import Rig, decision
+from tempo import control
 
 
 def accepted(state):
@@ -27,7 +28,7 @@ def accepted(state):
 
 def boundary(driver, projection, workers):
     return daemon.WorkerStop(lifecycle_id=projection.lifecycle_id,
-                            abort=partial(daemon.executor_abort, driver.abort_current),
+                            abort=partial(control.executor_abort, driver.abort_current),
                             workers=workers)
 
 
@@ -149,7 +150,7 @@ async def test_worker_stop_requires_matching_kill(tmp_path, case):
     original = driver.abort_current
     async def abort():
         aborts.append(True)
-        await daemon.executor_abort(original)
+        await control.executor_abort(original)
     worker = Worker()
     task = asyncio.create_task(worker.run())
     await worker.started.wait()
@@ -193,7 +194,7 @@ async def test_worker_stop_observes_all_workers(tmp_path, mode):
         aborts.append(True)
         abort_entered.set()
         await abort_release.wait()
-        await daemon.executor_abort(driver.abort_current)
+        await control.executor_abort(driver.abort_current)
     stopping = daemon.WorkerStop(lifecycle_id=projection.lifecycle_id, abort=abort, workers=tasks)
     stop = None
     try:
@@ -307,7 +308,7 @@ async def test_executor_abort_failure_does_not_cancel_workers(tmp_path):
     finally:
         writer.abort_current = original
         driver._active.abort = None
-        await daemon.executor_abort(driver.abort_current)
+        await control.executor_abort(driver.abort_current)
         await release_all([task, invocation], [worker])
 
 

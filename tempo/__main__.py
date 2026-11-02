@@ -15,8 +15,10 @@ from pathlib import Path
 from uuid import uuid4
 
 from tempo import control, drain, hostfiles, runner, serve, triage
+from tempo.checkout import SPECS_DIR, Checkout, Refusal, call_timeout
 from tempo.config import ConfigError, ConfigSnapshot, load_config, migrate_config
-from tempo.daemon import DaemonCore, PauseConsumer, daemon_core
+from tempo.control import PauseConsumer
+from tempo.daemon import DaemonCore, daemon_core
 from tempo.daemon import StartupBoundary
 from tempo.git import Git
 from tempo.journal import Journal, JournalCorruption
@@ -39,9 +41,9 @@ def _clock() -> datetime:
     return datetime.now(UTC)
 
 
-def build_control(checkout: runner.Checkout) -> PauseConsumer:
+def build_control(checkout: Checkout) -> PauseConsumer:
     """Compose without reading requests, publishing discovery, or starting tasks."""
-    from tempo.daemon import storm_producer
+    from tempo.storm import storm_producer
 
     box = storm_producer(root=checkout.config.state_dir / "box", fs=checkout.fs,
                          journal=checkout.journal, clock=checkout.clock)
@@ -58,11 +60,11 @@ def build_control(checkout: runner.Checkout) -> PauseConsumer:
 
 
 def build_daemon_core(
-    checkout: runner.Checkout, *, config_path: Path | None = None,
+    checkout: Checkout, *, config_path: Path | None = None,
     read: Callable[[str], str | None], debounce: float,
     quarantined: Callable[[], Set[str]], drought_parked: Callable[[], Set[str]],
     completed_unmerged: Callable[[], int],
-    prepare: Callable[[runner.Checkout], Awaitable[runner.Dispatch]] = runner.prepare_pipeline,
+    prepare: Callable[[Checkout], Awaitable[runner.Dispatch]] = runner.prepare_pipeline,
 ) -> DaemonCore:
     """Compose the production core without starting consumers or preparing a dispatch."""
     consumer = checkout.control or build_control(checkout)
@@ -120,7 +122,7 @@ def build_daemon_core(
     return core
 
 
-def build_serve(checkout: runner.Checkout, *, config_path=None, read=None,
+def build_serve(checkout: Checkout, *, config_path=None, read=None,
                 stems=None, prepare=runner.prepare_pipeline, signals=None, failure=None) -> serve.Serve:
     """Compose filesystem delivery at the same root as every other real seam."""
     def read_ticket(stem):
@@ -131,7 +133,7 @@ def build_serve(checkout: runner.Checkout, *, config_path=None, read=None,
         prepare=prepare, signals=signals, failure=failure)
 
 
-def build_notifications(checkout: runner.Checkout, *, config_path: Path | None, log) -> NotificationReconciler:
+def build_notifications(checkout: Checkout, *, config_path: Path | None, log) -> NotificationReconciler:
     executor = SubprocessExec()  # Never alias active work.
     def compose(config):
         return CommandNotifications(executor, cwd=checkout.repo,
@@ -140,15 +142,6 @@ def build_notifications(checkout: runner.Checkout, *, config_path: Path | None, 
     return NotificationReconciler(journal=checkout.journal, clock=checkout.clock,
         config_path=config_path or checkout.repo / "config.yaml",
         load=lambda: load_config(config_path, cwd=checkout.repo), compose=compose, log=log)
-
-
-def watchdog_notifications(config, env, effects, log, *, redactor, cwd, **context):
-    from tempo.notify import WatchdogNotifications
-
-    return WatchdogNotifications(effects=effects,
-        notifications=CommandNotifications(SubprocessExec(), cwd=cwd,
-            env=child_env(env, config, serving=None), timeout=NOTIFY_TIMEOUT_S,
-            scrub=redactor.scrub), argv=config.notify, log=log, **context)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -203,7 +196,7 @@ def main(
             hostfiles.refresh(routed_conduct_paths(config, repo), LocalFileSystem())
             return 0
         exec_ = SubprocessExec()
-        checkout = runner.Checkout(
+        checkout = Checkout(
             repo=repo, config=config, env=env, exec_=exec_,
             git=Git(exec_, env=child_env(env, config), timeout=GIT_TIMEOUT_S),
             journal=Journal(config.state_dir, clock), fs=LocalFileSystem(), clock=clock,
@@ -222,7 +215,7 @@ def main(
                 session = build_control(checkout).providers
                 try:
                     llm = ProviderLLM(config, exec_=exec_, fs=checkout.fs, env=env,
-                                      cwd=repo, timeout=runner.call_timeout(config),
+                                      cwd=repo, timeout=call_timeout(config),
                                       session=session)
                     session.timers.reconstruct()
                     session.timers.fire_due()
@@ -260,7 +253,7 @@ def main(
             print(report.render(), end="")
             return report.exit_code
         return asyncio.run(runner.run_ticket(args.stem, checkout, dispatch))
-    except (ConfigError, runner.Refusal, LockHeld, IntakeRefused, JournalCorruption, ProviderSetupError,
+    except (ConfigError, Refusal, LockHeld, IntakeRefused, JournalCorruption, ProviderSetupError,
             ExecutableNotFound, hostfiles.MarkerCorruption) as e:
         road = (" -- repair the selected config and retry retro"
                 if args.verb == "retro" and isinstance(e, ConfigError) else "")
@@ -278,7 +271,7 @@ async def _retro(checkout, dispatch):
         try:
             window = project_window(checkout.journal.read())
         except JournalCorruption as exc:
-            raise runner.Refusal(str(exc), "restore journal readability from backup and retry retro") from None
+            raise Refusal(str(exc), "restore journal readability from backup and retry retro") from None
         selected = bool(measurements(window)["merged_count"])
         suppressed = suppressing_failure(window) is not None
         if selected and not suppressed and hasattr(dispatch, "prepare"):
@@ -286,7 +279,7 @@ async def _retro(checkout, dispatch):
         try:
             result = await Retro(checkout, dispatch)(forced=True)
         except RetroConstructionError as exc:
-            raise runner.Refusal("retro Driver unavailable", str(exc)) from None
+            raise Refusal("retro Driver unavailable", str(exc)) from None
         if not selected:
             print("retro: no merge since the latest completed report")
             return 0
@@ -302,7 +295,7 @@ async def _retro(checkout, dispatch):
             lock.release()
 
 
-async def _status(checkout: runner.Checkout):
+async def _status(checkout: Checkout):
     from tempo.box import BOX_DIR, Box, RereportJournal
     from tempo.retro import production_evidence, project_window
     from tempo.specs import load_spec
@@ -310,7 +303,7 @@ async def _status(checkout: runner.Checkout):
     events = checkout.journal.read()
     window = project_window(events)
     await production_evidence(window, checkout)
-    spec = load_spec((runner.SPECS_DIR / "retro.md").read_text())
+    spec = load_spec((SPECS_DIR / "retro.md").read_text())
     provenance = {"head": await checkout.git.rev_parse(checkout.repo, "HEAD"),
                   "spec_version": spec.meta.version, "at": checkout.clock().isoformat()}
     return project(events, window=window, provenance=provenance,
@@ -331,7 +324,7 @@ def _serve_signals(stop: Callable[[], None]) -> Callable[[], None]:
     return restore
 
 
-async def _control(checkout: runner.Checkout, verb: str) -> int:
+async def _control(checkout: Checkout, verb: str) -> int:
     lock = Lockfile(checkout.config.state_dir, instance_id=await checkout.git.describe(checkout.repo),
                     clock=checkout.clock)
     try:
@@ -340,9 +333,9 @@ async def _control(checkout: runner.Checkout, verb: str) -> int:
         try:
             lifecycle, hold = control.read_active(checkout.config.state_dir, Path.read_bytes)
         except ValueError as exc:
-            raise runner.Refusal("current control identity unavailable", str(exc)) from exc
+            raise Refusal("current control identity unavailable", str(exc)) from exc
         if verb == "resume" and hold is None:
-            raise runner.Refusal("no current hold identity",
+            raise Refusal("no current hold identity",
                                  "read the running engine's current control identity and submit a new request")
         request = control.ControlRequest(uuid4().hex, lifecycle, verb, hold if verb == "resume" else None)
         control.publish_request(checkout.config.state_dir, request, checkout.fs)
@@ -350,7 +343,7 @@ async def _control(checkout: runner.Checkout, verb: str) -> int:
     else:
         try:
             if verb == "kill":
-                raise runner.Refusal("nothing running to kill",
+                raise Refusal("nothing running to kill",
                                      "start a drain before submitting kill")
             print(f"nothing running to {verb}")
         finally:
@@ -360,7 +353,7 @@ async def _control(checkout: runner.Checkout, verb: str) -> int:
 
 async def _verdict(checkout, stem, verb):
     if findings := stem_findings(stem):
-        raise runner.Refusal(findings[0].message, findings[0].paved_road)
+        raise Refusal(findings[0].message, findings[0].paved_road)
     try:
         return await runner.verdict(stem, checkout, kill=verb == "reject")
     except LockHeld:
@@ -368,11 +361,11 @@ async def _verdict(checkout, stem, verb):
             raise
         text = await checkout.git._run(checkout.repo, "show", f"main:{ticket_path(stem)}")
         if validate_ticket(stem, text, checkout.repo).frontmatter.state != "draft":
-            raise runner.Refusal("no committed draft", "restore the committed draft before confirming")
+            raise Refusal("no committed draft", "restore the committed draft before confirming")
     try:
         lifecycle, _ = control.read_active(checkout.config.state_dir, Path.read_bytes)
     except ValueError as exc:
-        raise runner.Refusal("current control identity unavailable", str(exc)) from exc
+        raise Refusal("current control identity unavailable", str(exc)) from exc
     request = control.AdmissionRequest(uuid4().hex, lifecycle, "confirm", stem, "operator")
     control.publish_request(checkout.config.state_dir, request, checkout.fs)
     print(f"{verb} submitted: {request.request_id}")
@@ -382,10 +375,10 @@ async def _verdict(checkout, stem, verb):
 def _new(repo: Path, stem: str) -> int:
     """Author the ticket file only: authorship is outside the lock fence; intake commits it on the next run."""
     if findings := stem_findings(stem):
-        raise runner.Refusal(findings[0].message, findings[0].paved_road)
+        raise Refusal(findings[0].message, findings[0].paved_road)
     rel = ticket_path(stem)
     if (repo / rel).exists():
-        raise runner.Refusal(f"{rel} already exists", "edit it in place, or pick a new stem")
+        raise Refusal(f"{rel} already exists", "edit it in place, or pick a new stem")
     text = template()
     LocalFileSystem().write(repo / rel, text.encode())
     print(f"authored {rel}")

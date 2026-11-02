@@ -144,3 +144,5 @@ class ReviewVerdict(_Strict):
         if self.verdict == "rma" and not (codes and codes <= {"ticket"}):
             raise ValueError("rma needs at least one finding, every code `ticket`")
         return self
+
+REWORK_ORDER = "rework_order"

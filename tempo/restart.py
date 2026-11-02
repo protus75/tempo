@@ -3,14 +3,15 @@
 import asyncio
 from collections.abc import Callable
 
-from tempo import reconcile, runner
+from tempo import reconcile, stages
+from tempo.checkout import Checkout
 from tempo.timers import Timers
 
 
 class Restart:
     """The caller holds the checkout writer lock and serializes live ownership."""
 
-    def __init__(self, checkout: runner.Checkout, *, timers: Timers,
+    def __init__(self, checkout: Checkout, *, timers: Timers,
                  owned: Callable[[], bool]) -> None:
         self.checkout, self.timers, self.owned = checkout, timers, owned
         self.ready = False
@@ -21,7 +22,7 @@ class Restart:
         checkout = self.checkout
         return await reconcile.reconcile(
             checkout.journal, checkout.git, checkout.repo, checkout.config.worktree_root,
-            lambda stem, attempt: runner.harvest_orphan(checkout, stem, attempt),
+            lambda stem, attempt: stages.harvest_orphan(checkout, stem, attempt),
         )
 
     async def startup(self) -> None:

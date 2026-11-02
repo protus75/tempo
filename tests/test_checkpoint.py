@@ -21,6 +21,7 @@ from tempo.timers import Timers
 from tests.test_cli import Clock, ENV, Stages, root, ticket, write
 from tests.test_daemon_composition import CoreRig, assert_core_wiring
 from tests.test_restart_timers import repository
+from tempo import storm
 
 T0 = datetime(2026, 10, 7, tzinfo=UTC)
 SECRET = "private-checkpoint-key"
@@ -65,7 +66,7 @@ class Rig:
         self.journal = Journal(self.path, self.time)
         self.effects = Effects(self.journal)
         self.timers = Timers(journal=self.journal, clock=self.time, sleep=self.time.sleep)
-        self.box = daemon.storm_producer(root=self.path / "box", fs=self.fs,
+        self.box = storm.storm_producer(root=self.path / "box", fs=self.fs,
                                          journal=self.journal, clock=self.time)
         self.boundary = daemon.checkpoint_push(self.path, journal=self.journal,
             effects=self.effects, timers=self.timers, git=self.git, box=self.box,
@@ -482,7 +483,7 @@ def test_checkpoint_boundary_is_dormant(root, monkeypatch, verb):
         clock = Time()
         rig.journal._clock = clock
         exec_ = Exec()
-        box = daemon.storm_producer(root=root / "checkpoint-box", fs=LocalFileSystem(),
+        box = storm.storm_producer(root=root / "checkpoint-box", fs=LocalFileSystem(),
                                     journal=rig.journal, clock=clock)
         effects = Effects(rig.journal)
         timers = rig.core.restart.timers
@@ -556,7 +557,7 @@ async def test_push_failure_preserves_production_admission(root, monkeypatch):
             return 1, SECRET, SECRET
         return await original(argv, **kwargs)
     monkeypatch.setattr(rig.exec, "run", execute)
-    box = daemon.storm_producer(root=rig.checkout.config.state_dir / "box", fs=rig.fs,
+    box = storm.storm_producer(root=rig.checkout.config.state_dir / "box", fs=rig.fs,
                                journal=rig.journal, clock=rig.time)
     boundary = daemon.checkpoint_push(root, journal=rig.journal, effects=Effects(rig.journal),
         timers=rig.core.restart.timers, git=rig.checkout.git, box=box, clock=rig.time,

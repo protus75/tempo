@@ -5,11 +5,11 @@ from dataclasses import replace
 
 import pytest
 
-from tempo import daemon
 from tempo.llm import FakeLLM, LLMAborted
 from tests.test_driver import ECHO, Stub, build, echo_json, log_events, spool
 from tests.test_cli import root
 from tests.test_kill_signal_journal import Rig, decision
+from tempo.control import executor_abort
 
 
 async def turn():
@@ -111,7 +111,7 @@ async def test_executor_abort_stops_writer_before_cancellation(tmp_path):
     control.inbox.consume()
     assert control.projection.kill_requested
     before = driver.journal.read()
-    await daemon.executor_abort(driver.abort_current)
+    await executor_abort(driver.abort_current)
     await cancelled(task)
     assert writer.aborts == writer.cancels == 1
     assert writer.mutations == ["write"]
@@ -131,7 +131,7 @@ async def test_executor_abort_stops_writer_before_cancellation(tmp_path):
 async def test_executor_abort_waits_for_unwind(tmp_path):
     driver, _, writer, timer, task, race = await active(tmp_path, held=True)
     owned = driver._active
-    abort = asyncio.create_task(daemon.executor_abort(driver.abort_current))
+    abort = asyncio.create_task(executor_abort(driver.abort_current))
     await writer.unwinding.wait()
     await turn()
     assert not abort.done() and not task.done()
@@ -147,7 +147,7 @@ async def test_executor_abort_waits_for_unwind(tmp_path):
 @pytest.mark.asyncio
 async def test_executor_abort_is_atomic_under_repeated_cancellation(tmp_path):
     driver, _, writer, _, task, race = await active(tmp_path, held=True)
-    first = asyncio.create_task(daemon.executor_abort(driver.abort_current))
+    first = asyncio.create_task(executor_abort(driver.abort_current))
     await writer.unwinding.wait()
     owned = driver._active
     second = asyncio.create_task(driver.abort_current())
@@ -174,7 +174,7 @@ async def test_executor_abort_is_atomic_under_repeated_cancellation(tmp_path):
 @pytest.mark.asyncio
 async def test_executor_abort_idle_and_completion_race(tmp_path):
     driver, _ = build(tmp_path, FakeLLM([echo_json("first"), echo_json("second")]))
-    await daemon.executor_abort(driver.abort_current)
+    await executor_abort(driver.abort_current)
     assert driver.llm.aborted == 0
     assert (await invoke(driver)).outcome == "ok"
     await driver.abort_current()
@@ -219,7 +219,7 @@ async def test_external_abort_does_not_reprompt_or_report_success(tmp_path, revi
     else:
         driver, state, _, _, task, _ = await active(tmp_path)
     before = driver.journal.read()
-    await daemon.executor_abort(driver.abort_current)
+    await executor_abort(driver.abort_current)
     await cancelled(task)
     assert driver.journal.read() == before
     assert [e.type for e in before] == (["effect_intent", "effect_completion"] if review_wait
@@ -238,7 +238,7 @@ async def test_executor_abort_failure_propagates(tmp_path):
         raise RuntimeError("cannot stop writer")
     writer.abort_current = refused
     with pytest.raises(RuntimeError, match="cannot stop writer"):
-        await daemon.executor_abort(driver.abort_current)
+        await executor_abort(driver.abort_current)
     assert not task.done() and writer.cancels == 0 and driver._active is not None
     # Release the failed-stop fixture without claiming that its abort succeeded.
     writer.abort_current = stop

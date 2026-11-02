@@ -9,14 +9,15 @@ import pytest
 from pydantic import ValidationError
 
 from tempo import rework as module
-from tempo.artifacts import Artifact, Finding
+from tempo.artifacts import REWORK_ORDER, Artifact, Finding
 from tempo.caps import CAPS, capability, consume, draws
 from tempo.git import GitError
 from tempo.journal import EventType
 from tempo.llm import FakeLLM, HANG, LLMResult
 from tempo.mergequeue import ConflictHandoff, MergeQueue
-from tempo.rework import (REWORK_ORDER, SUPERSEDES, ReworkOrder, dead_dependencies, record_supersedes,
-                          rework, settled_dependencies, successor_leaves, supersedes_maps)
+from tempo.backlog import (SUPERSEDES, dead_dependencies, settled_dependencies, successor_leaves,
+                           supersedes_maps)
+from tempo.rework import ReworkOrder, record_supersedes, rework
 from tempo.specs import (DATA_DELIM, QUOTED_DELIM, RENDER_BOUND_CHARS, data_close, data_open,
                          lint_spec, load_spec, render, validate_data_blocks)
 from tempo.tickets import ticket_path, validate_ticket

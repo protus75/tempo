@@ -615,7 +615,6 @@ def test_cli_failure_classifier_is_active(tmp_path, monkeypatch):
             ## Definition of rejected
             Provider failure classification runs in the default composition.
             ## Time budget
-            - expected: 20m
             - stuck: 60m
             """), checkout.repo)
 

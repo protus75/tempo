@@ -10,7 +10,7 @@ from typing import get_args
 
 import pytest
 
-from tempo import (artifacts, audit, author, box, caps, checkpoint, config, control, drain, enginelog, gates, inbox, journal, llm, merge, mergequeue, notify, providers, requisition, runner, serve, specs, stages, storm, thresh, tickets, triage)
+from tempo import (artifacts, audit, author, backlog, box, caps, checkpoint, config, control, enginelog, gates, inbox, journal, llm, merge, mergequeue, notify, providers, requisition, runner, serve, specs, stages, storm, thresh, tickets, triage)
 
 
 def ident(v):
@@ -68,10 +68,10 @@ def test_config_closed_sets_and_constants():
 def test_control_closed_sets_and_constants():
     assert set(get_args_deep(control.Verb)) == {'kill', 'pause', 'resume'}
 
-def test_drain_closed_sets_and_constants():
-    assert dict(drain.PRIORITY) == {'P0': 0, 'P1': 1, 'P2': 2, 'P3': 3}
-    assert drain.RETIRED == frozenset({'rejected'})
-    assert drain.SETTLED == frozenset({'already_satisfied', 'merged'})
+def test_backlog_closed_sets_and_constants():
+    assert dict(backlog.PRIORITY) == {'P0': 0, 'P1': 1, 'P2': 2, 'P3': 3}
+    assert backlog.RETIRED == frozenset({'rejected'})
+    assert backlog.SETTLED == frozenset({'already_satisfied', 'merged'})
 
 def test_enginelog_closed_sets_and_constants():
     assert enginelog.BACKUPS == 3
@@ -121,7 +121,7 @@ def test_runner_closed_sets_and_constants():
     assert runner.EXIT_MERGED == 0
     assert runner.EXIT_REFUSED == 2
     assert runner.EXIT_TICKET == 1
-    assert runner.HARVEST_TAIL_CHARS == 4000
+    assert stages.HARVEST_TAIL_CHARS == 4000
     assert runner.IDENTICAL_K == 3
 
 def test_serve_closed_sets_and_constants():
@@ -142,7 +142,7 @@ def test_stages_closed_sets_and_constants():
     assert stages.DIFF_BUDGET_INSERTED == 1500
     assert {k: ident(x) for k, x in stages.EMITS_BY_VERDICT.items()} == {'approve': 'ApprovedInvoice', 'rma': 'Rma', 'snag': 'SnagList'}
     assert stages.OUTPUT_TAIL_CHARS == 2000
-    assert stages.RUN_RECORD_SECTIONS == ('Outcome', 'Surprises / judgment calls', 'Dead ends', 'Second problems filed', 'Resolved engine/model', 'Predicted vs actual')
+    assert stages.RUN_RECORD_SECTIONS == ('Outcome', 'Surprises / judgment calls', 'Dead ends', 'Second problems filed', 'Resolved engine/model')
     assert set(get_args_deep(stages.StageName)) == {'check', 'implement', 'review'}
 
 def test_storm_closed_sets_and_constants():

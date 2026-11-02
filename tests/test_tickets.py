@@ -58,7 +58,6 @@ uv run pytest tests/test_thing.py
 The verb needs a new dependency.
 
 ## Time budget
-- expected: 20m
 - stuck: 40m
 """
 
@@ -129,7 +128,7 @@ def test_valid_ticket_validates_and_commits(repo):
     ticket = validate_ticket("t-one", VALID.replace("---\npriority", "---\nstate: draft\nsource: human\npriority"),
                              root)
     assert ticket.verification == (("uv", "run", "pytest", "tests/test_thing.py"),)
-    assert (ticket.expected_minutes, ticket.stuck_minutes) == (20, 40)
+    assert ticket.stuck_minutes == 40
     assert ticket.frontmatter.agent_tier == ticket.frontmatter.agent_effort == "medium"
 
     result = do_intake(root, g, journal)
@@ -166,21 +165,14 @@ def test_bad_schema_ticket_is_refused_with_paved_road(repo):
     assert journal.read() == []
 
 
-@pytest.mark.parametrize("stuck", [19, 20, 21])
-def test_time_budget_stuck_must_exceed_expected(repo, stuck):
+@pytest.mark.parametrize("budget", ["- expected: 20m\n- stuck: 40m", "- stuck: 0m"])
+def test_time_budget_is_one_nonzero_stuck_bullet(repo, budget):
     root, _, _ = repo
-    text = complete(VALID.replace("- stuck: 40m", f"- stuck: {stuck}m"))
-    if stuck <= 20:
-        [finding] = refusal(root, text)
-        assert finding.code == "ticket_schema"
-        assert finding.path == "tickets/t-one/ticket.md"
-        assert "Time budget" in finding.message
-        assert f"stuck: {stuck}m" in finding.message
-        assert "expected: 20m" in finding.message
-        assert finding.paved_road == "set stuck greater than expected (the stage deadline is the stuck budget)"
-    else:
-        ticket = validate_ticket("t-one", text, root)
-        assert (ticket.expected_minutes, ticket.stuck_minutes) == (20, stuck)
+    [finding] = refusal(root, complete(VALID.replace("- stuck: 40m", budget)))
+    assert finding.code == "ticket_schema"
+    assert finding.path == "tickets/t-one/ticket.md"
+    assert "Time budget" in finding.message
+    assert finding.paved_road == "write exactly one bullet, `- stuck: <int>m` (the stage deadline)"
 
 
 @pytest.mark.parametrize(
@@ -193,7 +185,7 @@ def test_time_budget_stuck_must_exceed_expected(repo, stuck):
         ("## Depends on\nnone", "## Depends on\n- t-one", "self-edge"),
         ("## Definition of rejected\nThe verb needs a new dependency.\n", "", "Definition of rejected"),
         ("## Goal / Why", "## Notes\nhi\n\n## Goal / Why", "unknown body section"),
-        ("- expected: 20m\n- stuck: 40m", "- expected: 20 minutes\n- stuck: 40m", "Time budget"),
+        ("- stuck: 40m", "- stuck: 40 minutes", "Time budget"),
         ("uv run pytest tests/test_thing.py\n", "uv run pytest 'unterminated\n", "argv-parseable"),
         ("```\nuv run pytest tests/test_thing.py\n```", "`uv run pytest`", "fenced command block"),
         ("exits 0.", "exits 0 and the code is cleaner.", "unmeasurable"),

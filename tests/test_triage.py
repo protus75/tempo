@@ -76,7 +76,6 @@ uv run pytest
 - `tempo/thing.py` cannot be changed safely.
 
 ## Time budget
-- expected: 10m
 - stuck: 20m
 """})
 

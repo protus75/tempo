@@ -8,7 +8,7 @@ import pytest
 from tempo import __main__ as cli, runner
 from tempo.__main__ import _status, main
 from tempo.box import Box, Resolution
-from tempo.daemon import storm_producer
+from tempo.storm import storm_producer
 from tempo.git import Git
 from tempo.journal import EventType, Journal
 from tempo.llm import FakeLLM
@@ -22,6 +22,7 @@ from tests.test_drain import Clock, make_root
 from tests.test_retro_box import PROPOSAL
 from tests.test_retro import completed, merged, rig
 from tests.test_scorecard import invoice, review, rows
+from tempo.checkout import SPECS_DIR
 
 
 def test_status_surfaces_confirmed_class_tombstones(tmp_path, monkeypatch, capsys):
@@ -43,7 +44,7 @@ def test_status_surfaces_confirmed_class_tombstones(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(Journal, "append", forbidden)
     git = Git(SubprocessExec(), env=ENV, timeout=30)
     provenance = {"head": asyncio.run(git.rev_parse(root, "HEAD")),
-                  "spec_version": load_spec((runner.SPECS_DIR / "retro.md").read_text()).meta.version,
+                  "spec_version": load_spec((SPECS_DIR / "retro.md").read_text()).meta.version,
                   "at": clock().isoformat()}
     status = project(journal.read(), box=box, provenance=provenance)
     assert status.tombstones == tuple((m.id, m.message_class, 0) for m in box.messages()[:2])
@@ -123,11 +124,11 @@ def test_status_current_window_scorecard(tmp_path):
 
 def test_status_production_provenance(tmp_path, monkeypatch, capsys):
     c, _, _, _ = rig(tmp_path)
-    spec_text = (runner.SPECS_DIR / "retro.md").read_text().replace('version: "1.2"', 'version: "7.3"')
+    spec_text = (SPECS_DIR / "retro.md").read_text().replace('version: "1.2"', 'version: "7.3"')
     specs = tmp_path / "specs"
     specs.mkdir()
     (specs / "retro.md").write_text(spec_text)
-    monkeypatch.setattr(runner, "SPECS_DIR", specs)
+    monkeypatch.setattr(cli, "SPECS_DIR", specs)
     head = asyncio.run(c.git.rev_parse(c.repo, "HEAD"))
     expected = {"head": head, "spec_version": load_spec(spec_text).meta.version, "at": c.clock().isoformat()}
     assert expected["spec_version"] == "7.3"

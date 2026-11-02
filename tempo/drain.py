@@ -19,47 +19,18 @@ from tempo import caps
 from tempo.journal import TERMINAL_STATES, Event, EventType
 from tempo.lockfile import Lockfile
 from tempo.reconcile import reconcile
-from tempo.runner import EXIT_MERGED, EXIT_TICKET, Checkout, Dispatch, Refusal, harvest_orphan
+from tempo.backlog import PREMISE, RETIRED, SETTLED, eligible, premise_parked, settled_dependencies, start_run
+from tempo.checkout import Checkout, Refusal
+from tempo.runner import EXIT_MERGED, EXIT_TICKET, Dispatch
+from tempo.stages import harvest_orphan
 from tempo.status import last_states, reject_queue
 from tempo.tickets import (
-    INTAKE_SIGNAL, TICKET_FILE, TICKETS_DIR, Ticket, TicketInvalid, _porcelain, depends_cycle, intake,
+    TICKET_FILE, TICKETS_DIR, Ticket, TicketInvalid, _porcelain, intake,
     parse_ticket, ticket_path,
 )
 
 HALT_SIGNAL = "drain_halted"
 CEILING = "drain.max_runtime_hours"
-# `already_satisfied` settles the stem as a no-op (section 7): it satisfies `depends` and is never re-offered.
-SETTLED = frozenset({"merged", "already_satisfied"})
-# A `rejected` stem is retired (section 11.2): never dispatched again.
-RETIRED = frozenset({"rejected"})
-PRIORITY = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
-
-PREMISE = "premise_failed"
-def premise_parked(events: Iterable[Event], stem: str, ticket_sha: str) -> bool:
-    """The premise park (section 18): the stem's last run ended `premise_failed` against this same `ticket.md`."""
-    last: str | None = None
-    ran_sha: str | None = None
-    for e in events:
-        if e.type == EventType.STATE_TRANSITION and e.ticket == stem:
-            last = e.body.get("to")
-            if last == "running":
-                ran_sha = e.body.get("ticket_sha")
-    return last == PREMISE and ran_sha == ticket_sha
-
-
-def authored_at(events: Iterable[Event]) -> dict[str, str]:
-    """Each stem's age anchor (section 9): the `ts` of its FIRST ticket-plane authoring-commit event."""
-    first: dict[str, str] = {}
-    for e in events:
-        if e.type == EventType.SIGNAL and e.body.get("signal") == INTAKE_SIGNAL and e.ticket is not None:
-            first.setdefault(e.ticket, e.ts)
-    return first
-
-
-def sort_key(ticket: Ticket, authored: Mapping[str, str]) -> tuple:
-    """(priority, age, stem): older first; a stem with no authoring event has no seniority and sorts last."""
-    ts = authored.get(ticket.stem)
-    return (PRIORITY[ticket.frontmatter.priority], ts is None, ts or "", ticket.stem)
 
 
 @dataclass(frozen=True)
@@ -280,21 +251,7 @@ class _Drain:
         self, scan: _Scan, events: list[Event], last: Mapping[str, str], held: set[str],
     ) -> tuple[Ticket | None, bool]:
         """The next dispatch: fresh eligible work first, then re-offers, each in (priority, age) order."""
-        open_ = {s: t for s, t in scan.tickets.items()
-                 if t.frontmatter.state == "confirmed" and last.get(s) not in SETTLED | RETIRED}
-        edges = {s: list(t.depends) for s, t in open_.items()}
-        for stem in sorted(open_):
-            if cycle := depends_cycle(stem, edges):
-                raise Refusal(f"`## Depends on` cycle among committed tickets: {' -> '.join(cycle)}",
-                              f"edit one ticket on the cycle to drop the edge that inverts the intended order,"
-                              f" then `drain` again")
-        from tempo.rework import settled_dependencies, supersedes_maps
-
-        settled = settled_dependencies(events)
-        maps = supersedes_maps(events)
-        authored = authored_at(events)
-        ready = sorted((t for t in open_.values() if t.stem not in maps and set(t.depends) <= settled),
-                       key=lambda t: sort_key(t, authored))
+        ready = eligible(scan.tickets, events)
         awaiting = reject_queue(events)
         fresh, reoffers = [], []
         storm_held = set(self.c.control.storm_holds().values()) if self.c.control is not None else set()
@@ -348,19 +305,7 @@ class _Drain:
         stem = ticket.stem
         if hasattr(self.dispatch, 'prepare'):
             await self.dispatch.prepare()
-        if reoffer:
-            history = self.c.journal.read()
-            if stem in reject_queue(history):
-                self.c.journal.append(EventType.SIGNAL,
-                                      {"signal": "reject_verdict", "verdict": "keep", "actor": "machine"},
-                                      ticket=stem)
-            body = next(e.body for e in reversed(history)
-                        if e.type == EventType.STATE_TRANSITION and e.ticket == stem
-                        and e.body.get("to") in TERMINAL_STATES)
-            if body.get("to") != PREMISE and 'provider_drought' not in body:
-                caps.consume(self.c.journal, stem, "retry", sha, rung=body.get("rung"))
-        # The `ticket.md` the run answers: a `premise_failed` verdict parks the stem until this changes.
-        self.c.journal.append(EventType.STATE_TRANSITION, {"to": "running", "ticket_sha": sha}, ticket=stem)
+        start_run(self.c.journal, stem, sha, reoffer=reoffer)
         async def abort():
             await self.dispatch.abort_current()
         terminal = await self._await_controlled(asyncio.create_task(self.dispatch(ticket)), abort,
@@ -382,7 +327,7 @@ class _Drain:
                                      self.retro.abort_current, self.c.sleep)
 
     async def _await_controlled(self, task, abort, sleep):
-        from tempo.daemon import _protected_cleanup
+        from tempo.control import protected_cleanup
 
         consumer = self.c.control
         async def control() -> None:
@@ -428,11 +373,9 @@ class _Drain:
                     for result in results:
                         if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
                             raise result
-            await _protected_cleanup(asyncio.create_task(cleanup()))
+            await protected_cleanup(asyncio.create_task(cleanup()))
 
     def _settle(self, scan: _Scan, events: list[Event], last: Mapping[str, str], held: set[str]) -> None:
-        from tempo.rework import settled_dependencies
-
         settled = settled_dependencies(events)
         awaiting = reject_queue(events)
         for stem in sorted(scan.tickets):

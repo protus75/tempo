@@ -10,7 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from tempo import control, merge, stages
-from tempo.daemon import PauseConsumer
+from tempo.control import PauseConsumer
 from tempo.artifacts import StageResult
 from tempo.box import BOX_DIR, Box
 from tempo.config import MechanicalCheck, RegenerateStrategy, UnionStrategy, load_config, snapshot_config

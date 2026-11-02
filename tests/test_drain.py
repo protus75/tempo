@@ -16,7 +16,9 @@ from tempo.__main__ import build_control, main
 from dataclasses import replace
 from tempo.box import Box
 from tempo.caps import draws
-from tempo.drain import CEILING, HALT_SIGNAL, PREMISE
+from tempo.backlog import PREMISE
+from tempo.checkout import Checkout
+from tempo.drain import CEILING, HALT_SIGNAL
 from tempo.git import Git
 from tempo.journal import EventType, Journal
 from tempo.lockfile import Lockfile, LockHeld
@@ -310,7 +312,7 @@ def test_drain_merges_without_scanning_the_box(root, monkeypatch):
     write(root, "work", ticket())
     requests = []
     monkeypatch.setattr("tempo.triage.triage_pass", lambda *args: requests.append(args))
-    from tempo.daemon import storm_producer
+    from tempo.storm import storm_producer
     def arrival(checkout):
         producer = storm_producer(root=box.root, fs=box.fs, journal=checkout.journal, clock=checkout.clock)
         producer.enqueue(message_class="suggestion", origin="test", summary="pending observation",
@@ -561,7 +563,7 @@ def test_rework_split_preserves_dispatch_terminal_invariant(rework_repo, monkeyp
     from tempo.drain import _Drain
     from tempo.config import load_config
     from tempo.tickets import validate_ticket
-    checkout = runner.Checkout(repo, load_config(None, cwd=repo), ENV, SubprocessExec(),
+    checkout = Checkout(repo, load_config(None, cwd=repo), ENV, SubprocessExec(),
                                Git(SubprocessExec(), env=ENV, timeout=30), Journal(repo / ".tempo/state", clock),
                                LocalFileSystem(), clock)
     candidate = validate_ticket("dependent", (repo / "tickets/dependent/ticket.md").read_text(), repo)
@@ -658,7 +660,6 @@ def test_render_over_bound_dispatches_rework_without_diagnosis(rework_repo, monk
 
 def pause_checkout(root):
     from tempo.config import load_config
-    from tempo.runner import Checkout
     process = SubprocessExec()
     checkout = Checkout(root, load_config(None, cwd=root), ENV, process,
                     Git(process, env=ENV, timeout=30), journal(root), LocalFileSystem(), Clock())
@@ -840,7 +841,7 @@ async def test_pause_preserves_free_premise_reoffers(root):
 async def test_drain_uses_supplied_control(root, monkeypatch):
     from tempo import __main__ as cli
     from tempo.drain import drain as run_drain
-    from tempo.runner import Refusal
+    from tempo.checkout import Refusal
     checkout = pause_checkout(root)
     consumer = checkout.control
     trace = []

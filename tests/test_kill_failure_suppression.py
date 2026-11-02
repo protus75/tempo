@@ -18,6 +18,8 @@ from tests.test_kill_executor_abort import Writer, Timer, invoke, cancelled, tur
 from tests.test_kill_signal_journal import Rig, decision
 from tests.test_kill_worker_stop import Worker, accepted, boundary, release_all
 from tests.test_mergequeue import ctx as admission_context, ready
+from tempo import control
+from tempo.checkout import Checkout
 
 
 @asynccontextmanager
@@ -119,7 +121,7 @@ async def test_worker_failures_without_matching_kill_are_preserved(tmp_path, cas
     failures = []
     async with owned([worker]) as (owner, run, tasks):
         stopper = daemon.WorkerStop(lifecycle_id="replacement" if case == "other" else rig.life,
-                                    abort=lambda: daemon.executor_abort(driver.abort_current), workers=tasks)
+                                    abort=lambda: control.executor_abort(driver.abort_current), workers=tasks)
         watched = observer(stopper, rig, failures)
         observation = asyncio.create_task(watched.observe())
         before = rig.journal.read()
@@ -304,7 +306,7 @@ async def test_kill_suppression_preserves_run_and_abort_failures(admission_conte
             writer.abort_current = original
             if ctx.driver._active is not None and abort_failure:
                 ctx.driver._active.abort = None
-            await daemon.executor_abort(ctx.driver.abort_current)
+            await control.executor_abort(ctx.driver.abort_current)
             await release_all(tasks, [worker])
             await asyncio.gather(invocation, observation, return_exceptions=True)
     if not abort_failure:
@@ -317,12 +319,12 @@ async def test_kill_suppression_preserves_run_and_abort_failures(admission_conte
                                  "rung": {"tier": "medium", "effort": "high"}}
         assert harvest_path.read_bytes() == harvest and not ctx.worktree(work.stem).exists()
         return
-    checkout = runner.Checkout(ctx.repo, ctx.config, ctx.env, ctx.exec_, ctx.git,
+    checkout = Checkout(ctx.repo, ctx.config, ctx.env, ctx.exec_, ctx.git,
                                journal, ctx.fs, ctx.driver.clock, ctx.driver.sleep)
     orphan_attempt = run_seq(journal.read(), work.stem)
     # Suppression leaves the interrupted run for the real restart writer to harvest and reap.
     reaped = await reconcile(journal, ctx.git, ctx.repo, ctx.config.worktree_root,
-                            lambda stem, attempt: runner.harvest_orphan(checkout, stem, attempt))
+                            lambda stem, attempt: stages.harvest_orphan(checkout, stem, attempt))
     assert reaped == [work.stem] and not ctx.worktree(work.stem).exists()
     terminal, alert = journal.read()[-2:]
     assert terminal.type == EventType.STATE_TRANSITION and terminal.body == {"to": "abandoned"}

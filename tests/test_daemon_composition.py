@@ -28,6 +28,8 @@ from tests.test_daemon_config import assert_detached, python_values
 from tests.test_providers import CONFIG, ENV, claude_ok, codex_ok, jsonl
 from tests.test_scheduler import Time, import_closure, text, turn
 from tests.test_mergequeue import ctx as admission_context, ready
+from tempo import control
+from tempo.checkout import Checkout, Refusal
 
 
 class ScriptFS:
@@ -139,7 +141,7 @@ class CoreRig:
         self.exec = ScriptExec(self.fs)
         self.journal = Journal(root / "state", self.time)
         initial = load_config(config_path, cwd=root)
-        self.checkout = runner.Checkout(
+        self.checkout = Checkout(
             root, initial, ENV, self.exec,
             Git(self.exec, env=child_env(ENV, initial), timeout=30),
             self.journal, self.fs, self.time, self.time.sleep,
@@ -843,7 +845,7 @@ async def test_production_core_unwinds_preflight_refusal_and_cancellation(tmp_pa
         assert owned.done() and owned.cancelled() and owned not in asyncio.all_tasks()
         assert await second == "merged"
     else:
-        with pytest.raises(runner.Refusal if failure == "refusal" else ValueError) as caught:
+        with pytest.raises(Refusal if failure == "refusal" else ValueError) as caught:
             await rig.core.admission.dispatch(first_ticket)
         if failure == "refusal":
             message = str(caught.value)
@@ -888,7 +890,7 @@ def test_bootstrap_pipeline_prepares_before_dispatch(tmp_path, monkeypatch, refu
     callback = runner.pipeline(rig.checkout)
     assert bound == called == [] and rig.exec.calls == []
     if refuse:
-        with pytest.raises(runner.Refusal, match="provider preflight failed"):
+        with pytest.raises(Refusal, match="provider preflight failed"):
             asyncio.run(callback.prepare())
         assert bound == called == []
     else:
@@ -959,7 +961,7 @@ async def test_merge_queue_composition_has_no_side_effects(tmp_path, monkeypatch
         pytest.fail("composition performed admission or an external effect")
 
     for owner, names in ((MergeQueue, ("offer", "process", "_signal", "_hold")),
-                         (daemon.ControlInbox, ("consume", "recover")),
+                         (control.ControlInbox, ("consume", "recover")),
                          (rig.core.control.inbox, ("apply", "files", "read")),
                          (Git, ("_call",)), (stages, ("gather_evidence", "gather_safety_evidence")),
                          (Journal, ("append",)), (asyncio, ("create_task",)),
@@ -979,7 +981,7 @@ async def test_merge_queue_composition_has_no_side_effects(tmp_path, monkeypatch
 @pytest.mark.asyncio
 async def test_composed_merge_queue_admits_reviewed_candidate(admission_context, monkeypatch):
     source = admission_context
-    checkout = runner.Checkout(source.repo, source.config, source.env, source.exec_, source.git,
+    checkout = Checkout(source.repo, source.config, source.env, source.exec_, source.git,
                                source.driver.journal, source.fs, source.driver.clock, source.driver.sleep)
     captured = capture_pipeline_queue(monkeypatch)
     checkout = replace(checkout, control=cli.build_control(checkout))
@@ -1022,7 +1024,7 @@ def sources():
 
 
 def without_core_import(material):
-    edge = "from tempo.daemon import DaemonCore, PauseConsumer, daemon_core"
+    edge = "from tempo.daemon import DaemonCore, daemon_core"
     assert edge in material["tempo.__main__"]
     return {name: "\n".join(line[:len(line) - len(line.lstrip())] + "pass"
             if line.lstrip().startswith("from tempo.daemon import") else line
@@ -1046,7 +1048,7 @@ def test_daemon_core_is_reachable_from_cli():
 
 def production_writer(source, script):
     """Reuse the production bind and its queue with the disposable admission repository."""
-    checkout = runner.Checkout(source.repo, source.config, source.env, source.exec_, source.git,
+    checkout = Checkout(source.repo, source.config, source.env, source.exec_, source.git,
                                source.driver.journal, source.fs, source.driver.clock, source.driver.sleep)
     checkout = replace(checkout, control=cli.build_control(checkout))
     writer = runner.bind(checkout, FakeLLM(script))
@@ -1113,7 +1115,7 @@ async def test_production_consumes_conflict_handoff_after_unwind(admission_conte
     ctx.driver.llm = FakeLLM([reply, requisition()])
     from tempo.drain import _Drain
     from tempo.lockfile import Lockfile, LockHeld
-    checkout = runner.Checkout(ctx.repo, ctx.config, ctx.env, ctx.exec_, ctx.git,
+    checkout = Checkout(ctx.repo, ctx.config, ctx.env, ctx.exec_, ctx.git,
                                ctx.driver.journal, ctx.fs, ctx.driver.clock, ctx.driver.sleep)
     lock = Lockfile(ctx.config.state_dir, instance_id="production", clock=ctx.driver.clock)
     lock.acquire()
@@ -1147,7 +1149,8 @@ async def test_production_consumes_conflict_handoff_after_unwind(admission_conte
 @pytest.mark.parametrize("action", ["update", "split", "escalate", "exhausted"])
 async def test_production_applies_reviewed_rework_orders(admission_context, action):
     from tempo.mergequeue import ConflictHandoff
-    from tempo.rework import SUPERSEDES, record_supersedes
+    from tempo.backlog import SUPERSEDES
+    from tempo.rework import record_supersedes
     from tests.test_rework import order, requisition, successors
     checkout, writer = production_writer(admission_context, [])
     ctx = writer.ctx
@@ -1301,16 +1304,16 @@ async def test_production_refuses_failed_rework_publication(admission_context, m
 @pytest.mark.asyncio
 async def test_production_composes_one_pause_consumer(tmp_path, monkeypatch):
     from tempo.control import ControlInbox
-    from tempo.daemon import PauseConsumer
+    from tempo.control import PauseConsumer
     constructed = []
-    original = daemon.control_inbox
+    original = control.control_inbox
     def construct(**kwargs):
         inbox = original(**kwargs)
         constructed.append(inbox)
         return inbox
     def forbidden(*args, **kwargs):
         pytest.fail("control composition read or applied a request or started work")
-    monkeypatch.setattr(daemon, "control_inbox", construct)
+    monkeypatch.setattr(control, "control_inbox", construct)
     for owner, names in ((ControlInbox, ("consume", "recover")), (Journal, ("append",)),
                          (asyncio, ("create_task",))):
         for name in names:
@@ -1342,7 +1345,7 @@ class LiveDrain:
         from tests.test_cli import ENV as checkout_env
         from tempo.seams import SubprocessExec
         process = SubprocessExec()
-        self.checkout = runner.Checkout(root, load_config(None, cwd=root), checkout_env, process,
+        self.checkout = Checkout(root, load_config(None, cwd=root), checkout_env, process,
                                         Git(process, env=checkout_env, timeout=30), journal(root),
                                         LocalFileSystem(), Clock())
         self.trace, self.consumers, self.calls = [], [], []
@@ -1654,15 +1657,15 @@ async def test_pause_activation_observables_detect_removed_bindings(root, monkey
     async def noop(_):
         pass
     if binding == "checkpoint":
-        monkeypatch.setattr(daemon.PauseConsumer, "checkpoint", noop)
+        monkeypatch.setattr(control.PauseConsumer, "checkpoint", noop)
     elif binding == "publication":
-        monkeypatch.setattr(daemon.PauseConsumer, "publish", lambda _: None)
+        monkeypatch.setattr(control.PauseConsumer, "publish", lambda _: None)
     elif binding == "refresh":
         def apply(consumer, projection):
             consumer.projection = projection
         monkeypatch.setattr(live.consumer.inbox, "apply", lambda projection: apply(live.consumer, projection))
     elif binding == "retirement":
-        monkeypatch.setattr(daemon.PauseConsumer, "retire", lambda _: None)
+        monkeypatch.setattr(control.PauseConsumer, "retire", lambda _: None)
     else:
         original_append = c.journal.append
         def append(type, body, **kwargs):
@@ -1860,7 +1863,7 @@ async def test_composed_admission_holds_accept_identity_bound_resume(admission_c
         assert not queue.paused and consumer.projection.pause_id == "zz-pause"
         assert read_active(consumer.state_dir, Path.read_bytes) == (life, "zz-pause")
         # Reconstruction applies accepted records and refreshes the selected discovery without new decisions.
-        recovered = daemon.PauseConsumer(journal=checkout.journal, lifecycle_id=life,
+        recovered = control.PauseConsumer(journal=checkout.journal, lifecycle_id=life,
             state_dir=consumer.state_dir, fs=consumer.fs, sleep=sleep,
             files=consumer.inbox.files, read=consumer.inbox.read)
         recovered.hold(later)

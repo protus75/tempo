@@ -14,6 +14,7 @@ from tempo.specs import data_close, data_open
 from tempo.stages import PRIOR_ATTEMPTS, StagesRun
 from tests.test_stages import ENV, SNAG, STEM, agent, git, verdict
 from tests.test_terminal import author, clock, diagnosis_reply, repo  # noqa: F401 -- fixture
+from tempo import stages
 
 
 def run(repo: Path, script: list, verb: str = "run") -> tuple[int, FakeLLM]:
@@ -40,12 +41,12 @@ def criteria(rendered: str) -> str:
 def test_review_snag_commits_closed_harvest_without_code_content_and_wipes(repo):
     author(repo)
     marker = "CODE_EDIT_MARKER_NEVER_IN_HARVEST"
-    long_summary = "x" * (runner.HARVEST_TAIL_CHARS + 100)
+    long_summary = "x" * (stages.HARVEST_TAIL_CHARS + 100)
 
     def review(req):
         path = repo / ".tempo" / "state" / "spools" / "providers" / STEM / "fake-0001" / "events.jsonl"
         path.parent.mkdir(parents=True)
-        path.write_text("e" * (runner.HARVEST_TAIL_CHARS + 100))
+        path.write_text("e" * (stages.HARVEST_TAIL_CHARS + 100))
         return json.dumps({"verdict": "snag", "summary": long_summary, "findings": [SNAG]})
 
     code, _ = run(repo, [agent({"tempo/thing.py": f"ok # {marker}\n"}), review, diagnosis_reply()])
@@ -54,8 +55,8 @@ def test_review_snag_commits_closed_harvest_without_code_content_and_wipes(repo)
     assert h.terminal == "gate_failed" and h.stage == "review" and h.attempt == 0
     assert [f.model_dump(exclude_none=True) for f in h.findings] == [SNAG]
     assert "tempo/thing.py" in h.diff_stat and marker not in h.diff_stat
-    assert len(h.stage_log_tail) <= runner.HARVEST_TAIL_CHARS
-    assert len(h.events_tail) <= runner.HARVEST_TAIL_CHARS
+    assert len(h.stage_log_tail) <= stages.HARVEST_TAIL_CHARS
+    assert len(h.events_tail) <= stages.HARVEST_TAIL_CHARS
     assert h.run_record == f"tickets/{STEM}/run.md"
     assert set(h.model_dump()) == set(Harvest.model_fields)
     for path in (repo / "tickets" / STEM / "attempts").rglob("*"):

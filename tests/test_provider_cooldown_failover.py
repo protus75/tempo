@@ -9,7 +9,7 @@ from datetime import timedelta
 import pytest
 from pydantic import BaseModel
 
-from tempo import __main__ as cli, runner, stages
+from tempo import __main__ as cli, driver as driver_module, runner, stages
 from tempo.audit import audit_journal
 from tempo.artifacts import Harvest, StageResult
 from tempo.box import Box
@@ -28,6 +28,7 @@ from tests.test_providers import CONFIG
 from tests.test_restart_timers import repository, held
 from tests.test_scheduler import turn, text
 from tests.test_serve import graph, until, finish, terminals
+from tempo.checkout import Refusal, SPECS_DIR, call_timeout
 
 
 class Reply(BaseModel):
@@ -212,7 +213,7 @@ async def test_mid_run_drought_is_harvested_without_spine_draws(root, monkeypatc
             from tempo.requisition import review_ticket
             from tests.test_requisition import TICKET
             await review_ticket(ctx.driver, repo=root, stem='seed', text=TICKET.replace('context.txt', 'config.yaml'),
-                specs_dir=runner.SPECS_DIR, tier='medium', stem_slot=ticket.stem,
+                specs_dir=SPECS_DIR, tier='medium', stem_slot=ticket.stem,
                 run_seq=0, attempt=attempt, call_seq=1)
         return await stage(rig, ctx.driver, stem=ticket.stem, surface='review')
     monkeypatch.setattr(stages, 'implement', implement)
@@ -324,7 +325,7 @@ async def test_one_provider_payload_and_timers_per_session(root, monkeypatch):
         refreshed = []
         async def triage_pass(checkout, llm):
             assert llm.session is seen[-1] and checkout.config is llm._config
-            assert llm._timeout == runner.call_timeout(checkout.config)
+            assert llm._timeout == call_timeout(checkout.config)
             refreshed.append(checkout.config)
             monkeypatch.setattr(rig.owner.box, 'pending', lambda: [])
         monkeypatch.setattr(cli.triage, 'triage_pass', triage_pass)
@@ -409,7 +410,7 @@ async def test_production_projected_wait_uses_shared_occupancy_and_timeout(tmp_p
                   + f'drain: {{max_ticket_minutes: {timeout // 60}}}\n')
     writer = await prepared(rig)
     client = writer.ctx.driver.llm
-    assert client._timeout == runner.call_timeout(writer.ctx.config) == timeout
+    assert client._timeout == call_timeout(writer.ctx.config) == timeout
     primary = candidates(client._config, 'medium', surface)[0]
     slots = client.session.thresh._slots[primary.provider.name]
     slots.used = used
@@ -469,7 +470,7 @@ async def test_auth_failure_excludes_provider_until_fresh_successful_preflight(t
         async def run(self, argv, **kwargs):
             alerts.append(argv)
             return 0, 'delivered', ''
-    monkeypatch.setattr(cli, 'SubprocessExec', NotificationProcess)
+    monkeypatch.setattr(driver_module, 'SubprocessExec', NotificationProcess)
     writer = await prepared(rig)
     driver, session = writer.ctx.driver, writer.ctx.driver.llm.session
     fail_process(rig, monkeypatch, '401 unauthorized')
@@ -500,7 +501,7 @@ async def test_auth_failure_excludes_provider_until_fresh_successful_preflight(t
     monkeypatch.undo()
     checkout = replace(rig.checkout, control=cli.build_control(rig.checkout))
     rig.exec.refuse_probe = True
-    with pytest.raises(runner.Refusal, match='provider preflight failed'):
+    with pytest.raises(Refusal, match='provider preflight failed'):
         await runner.prepare_pipeline(checkout)
     rig.exec.refuse_probe = False
     restored = await runner.prepare_pipeline(checkout)

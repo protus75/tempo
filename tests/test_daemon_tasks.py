@@ -10,7 +10,7 @@ from tempo.artifacts import StageResult
 from tempo.daemon import DaemonTasks
 from tempo.journal import EventType
 from tempo.mergequeue import ConflictHandoff, MergeQueue
-from tempo.runner import Checkout
+from tempo.checkout import Checkout
 from tests.test_cli import ENV, Clock, Stages, root, ticket, write
 from tests.test_daemon_composition import CoreRig, assert_core_wiring
 from tests.test_mergequeue import ctx as admission_context, ready

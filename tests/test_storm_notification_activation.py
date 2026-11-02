@@ -26,6 +26,9 @@ from tests.test_mergequeue import ctx as admission_context, ready, scripted
 from tests.test_stages import STEM, agent
 from tests.test_storm import SIG, snapshot
 from tests.test_storm_producer import ARRIVAL, compose
+from tempo import storm
+from tempo import backlog
+from tempo.checkout import Checkout
 
 
 def digest(parts):
@@ -247,7 +250,7 @@ def test_storm_activation_does_not_hold_dispatch_or_notify(tmp_path, monkeypatch
     script = Script()
     clock = FakeClock(T0)
     journal = Journal(root / ".tempo/state", clock)
-    box = daemon.storm_producer(root=root / ".tempo/state/box", fs=LocalFileSystem(),
+    box = storm.storm_producer(root=root / ".tempo/state/box", fs=LocalFileSystem(),
                                 journal=journal, clock=clock)
     six(box)
     def forbidden(*args, **kwargs):
@@ -291,7 +294,7 @@ SITES = ("implement", "fallback-raises", "fallback-absent", "dependency", "base"
 async def exercise_site(ctx, monkeypatch, site, attempt=2):
     clock = ctx.driver.clock
     journal = ctx.driver.journal
-    box = daemon.storm_producer(root=ctx.config.state_dir / "box", fs=ctx.fs, journal=journal, clock=clock)
+    box = storm.storm_producer(root=ctx.config.state_dir / "box", fs=ctx.fs, journal=journal, clock=clock)
     async def ticket_fixture(**kwargs):
         path = ctx.repo / f"tickets/{STEM}/ticket.md"
         if not path.exists():
@@ -337,10 +340,10 @@ async def exercise_site(ctx, monkeypatch, site, attempt=2):
             await ctx.git.add(ctx.repo, [f"tickets/{STEM}/ticket.md", "tickets/dead/ticket.md"])
             await ctx.git.commit(ctx.repo, "dependency")
             journal.append(EventType.STATE_TRANSITION, {"to": "rejected"}, ticket="dead")
-        checkout = runner.Checkout(ctx.repo, ctx.config, ctx.env, ctx.exec_, ctx.git, journal, ctx.fs, clock)
-        await runner._dead_dependents("dead", checkout)
+        checkout = Checkout(ctx.repo, ctx.config, ctx.env, ctx.exec_, ctx.git, journal, ctx.fs, clock)
+        await backlog.dead_dependents("dead", checkout)
         before = journal.read()
-        await runner._dead_dependents("dead", checkout)
+        await backlog.dead_dependents("dead", checkout)
         assert journal.read() == before
         parts = [["dead-dependency", STEM, "dead"]]
         stage, origin = "depends", STEM
@@ -379,8 +382,8 @@ async def exercise_site(ctx, monkeypatch, site, attempt=2):
 @pytest.mark.parametrize("site", SITES)
 def test_production_arrival_site_closure(admission_context, monkeypatch, site):
     ctx = admission_context
-    hook = Mock(wraps=daemon.storm_producer)
-    monkeypatch.setattr(daemon, "storm_producer", hook)
+    hook = Mock(wraps=storm.storm_producer)
+    monkeypatch.setattr(storm, "storm_producer", hook)
     box, parts, stage, origin = asyncio.run(exercise_site(ctx, monkeypatch, site))
     assert hook.call_count >= (1 if site == "flake" else 2)
     incoming = occurrences(ctx.driver.journal)
@@ -400,7 +403,7 @@ def test_production_occurrence_id_recipes(admission_context, monkeypatch, site):
     monkeypatch.setattr(journal_module, "ROLL_BYTES", 1)
     fake = FakeClock(ctx.driver.clock() + timedelta(hours=2))
     restarted = Journal(ctx.config.state_dir, fake)
-    replay = daemon.storm_producer(root=box.root, fs=box.fs, journal=restarted, clock=fake)
+    replay = storm.storm_producer(root=box.root, fs=box.fs, journal=restarted, clock=fake)
     for event in incoming:
         message = next(m for m in box.messages() if m.signature == event.body["signature"])
         fields = dict(message_class=message.message_class, origin=origin, stage=stage, outcome=message.outcome,
@@ -506,7 +509,7 @@ async def test_storm_leaves_daemon_selection_and_accounting_unchanged(admission_
             checkout.journal.append(EventType.STATE_TRANSITION, {"to": "merged"}, ticket=ticket.stem)
             return "merged"
         return dispatch
-    checkout = runner.Checkout(ctx.repo, ctx.config, ctx.env, ctx.exec_, ctx.git, ctx.driver.journal,
+    checkout = Checkout(ctx.repo, ctx.config, ctx.env, ctx.exec_, ctx.git, ctx.driver.journal,
                                ctx.fs, ctx.driver.clock, ctx.driver.sleep)
     def forbidden(*args, **kwargs):
         pytest.fail("storm invoked an external notification")
@@ -548,7 +551,7 @@ def test_production_startup_recovers_without_new_arrival(admission_context, star
     clock.advance(7200)
     if startup == "daemon":
         journal = Journal(ctx.config.state_dir, clock)
-        checkout = runner.Checkout(ctx.repo, ctx.config, ctx.env, ctx.exec_, ctx.git, journal, ctx.fs, clock)
+        checkout = Checkout(ctx.repo, ctx.config, ctx.env, ctx.exec_, ctx.git, journal, ctx.fs, clock)
         core = cli.build_daemon_core(checkout, read=lambda _: None, debounce=0,
             quarantined=lambda: set(), drought_parked=lambda: set(), completed_unmerged=lambda: 0)
         before = snapshot(ctx.config.state_dir)

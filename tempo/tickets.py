@@ -76,7 +76,7 @@ BANNED_ADJECTIVES = re.compile(r"\b(improved|better|cleaner)\b", re.IGNORECASE)
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 _HEADING = re.compile(r"^## (.+?)\s*$")
 _ITEM = re.compile(r"^(?:-|\d+\.)\s+(.*)$")
-_BUDGET = re.compile(r"^(expected|stuck):\s*(\d+)m$")
+_STUCK = re.compile(r"^stuck:\s*(\d+)m$")
 
 
 @dataclass(frozen=True)
@@ -89,7 +89,6 @@ class Ticket:
     on_demand: tuple[str, ...]
     scope_fence: tuple[str, ...]
     verification: tuple[tuple[str, ...], ...]
-    expected_minutes: int
     stuck_minutes: int
     regression: tuple[str, ...] = ()
     carries: tuple[str, ...] = ()
@@ -353,26 +352,22 @@ def parse_ticket(stem: str, text: str, repo: Path) -> Ticket:
                            "add `## Regression`: one fenced reproducing command plus `- carries: <path-prefix>`"
                            " bullets", path))
 
-    expected = stuck = 0
+    stuck = 0
     if text_ := sections.get("Time budget"):
         items, errs = _bullets(text_, "Time budget", path)
         findings += errs
-        budget = {m.group(1): int(m.group(2)) for item in items if (m := _BUDGET.match(item))}
-        if len(items) != 2 or set(budget) != {"expected", "stuck"} or 0 in budget.values():
-            findings.append(_f("`## Time budget` is not an expected/stuck minutes pair",
-                               "write exactly two bullets, `- expected: <int>m` and `- stuck: <int>m`", path))
+        match = _STUCK.match(items[0]) if len(items) == 1 else None
+        if match is None or int(match[1]) == 0:
+            findings.append(_f("`## Time budget` is not one stuck minutes bullet",
+                               "write exactly one bullet, `- stuck: <int>m` (the stage deadline)", path))
         else:
-            expected, stuck = budget["expected"], budget["stuck"]
-            if stuck <= expected:
-                findings.append(_f(f"`## Time budget` stuck: {stuck}m must exceed expected: {expected}m",
-                                   "set stuck greater than expected (the stage deadline is the stuck budget)",
-                                   path))
+            stuck = int(match[1])
 
     if findings or fm is None:
         raise TicketInvalid(findings)
     return Ticket(stem=stem, frontmatter=fm, sections=sections, depends=tuple(depends), context=tuple(context),
                   on_demand=tuple(on_demand), scope_fence=tuple(fence),
-                  verification=tuple(commands), expected_minutes=expected, stuck_minutes=stuck,
+                  verification=tuple(commands), stuck_minutes=stuck,
                   regression=regression, carries=carries)
 
 

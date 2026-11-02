@@ -141,7 +141,7 @@ def test_registry_format(tmp_path):
 
 
 def test_tombstone_rereports_reopen_at_threshold(tmp_path, monkeypatch):
-    from tempo.daemon import storm_producer
+    from tempo.storm import storm_producer
     from tempo.journal import EventType, Journal
     from tests.test_drain import Clock, commit_ticket, confirmed
     from tests.test_triage import root_with_box, reply, run
@@ -237,7 +237,7 @@ def test_tombstone_reopen_requires_journal_callback(tmp_path, monkeypatch):
 @pytest.mark.parametrize("point", ["intent", "count", "signal", "reopen", "completion"])
 @pytest.mark.parametrize("after", [False, True])
 def test_rereport_crash_replay_counts_and_reopens_once(tmp_path, monkeypatch, point, after):
-    from tempo.daemon import storm_producer
+    from tempo.storm import storm_producer
     from tempo.journal import EventType, Journal
     from tests.test_drain import Clock
 
@@ -284,7 +284,7 @@ def test_rereport_crash_replay_counts_and_reopens_once(tmp_path, monkeypatch, po
 
 @pytest.mark.parametrize("after", [False, True])
 def test_late_rereport_replay_preserves_later_arrival_count(tmp_path, monkeypatch, after):
-    from tempo.daemon import storm_producer
+    from tempo.storm import storm_producer
     from tempo.journal import Journal
     from tests.test_drain import Clock
 

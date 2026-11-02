@@ -5,11 +5,13 @@ import hashlib
 import json
 from collections.abc import Callable
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
+from tempo.box import Box, RereportJournal
 from tempo.control import decisions
 from tempo.journal import Event, EventType, Journal, render_ts
-from tempo.seams import Clock
+from tempo.seams import Clock, FileSystem
 from tempo.tickets import stem_findings
 
 STORM_WINDOW = timedelta(hours=1)
@@ -198,3 +200,12 @@ class StormBreaker(StormLedger):
         event = super().record(**arrival)
         self.recover()
         return event
+
+
+def storm_producer(*, root: Path, fs: FileSystem, journal: Journal, clock: Clock) -> Box:
+    """Compose without effects; recovery and arrivals run under the caller's writer lock."""
+    storm = StormBreaker(journal=journal, clock=clock,
+                         publish=lambda body, count: box.publish_storm_report(body, count))
+    box = Box(root, fs, arrival=storm.record, recover=storm.recover,
+              rereport=RereportJournal(journal))
+    return box

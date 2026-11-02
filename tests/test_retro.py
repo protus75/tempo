@@ -274,7 +274,7 @@ def test_artifact_is_closed_and_proposals_pair_the_risks():
             RetroArtifact.model_validate(raw)
 
 
-def test_receipt_uses_engine_provenance_calibration_and_tombstones(tmp_path):
+def test_receipt_uses_engine_provenance_and_tombstones(tmp_path):
     proposal = {"fixed_failure": "A witnessed failure", "overcorrection_risk": "Rejecting useful inputs",
                 "proposed_spec_paths": ["specs/review.md"]}
     c, writer, hook, llm = rig(tmp_path, [json.dumps({"proposals": [proposal]})])
@@ -290,8 +290,7 @@ def test_receipt_uses_engine_provenance_calibration_and_tombstones(tmp_path):
     data = json.loads(report.split("```json\n")[1].split("\n```")[0])
     assert data["provenance"] == {"head": head, "spec_version": "1.2", "at": c.clock().isoformat()}
     assert data["measurements"]["merged_count"] == 1
-    assert data["calibration_divergence"] == [{"ticket": "one", "commit": head,
-        "actual_seconds": 120.0, "predicted_seconds": 600, "divergence_seconds": -480.0}]
+    assert data["measurements"]["elapsed_seconds"] == [{"ticket": "one", "commit": head, "actual_seconds": 120.0}]
     assert data["tombstone_digest"] == [{**record.model_dump(), "body": "Evidence digest\n"}]
     assert data["proposals"] == [proposal]
     assert all(request.worktree is None for request in llm.requests)
@@ -305,7 +304,7 @@ def test_receipt_uses_engine_provenance_calibration_and_tombstones(tmp_path):
 
 def test_retro_itemizes_confirmed_class_tombstones(tmp_path, monkeypatch):
     from tempo.box import Resolution, record_path
-    from tempo.daemon import storm_producer
+    from tempo.storm import storm_producer
     c, writer, hook, llm = rig(tmp_path, ['{"proposals": []}'])
     box = storm_producer(root=c.config.state_dir / "box", fs=c.fs, journal=c.journal, clock=c.clock)
     id, _ = box.enqueue(message_class="failure_report", origin="test", summary="confirmed-class failure",

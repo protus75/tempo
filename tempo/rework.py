@@ -2,28 +2,24 @@
 
 import asyncio
 import json
-from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from tempo.artifacts import Artifact, Finding, NonBlank, StageResult
+from tempo.backlog import SUPERSEDES, successor_leaves, supersedes_maps
+from tempo.artifacts import REWORK_ORDER, Artifact, Finding, NonBlank, StageResult
 from tempo.driver import LlmStage
 from tempo.gates import GateReport
 from tempo.git import GitError
-from tempo.journal import Event, EventType
+from tempo.journal import EventType
 from tempo.llm import AgentEffort, AgentTier
 from tempo.mergequeue import ConflictHandoff
 from tempo.requisition import review_ticket
 from tempo.specs import RenderOverBound, load_spec, render
 from tempo.stages import StageContext
-from tempo.status import last_states
 from tempo.tickets import Ticket, TicketInvalid, stem_findings, ticket_path, validate_ticket
-
-REWORK_ORDER = "rework_order"
-SUPERSEDES = "supersedes"
 
 
 class TicketProposal(BaseModel):
@@ -166,34 +162,6 @@ async def rework(ctx: StageContext, ticket: Ticket, text: str, findings: list[Fi
     ctx.driver.journal.append(EventType.SIGNAL, {"signal": REWORK_ORDER, "attempt": attempt,
                                                "action": order.action}, ticket=ticket.stem, key=None)
     return replace(result, artifact=order)
-
-
-def supersedes_maps(events: Iterable[Event]) -> dict[str, tuple[str, ...]]:
-    return {e.ticket: tuple(e.body["successors"]) for e in events
-            if e.type == EventType.SIGNAL and e.ticket is not None and e.body.get("signal") == SUPERSEDES}
-
-
-def successor_leaves(stem: str, maps: Mapping[str, tuple[str, ...]]) -> frozenset[str]:
-    if stem not in maps:
-        return frozenset({stem})
-    return frozenset(leaf for successor in maps[stem] for leaf in successor_leaves(successor, maps))
-
-
-def settled_dependencies(events: Iterable[Event]) -> frozenset[str]:
-    from tempo.drain import SETTLED
-
-    history = tuple(events)
-    maps, states = supersedes_maps(history), last_states(history)
-    return frozenset(stem for stem in states.keys() | maps.keys()
-                     if all(states.get(leaf) in SETTLED for leaf in successor_leaves(stem, maps)))
-
-
-def dead_dependencies(events: Iterable[Event]) -> frozenset[str]:
-    history = tuple(events)
-    maps, states = supersedes_maps(history), last_states(history)
-    return frozenset(stem for stem in states.keys() | maps.keys()
-                     if any(states.get(leaf) in {"rejected", "abandoned"}
-                            for leaf in successor_leaves(stem, maps)))
 
 
 async def record_supersedes(ctx: StageContext, order: ReworkOrder) -> list[Finding]:

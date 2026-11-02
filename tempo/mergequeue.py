@@ -6,13 +6,13 @@ from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 if TYPE_CHECKING:
-    from tempo.daemon import PauseConsumer
+    from tempo.control import PauseConsumer
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from tempo import merge, stages
 from tempo.artifacts import Finding, StageResult
-from tempo.drain import authored_at, sort_key
+from tempo.backlog import authored_at, sort_key
 from tempo.gates import GateReport, run_gates
 from tempo.git import GitError, RebaseRefused
 from tempo.journal import Event, EventType

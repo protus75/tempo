@@ -5,7 +5,7 @@ emits: packing-slip
 tier: medium
 effort: medium
 gates: []
-version: "1.5"
+version: "1.6"
 ---
 ## Role
 
@@ -70,7 +70,6 @@ When your work is committed, reply with ONLY one JSON object, no prose before or
  "surprises": "<judgment calls and anything unexpected, or none>",
  "second_problems": [{"summary": "<one problem, one sentence>"}],
  "dead_ends": "<what you tried and abandoned, and why, or none>",
- "predicted_vs_actual": "<the ticket's time budget against what the work took, or none>",
  "findings": [{"code": "premise", "path": "<file or null>", "line": <line or null>,
                "message": "<why the ticket cannot be done as written>",
                "paved_road": "<the ticket change that would make it doable>"}]}

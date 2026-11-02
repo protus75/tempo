@@ -8,7 +8,7 @@ from tempo import journal as journal_module
 from tempo.box import Box, signature
 from tempo.journal import EventType, Journal, JournalCorruption
 from tempo.seams import LocalFileSystem
-from tempo.storm import STORM_WINDOW, StormLedger
+from tempo.storm import STORM_WINDOW, StormLedger, storm_producer
 from tests.test_journal import FakeClock, T0
 
 SIG = signature("failure_report", "one", "implement", "gate_failed", reason="failed path/one 123")
@@ -252,7 +252,7 @@ def test_ledger_trip_uses_only_journal_and_box(tmp_path, monkeypatch):
     monkeypatch.setattr(control, "publish_request", forbidden)
     monkeypatch.setattr(daemon.DaemonAdmission, "dispatch", forbidden)
     storm, journal, clock = ledger(tmp_path)
-    box = daemon.storm_producer(root=tmp_path / "box", fs=LocalFileSystem(),
+    box = storm_producer(root=tmp_path / "box", fs=LocalFileSystem(),
                                 journal=journal, clock=clock)
     for n in range(12):
         box.enqueue(message_class="failure_report", origin="one", summary="failed path/one 123",

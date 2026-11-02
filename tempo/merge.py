@@ -17,12 +17,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from tempo.daemon import PauseConsumer
+    from tempo.control import PauseConsumer
     from tempo.mergequeue import ConflictHandoff, MergeQueue
 
 from pydantic import BaseModel, ConfigDict
 
 from tempo.artifacts import Artifact, Finding, NonBlank, StageResult
+from tempo.checkout import Refusal
 from tempo.gates import GateReport, run_gates
 from tempo.git import RebaseRefused
 from tempo.journal import Event, EventType
@@ -44,10 +45,8 @@ MERGE_SPEC_VERSION = 1
 def compose_pipeline(ctx: StageContext, *, escalate: Callable[[Event], None],
                      control: "PauseConsumer | None") -> "MergeQueue":
     """Compose admission without running it; CLI run dispatch still merges inline."""
-    # The queue's priority helpers import drain, which imports runner and this module.
+    # mergequeue imports this module.
     from tempo.mergequeue import MergeQueue
-
-    from tempo.runner import Refusal
 
     if control is None:
         raise Refusal("admission control consumer absent",
@@ -142,8 +141,6 @@ class AdmissionBoundary:
 
     def __init__(self, ctx: StageContext, *, mode: str = "inline",
                  queue: "MergeQueue | None" = None, waiting=nullcontext) -> None:
-        from tempo.runner import Refusal
-
         if mode not in ("inline", "daemon") or (mode == "daemon" and queue is None):
             raise Refusal(f"invalid admission setup: mode={mode!r}",
                           "select inline or supply the composed MergeQueue with daemon mode at serve composition")

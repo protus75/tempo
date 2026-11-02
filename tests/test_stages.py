@@ -113,7 +113,6 @@ env
 Needs a new dependency.
 
 ## Time budget
-- expected: 10m
 - stuck: 20m
 """
 
@@ -161,7 +160,7 @@ def author(repo: Path, bypass: str = "") -> None:
 def implement_reply(outcome: str = "ok", findings: list | None = None) -> str:
     return "```json\n" + json.dumps({
         "outcome": outcome, "summary": "wrote ok", "surprises": "", "dead_ends": "none",
-        "predicted_vs_actual": "10m predicted, 2m actual", "findings": findings or [],
+        "findings": findings or [],
     }) + "\n```"
 
 
@@ -236,7 +235,7 @@ def test_implement_check_review_all_ok_with_artifacts_and_provenance(repo):
     assert read_review((canonical / "review.md").read_text()) == review
     assert Invoice.model_validate_json((canonical / "checks.json").read_text()) == invoice
     run_md = (canonical / "run.md").read_text()
-    assert "## Outcome\n\nok\n" in run_md and "- provider: fake\n- model: fake\n- spec: implement 1.5" in run_md
+    assert "## Outcome\n\nok\n" in run_md and "- provider: fake\n- model: fake\n- spec: implement 1.6" in run_md
     assert git(repo, "diff", "--name-only", f"main...{STEM}").split() == ["tempo/thing.py"]
     outbox = config.worktree_root / STEM / "tickets" / STEM
     assert sorted(p.name for p in outbox.iterdir()) == ["ticket.md"]  # lifted and unlinked

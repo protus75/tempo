@@ -980,8 +980,8 @@ series, one commit per removed module.
   (`stuck` must exceed `expected`), retro calibration (`retro.py` regex), specs, templates,
   TEMPO_PLAN.md, and tests. `stuck` stays.
 
-**Kept set.** The kept set is every `tempo/` module except `drain`, `daemon`, `runner`, `rework`, and the
-CLI entry `__main__`.
+**Kept set.** The kept set is every `tempo/` module except `drain`, `daemon`, `serve` (the daemon's
+foreground lifetime), `runner`, `rework`, and the CLI entry `__main__`.
 - `__main__` still dispatches `drain` and `serve` until P5.
 - Each P5 removal deletes its CLI command in the same commit, and `__main__` joins the kept set at the
   end of P5.
@@ -989,7 +989,8 @@ CLI entry `__main__`.
 too. The move list above is a minimum, not the whole list.
 
 **Exit:**
-- An import-graph test proves the kept set imports none of `drain`, `daemon`, `runner`, or `rework`.
+- An import-graph test proves the kept set imports none of `drain`, `daemon`, `serve`, `runner`, or
+  `rework`.
   - It follows imports transitively.
   - It counts every import, including function-level and `TYPE_CHECKING` imports.
 - Suite green.
@@ -1070,7 +1071,7 @@ too. The move list above is a minimum, not the whole list.
   - `stages.diagnose` + `specs/diagnose.md`
   - rework routing + `specs/rework.md`
   - ladder routing in `runner`
-  - the `daemon` loop
+  - the `daemon` loop and `serve`
   - `runner` dispatch
   - the old `Driver._run` child path (§3.1) and `providers.CliAdapter`. `FAILURE_MARKERS` stay, for
     `stop.txt`.

@@ -53,7 +53,6 @@ test -f thing.py
 Needs an outside file.
 
 ## Time budget
-- expected: 10m
 - stuck: 20m
 """
 

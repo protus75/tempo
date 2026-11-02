@@ -14,19 +14,24 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Literal
+from datetime import datetime
+from typing import Annotated, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from tempo.artifacts import OUTCOMES, Artifact, Diagnosis, DiagnosisReply, Finding, Harvest, NonBlank, Outcome, ReviewVerdict, StageResult
 from tempo.box import BOX_DIR
+from tempo.checkout import SPECS_DIR, Checkout
 from tempo.storm import arrival_id
 from tempo.config import Config, ConfigSnapshot, Severity
+from tempo.control import protected_cleanup
 from tempo.driver import Driver, LlmStage
+from tempo.effects import Effects
 from tempo.gates import BugEvidence, GateReport, RegressionRun, run_gates
 from tempo.git import Git, GitError
 from tempo.hostfiles import CORE_TEMPLATE, CoreDriftGate, committed_core
 from tempo.journal import EventType, run_seq
+from tempo.llm import LLM
 from tempo.providers import child_env
 from tempo.seams import ExecutableNotFound, FileSystem, ProcessExec
 from tempo.specs import RenderOverBound, Spec, load_spec, render
@@ -45,7 +50,6 @@ RUN_RECORD_SECTIONS = (
     "Dead ends",
     "Second problems filed",
     "Resolved engine/model",
-    "Predicted vs actual",
 )
 
 StageName = Literal["implement", "check", "review"]
@@ -72,7 +76,6 @@ class ImplementReply(_Strict):
     summary: NonBlank
     surprises: str
     dead_ends: str
-    predicted_vs_actual: str
     findings: list[Finding]
     second_problems: list[SecondProblem] = []
 
@@ -184,8 +187,6 @@ class StageContext:
         return self.config.worktree_root / stem
 
     async def abort_current(self) -> None:
-        from tempo.daemon import _protected_cleanup
-
         try:
             await self.driver.abort_current()
         finally:
@@ -194,7 +195,7 @@ class StageContext:
                 if not task.done() and not task.cancelling():
                     task.cancel()
                 cleanup = asyncio.gather(task, return_exceptions=True)
-                await _protected_cleanup(cleanup)
+                await protected_cleanup(cleanup)
                 [result] = cleanup.result()
                 if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
                     raise result
@@ -464,7 +465,6 @@ def run_record(reply: ImplementReply | None, result: StageResult, spec: Spec, se
         ) or "none",
         "Resolved engine/model": f"- provider: {result.provider}\n- model: {result.model}\n"
                                  f"- spec: {spec.meta.llm_surface} {spec.meta.version}",
-        "Predicted vs actual": reply.predicted_vs_actual if reply else 'none',
     }
     return "".join(f"## {name}\n\n{(fields[name].strip() or 'none')}\n\n" for name in RUN_RECORD_SECTIONS)
 
@@ -490,7 +490,7 @@ async def implement(ctx: StageContext, ticket: Ticket, *, attempt: int) -> Stage
         return result
     reply = result.artifact
     assert isinstance(reply, ImplementReply)
-    from tempo.daemon import storm_producer
+    from tempo.storm import storm_producer
 
     box = storm_producer(root=ctx.config.state_dir / BOX_DIR, fs=ctx.fs,
                          journal=ctx.driver.journal, clock=ctx.driver.clock)
@@ -683,7 +683,7 @@ async def gather_evidence(
         base_worktree.parent.mkdir(parents=True, exist_ok=True)
         await ctx.git.worktree_add_detached(ctx.repo, base_worktree, base)
         try:
-            from tempo.daemon import storm_producer
+            from tempo.storm import storm_producer
 
             box = storm_producer(root=ctx.config.state_dir / BOX_DIR, fs=ctx.fs,
                                  journal=ctx.driver.journal, clock=ctx.driver.clock)
@@ -1026,3 +1026,52 @@ async def run_stages(ctx: StageContext, ticket: Ticket) -> StagesRun:
         if result.outcome != "ok":
             break
     return run
+
+HARVEST_TAIL_CHARS = 4_000
+
+
+def run_wall_seconds(ctx: StageContext, stem: str) -> float | None:
+    """Wall-clock seconds since the stem's latest `running` transition; None when it never ran."""
+    started = next((e.ts for e in reversed(ctx.driver.journal.read()) if e.type == EventType.STATE_TRANSITION
+                    and e.ticket == stem and e.body.get("to") == "running"), None)
+    return None if started is None else (ctx.driver.clock() - datetime.fromisoformat(started)).total_seconds()
+
+
+async def harvest(
+    ctx: StageContext, stem: str, *, attempt: int, stage: str | None, terminal: str,
+    findings: list[Finding], wall_seconds: float | None, kind: str = "harvest",
+) -> None:
+    """Extract the allowlisted failed-run record and lift it through the one outbox lane."""
+    spool = ctx.config.state_dir / "spools" / stem / str(attempt)
+    errors = list(spool.rglob("error.txt")) if spool.is_dir() else []
+    newest_error = max(errors, key=lambda p: (p.stat().st_mtime_ns, str(p))) if errors else None
+    reason = None if findings else (newest_error.read_text(errors="replace") if newest_error else terminal)
+    # Prompts are inputs, not stage logs: Review's prompt carries the unreviewed code diff.
+    logs = sorted(p for p in spool.rglob("*") if p.is_file() and p.name != "prompt.md") if spool.is_dir() else []
+    stage_log_tail = "".join(p.read_text(errors="replace") for p in logs)[-HARVEST_TAIL_CHARS:]
+    providers = ctx.config.state_dir / "spools" / "providers" / stem
+    events = list(providers.rglob("events.jsonl")) if providers.is_dir() else []
+    newest_events = max(events, key=lambda p: (p.stat().st_mtime_ns, str(p))) if events else None
+    events_tail = (newest_events.read_text(errors="replace") if newest_events else "")[-HARVEST_TAIL_CHARS:]
+    record = f"tickets/{stem}/run.md"
+    artifact = Harvest(
+        attempt=attempt, stage=stage, terminal=terminal, findings=findings, reason=reason,
+        diff_stat=await ctx.git.diff_stat(ctx.repo, "main", stem),
+        stage_log_tail=stage_log_tail, events_tail=events_tail,
+        wall_seconds=wall_seconds,
+        run_record=record if (ctx.repo / record).is_file() else None,
+    )
+    path = ctx.worktree(stem) / "tickets" / stem / "attempts" / str(attempt) / "harvest.json"
+    ctx.fs.write(path, (artifact.model_dump_json(indent=2) + "\n").encode())
+    await lift_outbox(ctx, stem, kind, attempt=attempt, only=f"attempts/{attempt}/harvest.json")
+
+
+async def harvest_orphan(checkout: Checkout, stem: str, attempt: int) -> None:
+    """Use the run-terminal harvest with an effects context; an orphan makes no model call."""
+    driver = Driver.from_config(checkout.config, llm=cast(LLM, None), env=checkout.env,
+                                clock=checkout.clock, sleep=checkout.sleep, fs=checkout.fs)
+    driver.journal = checkout.journal
+    driver.effects = Effects(checkout.journal)
+    ctx = StageContext(repo=checkout.repo, config=checkout.config, env=checkout.env, exec_=checkout.exec_,
+                       git=checkout.git, fs=checkout.fs, driver=driver, specs_dir=SPECS_DIR)
+    await harvest(ctx, stem, attempt=attempt, stage=None, terminal="abandoned", findings=[], wall_seconds=None)

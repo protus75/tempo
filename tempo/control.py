@@ -1,14 +1,15 @@
 """Identity-bound control requests."""
 
+import asyncio
 import json
 import re
-from collections.abc import Callable, Iterable, Set
+from collections.abc import Awaitable, Callable, Iterable, Set
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
 from tempo.journal import Event, EventType, Journal
-from tempo.seams import FileSystem
+from tempo.seams import FileSystem, Sleep
 from tempo.tickets import stem_findings
 
 CONTROL_DECISION = "control_decision"
@@ -264,3 +265,148 @@ def read_active(state_dir: Path, read: Callable[[Path], bytes]) -> tuple[str, st
     except (OSError, ValueError, UnicodeError) as exc:
         raise ValueError(_DISCOVERY_ROAD) from exc
     return value["lifecycle_id"], value["hold_id"]
+
+KILL_APPLIED = "kill_applied"
+
+
+def control_inbox(*, journal: Journal, lifecycle_id: str, holds: Callable[[], Set[str]],
+                  apply: Callable[[ControlProjection], None],
+                  files: Callable[[], Iterable[Path]], read: Callable[[Path], bytes]) -> ControlInbox:
+    """Explicitly supplied by the lock holder, never a second writer."""
+    return ControlInbox(journal=journal, lifecycle_id=lifecycle_id, holds=holds,
+                        apply=apply, files=files, read=read)
+
+
+async def executor_abort(abort_current: Callable[[], Awaitable[None]]) -> None:
+    """Unwind the composed executor after durable kill acceptance."""
+    await abort_current()
+
+
+async def protected_cleanup(cleanup: asyncio.Future) -> None:
+    cancelled = None
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+        except BaseException:
+            break
+    cleanup.result()
+    if cancelled is not None:
+        raise cancelled
+
+
+class PauseConsumer:
+    """One serial inbox and desired pause state, owned by the engine's writer lock."""
+
+    def __init__(self, *, journal: Journal, lifecycle_id: str, state_dir: Path,
+                 fs: FileSystem, sleep: Sleep, files: Callable[[], Iterable[Path]],
+                 read: Callable[[Path], bytes], recover: Callable[[], None] | None = None,
+                 storm_holds: Callable[[], dict[str, str]] | None = None) -> None:
+        self._recover = recover
+        self._storm_holds = storm_holds
+        self.state_dir, self.fs, self.sleep = state_dir, fs, sleep
+        self.projection = ControlProjection(lifecycle_id)
+        self._published = False
+        self._advertised: tuple[str, str | None] | None = None
+        self._stop: asyncio.Task | None = None
+        self.admission: str | None = None
+        self.author_driver = None
+        self.inbox = control_inbox(journal=journal, lifecycle_id=lifecycle_id,
+                                   holds=self._holds,
+                                   apply=self._apply, files=files, read=read)
+
+    def storm_holds(self) -> dict[str, str]:
+        return {} if self._storm_holds is None else self._storm_holds()
+
+    def _holds(self) -> set[str]:
+        return set(self.storm_holds()) | ({self.admission} if self.admission is not None else set())
+
+    def _apply(self, projection: ControlProjection) -> None:
+        # The inbox has already fsynced the decision; discovery is only its projection.
+        if self._published:
+            self._refresh(projection)
+        self.projection = projection
+
+    def _selected_hold(self, projection: ControlProjection) -> str | None:
+        if projection.pause_id is not None:
+            return projection.pause_id
+        if self.admission is not None and self.admission not in projection.released_hold_ids:
+            return self.admission
+        return next((identity for identity in self.storm_holds()
+                     if identity not in projection.released_hold_ids), None)
+
+    def _refresh(self, projection: ControlProjection) -> None:
+        hold = self._selected_hold(projection)
+        advertised = projection.lifecycle_id, hold
+        if advertised != self._advertised:
+            write_active(self.state_dir, projection, self.fs, hold_id=hold)
+            self._advertised = advertised
+
+    def hold(self, hold_id: str) -> None:
+        self.admission = hold_id
+        if self._published:
+            self._refresh(self.projection)
+
+    def publish(self) -> None:
+        self._refresh(self.projection)
+        self._published = True
+
+    def retire(self) -> None:
+        write_active(self.state_dir, None, self.fs, hold_id=None)
+        self._published = False
+        self._advertised = None
+
+    async def checkpoint(self) -> None:
+        while True:
+            self.poll()
+            if self.projection.kill_requested or self.projection.pause_id is None:
+                return
+            await self.sleep(0.1)
+
+    def poll(self) -> None:
+        """Consume control without occupying a paused offer's callback."""
+        if self._recover is not None:
+            self._recover()
+        if self._published:
+            self._refresh(self.projection)
+        self.inbox.consume()
+
+    async def apply_kill(self, abort: Callable[[], Awaitable[None]],
+                         dispatch: asyncio.Task | None = None) -> None:
+        if (self.projection.lifecycle_id != self.inbox.lifecycle_id
+                or not self.projection.kill_requested):
+            return
+        if self._stop is None:
+            async def stop() -> None:
+                await executor_abort(abort)
+                if dispatch is not None:
+                    if not dispatch.done() and not dispatch.cancelling():
+                        dispatch.cancel()
+                    [result] = await asyncio.gather(dispatch, return_exceptions=True)
+                    if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                        raise result
+            self._stop = asyncio.create_task(stop())
+        await protected_cleanup(self._stop)
+        # Requests arriving during unwind share that same stop. The journal fold,
+        # rather than file deletion or memory, owns completion across reconstruction.
+        self.inbox.consume()
+        decided, accepted, applied = set(), [], set()
+        for event in self.inbox.journal.read():
+            body = event.body
+            if event.type != EventType.SIGNAL:
+                continue
+            if (body.get("kind") == KILL_APPLIED
+                    and body.get("lifecycle_id") == self.inbox.lifecycle_id):
+                applied.add(body["request_id"])
+            if body.get("kind") != CONTROL_DECISION or body["request_id"] in decided:
+                continue
+            decided.add(body["request_id"])
+            if (body["decision"] == "accepted" and body["verb"] == "kill"
+                    and body["lifecycle_id"] == self.inbox.lifecycle_id):
+                accepted.append(body["request_id"])
+        for request_id in accepted:
+            if request_id not in applied:
+                self.inbox.journal.append(EventType.SIGNAL, {
+                    "kind": KILL_APPLIED, "request_id": request_id,
+                    "lifecycle_id": self.inbox.lifecycle_id}, ticket=None, key=None)

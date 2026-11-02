@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from tempo import control, daemon
+from tempo import control
 from tempo.control import ControlProjection, ControlRequest, publish_request
 from tempo.journal import EventType, Journal
 from tempo.seams import LocalFileSystem
@@ -48,7 +48,7 @@ class Rig:
         self.holds.difference_update(projection.released_hold_ids)
 
     def reconstruct(self, apply=None):
-        return daemon.control_inbox(
+        return control.control_inbox(
             journal=self.journal, lifecycle_id=self.life, holds=lambda: self.holds,
             apply=apply or self.apply,
             files=lambda: reversed(list((self.state / "control/inbox").glob("*"))),

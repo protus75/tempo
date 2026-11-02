@@ -17,7 +17,7 @@ from tempo.inbox import CAPS, bounded, report_data
 from tempo.journal import EventType
 from tempo.policy import policy_row, start_state
 from tempo.requisition import RequisitionVerdict, review_ticket
-from tempo.runner import Checkout, SPECS_DIR
+from tempo.checkout import SPECS_DIR, Checkout
 from tempo.specs import Spec, load_spec, render
 from tempo.stages import findings_text
 from tempo.tickets import TicketInvalid, split_frontmatter, stamp, stem_findings, ticket_path, validate_ticket

@@ -24,9 +24,9 @@ from tempo.gates import Gate, GateReport, merge_severity, run_gates
 from tempo.journal import Journal, run_seq as journal_run_seq
 from tempo.llm import LLM, AgentEffort, AgentTier, LLMAborted, LLMRequest, LLMResult
 from tempo.llmeffect import llm_call
-from tempo.providers import ProviderCallError, ProviderDrought, ProviderLLM, WRITING_SURFACES
+from tempo.providers import ProviderCallError, ProviderDrought, ProviderLLM, WRITING_SURFACES, child_env
 from tempo.redact import Redactor
-from tempo.seams import Clock, FileSystem, LocalFileSystem, Sleep
+from tempo.seams import Clock, CommandNotifications, FileSystem, LocalFileSystem, Sleep, SubprocessExec
 
 _FENCE = re.compile(r"\A\s*(`{3,})[\w+-]*[ \t]*\n(.*)\n\1[ \t]*\s*\Z", re.DOTALL)
 
@@ -331,7 +331,7 @@ class Driver:
         if self._notify_config is not None:
             config, env = self._notify_config
             if exc.failure_class == 'quota_exhausted':
-                from tempo.daemon import storm_producer
+                from tempo.storm import storm_producer
                 from tempo.box import BOX_DIR
                 from tempo.storm import arrival_id
                 storm_producer(root=config.state_dir / BOX_DIR, fs=self.spool._fs,
@@ -339,7 +339,6 @@ class Driver:
                         origin=owner, stage=surface, outcome='infra_error', summary=f'{exc}; {exc.paved_road}',
                         occurrence_id=arrival_id('provider-quota', owner, sequence, surface, 'infra_error'))
             elif exc.failure_class == 'auth_error':
-                from tempo.__main__ import watchdog_notifications
                 from tempo.notify import send
                 from tempo.seams import NotificationFailed
                 notice = watchdog_notifications(config, env, self.effects, self.log,
@@ -364,7 +363,6 @@ class Driver:
             await _observe(self._abort(invocation))
 
     def begin_watch(self, *, owner, ticket, run_sequence, surface, stuck_budget, attempt):
-        from tempo.__main__ import watchdog_notifications
         from tempo.watchdog import Detector
 
         identity = (owner, run_sequence, surface, attempt)
@@ -488,3 +486,12 @@ def _invalid(stage: LlmStage, e: ValidationError) -> Finding:
         message=f"output is not a valid {stage.emits.__name__}: {detail}",
         paved_road=f"reply with ONLY one JSON object matching the {stage.emits.__name__} schema, no prose",
     )
+
+
+def watchdog_notifications(config, env, effects, log, *, redactor, cwd, **context):
+    from tempo.notify import NOTIFY_TIMEOUT_S, WatchdogNotifications
+
+    return WatchdogNotifications(effects=effects,
+        notifications=CommandNotifications(SubprocessExec(), cwd=cwd,
+            env=child_env(env, config, serving=None), timeout=NOTIFY_TIMEOUT_S,
+            scrub=redactor.scrub), argv=config.notify, log=log, **context)

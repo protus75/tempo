@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from tempo.box import Box, Resolution
-from tempo.daemon import storm_producer
+from tempo.storm import storm_producer
 from tempo.inbox import CAPS, ReportError, bounded, ingest, validate_report
 from tempo.journal import Journal
 from tempo.seams import LocalFileSystem

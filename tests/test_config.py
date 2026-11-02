@@ -229,7 +229,7 @@ def test_unsafe_yaml_tags_are_refused(tmp_path):
 
 
 def test_provider_backstop_never_undercuts_a_ticket_stuck_budget(tmp_path):
-    from tempo.runner import call_timeout
+    from tempo.checkout import call_timeout
     write(tmp_path, VALID)
     cfg = load_config(None, cwd=tmp_path)
     assert call_timeout(cfg) == cfg.drain.max_ticket_minutes * 60.0

@@ -11,6 +11,8 @@ from tempo.journal import Journal
 from tempo.lockfile import LockHeld, Lockfile
 from tempo.seams import LocalFileSystem
 from tests.test_cli import Clock, ENV, Stages, root, ticket, write
+from tempo import backlog
+from tempo.checkout import Checkout
 
 
 @pytest.mark.parametrize("case", ["draft", "Reject"])
@@ -35,7 +37,7 @@ def test_confirm_without_writer_lock(tmp_path, case):
         await commit(ctx, ctx.repo, [f"tickets/{ticket.stem}/ticket.md"])
         ctx.driver.journal.append(EventType.SIGNAL, {"signal": "ticket_intake", "state": "draft"}, ticket=ticket.stem)
         consumer = admission_control(ctx)
-        checkout = runner.Checkout(ctx.repo, ctx.config, ctx.env, ctx.exec_, ctx.git, ctx.driver.journal, ctx.fs, ctx.driver.clock, ctx.driver.sleep)
+        checkout = Checkout(ctx.repo, ctx.config, ctx.env, ctx.exec_, ctx.git, ctx.driver.journal, ctx.fs, ctx.driver.clock, ctx.driver.sleep)
         consumer.inbox.draft = lambda stem: runner.committed_draft(checkout, stem)
         lock = Lockfile(ctx.config.state_dir, instance_id="live", clock=ctx.driver.clock)
         lock.acquire()
@@ -43,7 +45,7 @@ def test_confirm_without_writer_lock(tmp_path, case):
         try:
             assert await asyncio.to_thread(entry.main, ["confirm", ticket.stem], cwd=ctx.repo, env=ctx.env, clock=ctx.driver.clock) == 0
             consumer.inbox.consume()
-            async def confirmed(stem, request_id): await runner.confirm_draft(stem, request_id, ctx)
+            async def confirmed(stem, request_id): await backlog.confirm_draft(stem, request_id, ctx)
             await consumer.inbox.settle_admissions(confirmed)
             events = ctx.driver.journal.read()
             await consumer.inbox.settle_admissions(confirmed)

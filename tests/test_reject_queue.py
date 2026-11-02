@@ -17,6 +17,8 @@ from tests.test_cli import ENV, git_out
 from tests.test_drain import Clock, Script, commit_ticket, confirmed, drain, journal, make_root
 from tests.test_terminal import author, clock, diagnosis_reply, implement_reply, repo
 from tests.test_stages import STEM
+from tempo import backlog
+from tempo.checkout import Checkout
 
 
 def _events(root, stem):
@@ -178,9 +180,9 @@ def test_dead_dependencies_resolve_through_supersedes(tmp_path, leaf_state):
         assert main(["reject", "leaf"], cwd=root, env=ENV, clock=Clock()) == 0
     else:
         j.append(EventType.STATE_TRANSITION, {"to": "abandoned"}, ticket="leaf")
-        checkout = runner.Checkout(root, load_config(None, cwd=root), ENV, SubprocessExec(),
+        checkout = Checkout(root, load_config(None, cwd=root), ENV, SubprocessExec(),
                                    Git(SubprocessExec(), env=ENV, timeout=30), j, LocalFileSystem(), Clock())
-        asyncio.run(runner._dead_dependents("leaf", checkout))
+        asyncio.run(backlog.dead_dependents("leaf", checkout))
     [signal] = [e for e in _events(root, "dependent") if e.body.get("signal") == "dead_dependency"]
     assert signal.body == {"signal": "dead_dependency", "dead": "original"}
     boxes = list((root / ".tempo/state/box").glob("*.json"))

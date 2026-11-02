@@ -197,7 +197,7 @@ async def test_production_hard_timeout_group_kill_is_harvested(root, monkeypatch
         harvested.append(data)
         await remove(repo, path)
     monkeypatch.setattr(rig.checkout.git, 'worktree_remove', removed)
-    write(root, 'work', text().replace('expected: 10m', 'expected: 1m').replace('stuck: 20m', 'stuck: 2m'))
+    write(root, 'work', text().replace('stuck: 20m', 'stuck: 2m'))
     run = asyncio.create_task(rig.owner.run())
     writer = None
     try:

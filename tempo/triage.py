@@ -16,7 +16,7 @@ from tempo.git import GitError
 from tempo.journal import EventType
 from tempo.inbox import ingest, report_data
 from tempo.llm import LLM
-from tempo.runner import Checkout, SPECS_DIR
+from tempo.checkout import SPECS_DIR, Checkout
 from tempo.seams import ExecutableNotFound
 from tempo.specs import load_spec, render
 from tempo.stages import findings_text
@@ -333,7 +333,7 @@ def report_intake(checkout: Checkout) -> Box:
     if checkout.config.report_inbox is None:
         return Box(checkout.config.state_dir / BOX_DIR, checkout.fs,
                    rereport=RereportJournal(checkout.journal))
-    from tempo.daemon import storm_producer
+    from tempo.storm import storm_producer
     from tempo.enginelog import EngineLog
     from tempo.redact import Redactor
 

@@ -8,7 +8,7 @@ from threading import Barrier, Event
 
 import pytest
 
-from tempo import control, daemon
+from tempo import control
 from tempo.control import ControlProjection, ControlRequest, publish_request, validate_request
 from tempo.journal import EventType, Journal
 from tempo.seams import FileSystem, LocalFileSystem
@@ -40,7 +40,7 @@ class Rig:
         self.holds.difference_update(projection.released_hold_ids)
 
     def reconstruct(self):
-        return daemon.control_inbox(journal=self.journal, lifecycle_id=self.lifecycle,
+        return control.control_inbox(journal=self.journal, lifecycle_id=self.lifecycle,
                                     holds=lambda: self.holds, apply=self.apply,
                                     files=lambda: (self.state / "control/inbox").glob("*"),
                                     read=Path.read_bytes)

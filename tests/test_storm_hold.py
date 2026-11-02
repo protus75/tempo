@@ -9,7 +9,7 @@ from unittest.mock import Mock
 import pytest
 import pytest_asyncio
 
-from tempo import __main__ as cli, caps, daemon, journal as journal_module
+from tempo import __main__ as cli, caps, journal as journal_module
 from tempo.control import CONTROL_DECISION, ControlRequest, publish_request, read_active
 from tempo.drain import HALT_SIGNAL, drain
 from tempo.journal import EventType, Journal, JournalCorruption
@@ -24,6 +24,8 @@ from tests.test_journal import FakeClock, T0
 from tests.test_storm import SIG, snapshot
 from tests.test_storm_notification_activation import digest, occurrences, six, trips
 from tests.test_storm_producer import ARRIVAL
+from tempo import control
+from tempo import storm
 
 
 class LiveStorm:
@@ -141,7 +143,7 @@ def test_live_drain_holds_only_emitting_stem(tmp_path, monkeypatch, stage):
     journal.append(EventType.SIGNAL, {"signal": INTAKE_SIGNAL}, ticket="zzz-old")
     clock.advance(1)
     journal.append(EventType.SIGNAL, {"signal": INTAKE_SIGNAL}, ticket="aaa-new")
-    box = daemon.storm_producer(root=root / ".tempo/state/box", fs=LocalFileSystem(),
+    box = storm.storm_producer(root=root / ".tempo/state/box", fs=LocalFileSystem(),
                                 journal=journal, clock=clock)
     six(box, stage=stage)
     trip, = trips(journal)
@@ -544,7 +546,7 @@ async def test_storm_wait_preserves_kill_budget_and_quiescence(live, stop):
         assert report.killed and report.exit_code == 1 and live.aborted == 1
         assert live.calls == ["active", "unrelated"]
         assert [e.body["kind"] for e in live.c.journal.read()
-                if e.body.get("kind") in {CONTROL_DECISION, daemon.KILL_APPLIED}] == [CONTROL_DECISION, daemon.KILL_APPLIED]
+                if e.body.get("kind") in {CONTROL_DECISION, control.KILL_APPLIED}] == [CONTROL_DECISION, control.KILL_APPLIED]
     elif stop == "budget":
         assert report.halted and report.exit_code == 1 and live.aborted == 0
         assert live.calls == ["active", "unrelated"]

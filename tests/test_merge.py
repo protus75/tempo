@@ -22,6 +22,7 @@ from tempo.seams import LocalFileSystem, SubprocessExec
 from tempo.stages import StageContext, run_stages
 from tempo.tickets import validate_ticket
 from tests.test_stages import ENV, SNAG, SPECS, STEM, agent, author, git, verdict
+from tempo.checkout import Checkout, Refusal
 
 GOAL = "`thing.py` holds the word ok."
 
@@ -114,7 +115,7 @@ def test_a_passing_ticket_squash_merges_with_trailers_and_journals_merged(repo):
 def test_bootstrap_pipeline_keeps_inline_admission(repo, monkeypatch, verb):
     author(repo)
     source = context(repo, [])
-    checkout = runner.Checkout(repo, source.config, source.env, source.exec_, source.git,
+    checkout = Checkout(repo, source.config, source.env, source.exec_, source.git,
                                source.driver.journal, source.fs, source.driver.clock, source.driver.sleep)
     from tempo.__main__ import build_control
     checkout = dataclasses.replace(checkout, control=build_control(checkout))
@@ -205,7 +206,7 @@ def test_admission_mode_is_explicit(repo, monkeypatch):
     assert not boundary.results and not daemon.results and not queue.pending
     assert ctx.driver.journal.read() == before
     for kwargs in ({"mode": "unknown", "queue": queue}, {"mode": "daemon"}):
-        with pytest.raises(runner.Refusal, match="supply.*MergeQueue.*serve composition"):
+        with pytest.raises(Refusal, match="supply.*MergeQueue.*serve composition"):
             AdmissionBoundary(ctx, **kwargs)
     queue.paused, queue.hold_id = True, "daemon-hold"
     from tempo.lockfile import Lockfile
@@ -340,12 +341,12 @@ def test_pipeline_requires_supplied_control(repo):
     from tempo import merge as owner
     from tempo.__main__ import build_control
     ctx = context(repo, [])
-    checkout = runner.Checkout(repo, ctx.config, ctx.env, ctx.exec_, ctx.git,
+    checkout = Checkout(repo, ctx.config, ctx.env, ctx.exec_, ctx.git,
                                ctx.driver.journal, ctx.fs, ctx.driver.clock, ctx.driver.sleep)
     consumer = build_control(checkout)
     with pytest.raises(TypeError):
         owner.compose_pipeline(ctx, escalate=lambda _: None)
-    with pytest.raises(runner.Refusal, match="build_control.*Checkout.control"):
+    with pytest.raises(Refusal, match="build_control.*Checkout.control"):
         owner.compose_pipeline(ctx, escalate=lambda _: None, control=None)
     queue = owner.compose_pipeline(ctx, escalate=lambda _: None, control=consumer)
     assert queue.control is consumer and queue.hold_id is None

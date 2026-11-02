@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from tempo import runner
+from tempo import runner, stages
 from tempo.__main__ import main
 from tempo.artifacts import Harvest
 from tempo.journal import EventType, Journal
@@ -85,7 +85,7 @@ def test_harvest_failure_signals_and_still_reaps(repo, monkeypatch):
     async def broken(*args, **kwargs):
         raise RuntimeError("cannot harvest")
 
-    monkeypatch.setattr(runner, "harvest", broken)
+    monkeypatch.setattr(stages, "harvest", broken)
     code, _ = invoke(repo, [], stem="missing")
     assert code == 2
     events = history(repo)

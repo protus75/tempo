@@ -3,7 +3,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Set
 
-from tempo.drain import SETTLED, authored_at, sort_key
+from tempo.backlog import SETTLED, authored_at, settled_dependencies, sort_key, supersedes_maps
 from tempo.journal import Journal
 from tempo.status import last_states, reject_queue
 from tempo.tickets import Ticket
@@ -42,8 +42,6 @@ class Scheduler:
             held = set(reject_queue(events)) | self.quarantined() | self.drought_parked()
             if self.completed_unmerged() >= self.max_unmerged:
                 return None
-            from tempo.rework import settled_dependencies, supersedes_maps
-
             settled = settled_dependencies(events)
             maps = supersedes_maps(events)
             authored = authored_at(events)

@@ -20,6 +20,7 @@ from tests.test_cli import ENV, root
 from tests.test_daemon_composition import CoreRig, assert_startup_pause_wiring
 from tests.test_providers import CONFIG
 from tests.test_scheduler import Time, turn
+from tempo import stages
 
 
 def timers(state, time):
@@ -118,7 +119,7 @@ async def test_restart_reuses_orphan_reconciliation(root, monkeypatch):
         await orphan(rig, "missing", worktree=False)
         bad = await orphan(rig, "bad-harvest")
         prior = rig.journal.read()
-        original_reconcile, original_harvest = reconcile.reconcile, runner.harvest_orphan
+        original_reconcile, original_harvest = reconcile.reconcile, stages.harvest_orphan
         remove, prune, append = rig.checkout.git.worktree_remove, rig.checkout.git.worktree_prune, rig.journal.append
 
         async def recovery(journal, git, repo, worktree_root, harvest):
@@ -163,7 +164,7 @@ async def test_restart_reuses_orphan_reconciliation(root, monkeypatch):
             await prune(repo)
 
         monkeypatch.setattr(reconcile, "reconcile", recovery)
-        monkeypatch.setattr(runner, "harvest_orphan", harvest)
+        monkeypatch.setattr(stages, "harvest_orphan", harvest)
         monkeypatch.setattr(rig.journal, "append", appended)
         monkeypatch.setattr(rig.checkout.git, "worktree_remove", removed)
         monkeypatch.setattr(rig.checkout.git, "worktree_prune", pruned)
@@ -200,7 +201,7 @@ async def test_restart_reuses_orphan_reconciliation(root, monkeypatch):
         await rig.core.startup()
         assert rig.journal.read() == events and calls == ["reconcile", "reconcile"]
         # A fresh open run uses the incremented sequence in the SAME harvester.
-        monkeypatch.setattr(runner, "harvest_orphan", original_harvest)
+        monkeypatch.setattr(stages, "harvest_orphan", original_harvest)
         await rig.checkout.git.branch_delete(root, "running")
         await orphan(rig, "running")
         assert await rig.core.sweep_orphans() == ["running"]
@@ -217,7 +218,7 @@ async def test_recovery_alert_through_serve_entrypoint(root, monkeypatch):
     rig = await repository(root, monkeypatch)
     dead = await orphan(rig, "dead")
     entered, release = asyncio.Event(), asyncio.Event()
-    original = runner.harvest_orphan
+    original = stages.harvest_orphan
     calls = []
 
     async def harvest(checkout, stem, attempt):
@@ -237,7 +238,7 @@ async def test_recovery_alert_through_serve_entrypoint(root, monkeypatch):
         stop()
         return lambda: calls.append("retired")
 
-    monkeypatch.setattr(runner, "harvest_orphan", harvest)
+    monkeypatch.setattr(stages, "harvest_orphan", harvest)
     baseline = asyncio.all_tasks()
     task = asyncio.create_task(serve.serve(rig.checkout, signals=signals))
     try:
@@ -316,7 +317,7 @@ async def test_orphan_sweep_preserves_live_ownership(root, monkeypatch, owner):
             pytest.fail("live ownership authorized a sweep mutation")
         with monkeypatch.context() as patch:
             patch.setattr(reconcile, "reconcile", forbidden)
-            patch.setattr(runner, "harvest_orphan", forbidden)
+            patch.setattr(stages, "harvest_orphan", forbidden)
             patch.setattr(rig.journal, "append", forbidden)
             patch.setattr(rig.checkout.git, "_call", forbidden)
             assert await rig.core.sweep_orphans() == []
@@ -335,12 +336,12 @@ async def test_orphan_sweep_preserves_live_ownership(root, monkeypatch, owner):
         # The idle maintenance lock also excludes an offer arriving during harvest.
         await orphan(rig, "next-dead")
         sweeping, continue_sweep = asyncio.Event(), asyncio.Event()
-        original_harvest = runner.harvest_orphan
+        original_harvest = stages.harvest_orphan
         async def harvest(checkout, stem, attempt):
             sweeping.set()
             await continue_sweep.wait()
             await original_harvest(checkout, stem, attempt)
-        monkeypatch.setattr(runner, "harvest_orphan", harvest)
+        monkeypatch.setattr(stages, "harvest_orphan", harvest)
         offered = []
         async def dispatch(_):
             offered.append("dispatch")
@@ -586,7 +587,7 @@ async def test_production_restart_precedes_dispatch(root, monkeypatch):
         persisted.arm("future", future, ticket=None)
         lifetime = rig.core.restart.timers
         first, second = await rig.add("first"), await rig.add("second")
-        original = runner.harvest_orphan
+        original = stages.harvest_orphan
         async def harvest(checkout, stem, attempt):
             assert rig.core.admission.active is None and rig.core.admission.task is None
             contender = Lockfile(checkout.config.state_dir, instance_id="contender", clock=rig.time)
@@ -596,7 +597,7 @@ async def test_production_restart_precedes_dispatch(root, monkeypatch):
             entered.set()
             await release.wait()
             await original(checkout, stem, attempt)
-        monkeypatch.setattr(runner, "harvest_orphan", harvest)
+        monkeypatch.setattr(stages, "harvest_orphan", harvest)
         reconstruct, fire, snapshot = lifetime.reconstruct, lifetime.fire_due, daemon.snapshot_config
         def fold():
             assert not dead.exists()

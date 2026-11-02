@@ -75,7 +75,7 @@ def suppressing_failure(window: Window) -> Event | None:
 def measurements(window: Window) -> dict:
     """Only durable production emitters contribute operands; identities fold per invocation."""
     from tempo.mergequeue import CONFLICT_FACTS
-    from tempo.rework import REWORK_ORDER
+    from tempo.artifacts import REWORK_ORDER
 
     merges = []
     spikes = {kind: set() for kind in ("override", "rework", "gate-failure", "integration-red")}
@@ -140,15 +140,6 @@ async def production_evidence(window, checkout):
         if check is not None and check.key not in counted:
             counted.add(check.key)
             evidence["spikes"]["override"] += bool(invoices[check.key].bypassed)
-    for row in evidence["elapsed_seconds"]:
-        predicted = None
-        if row["commit"] is not None:
-            text = await checkout.git._run(checkout.repo, "show", f"{row['commit']}:tickets/{row['ticket']}/ticket.md")
-            match = re.search(r"^- expected: (\d+)m$", text, re.M)
-            predicted = int(match[1]) * 60 if match else None
-        row["predicted_seconds"] = predicted
-        row["divergence_seconds"] = (row["actual_seconds"] - predicted
-            if row["actual_seconds"] is not None and predicted is not None else None)
     evidence["check_observations"] = observations
     window.completed_checks.clear()
     window.completed_checks.update({key: tuple((invoice.stem, report.code, report.verdict,
@@ -163,7 +154,7 @@ def render_report(window: Window, evidence: dict, provenance: dict, tombstones: 
     record = {"window_boundary": window.boundary, "window_start": window.started_at,
               "window_final_event": asdict(window.events[-1]) if window.events else None,
               "provenance": provenance, "measurements": evidence,
-              "calibration_divergence": evidence["elapsed_seconds"], "tombstone_digest": tombstones,
+              "tombstone_digest": tombstones,
               "proposals": artifact.model_dump()["proposals"]}
     record["tombstone_reopens"] = [e.body for e in window.events if e.type == EventType.SIGNAL
                                   and e.body.get("kind") == "tombstone_auto_reopened"]
@@ -232,7 +223,7 @@ class Retro:
             return
         artifact = RetroArtifact.model_validate({"proposals": json.loads(
             text.split("```json\n", 1)[1].split("\n```", 1)[0])["proposals"]})
-        from tempo.daemon import storm_producer
+        from tempo.storm import storm_producer
         from tempo.storm import arrival_id
 
         box = storm_producer(root=c.config.state_dir / BOX_DIR, fs=c.fs, journal=c.journal, clock=c.clock)
@@ -275,7 +266,7 @@ class Retro:
         return {"commit": commit}
 
     def failure_report(self, identity):
-        from tempo.daemon import storm_producer
+        from tempo.storm import storm_producer
         c = self.checkout
         storm_producer(root=c.config.state_dir / BOX_DIR, fs=c.fs, journal=c.journal, clock=c.clock).enqueue(
             message_class="failure_report", origin=identity, stage="retro", outcome="infra_error",
@@ -303,7 +294,7 @@ class Retro:
             if any(e.type == EventType.EFFECT_INTENT and e.key == f"retro/{window.sequence}"
                    for e in window.events) and await self.committed_report(window) is not None:
                 return await self.commit_report(driver, window, "")
-            from tempo.runner import SPECS_DIR, call_timeout
+            from tempo.checkout import SPECS_DIR, call_timeout
             spec = load_spec((SPECS_DIR / "retro.md").read_text())
             head = await c.git.rev_parse(c.repo, "HEAD")
             provenance = {"head": head, "spec_version": spec.meta.version, "at": c.clock().isoformat()}
