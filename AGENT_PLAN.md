@@ -873,8 +873,6 @@ These were decided first, then revised by the review dispositions you accepted.
 - **D14 — the 22 scripted-layer test files.** Decided: carried, because several cover kept code (the
   stuck kill, process-group abort, cooldown timers, eligibility, pause). Each is deleted together with
   its module in P5.
-- **D15 — real-model run before P5.** Revised by D17: at the end of P4, one real ticket on one host goes
-  through retry and escalate, fully through subagents. `drain` is not a fallback, because it runs CLIs.
 - **D17 — no agent CLI.** Decided (R15). Implement is a host subagent (§3.2). The supervisor,
   `providers.CliAdapter`, and `routing` rows are removed. Git and verification
   commands remain subprocesses.
@@ -1016,7 +1014,7 @@ P4 runs as three sub-phases, one chat and one commit each, so the code work is n
 gate:
 - **P4a:** (a), the §4.4 config edits, and deleting the CLI path (§3.1, "The old path").
 - **P4b:** (b), (c), the rest of (d), and (e).
-- **P4c:** (f) and (g), and setting the §4.4.6 constants from the live-gate measurements.
+- **P4c:** (f), and setting the §4.4.6 constants from the live-gate measurements.
 
 **Work:**
 - **(a)** Split `Driver._run` into `prepare`/`submit` (§3.1): prompt parts, the
@@ -1054,8 +1052,6 @@ gate:
   - also capture: `SubagentStart` and `SubagentStop` payloads, a forced subagent limit hit, one round
     trip with a prompt at `RENDER_BOUND_CHARS`, the extension's permission and MCP-approval settings for
     a run with no prompts to the user, and what each host does when a hook crashes or times out
-- **(g) Real-model run (D15).** On one host that passed the gate, run one real ticket through retry and
-  escalate, every model call a subagent.
 
 **Exit:**
 - Per-host hook tests on the captured payloads cover:
@@ -1078,7 +1074,6 @@ gate:
   - **A host that fails the gate is dropped from the defaults until it is fixed.**
   - R5 is met for the hosts that pass. A failed host is reported as
     an open gap; it does not block the others.
-- The (g) real-model run completes, and its decisions are reported.
   - Copilot is enabled when it passes **and** `hosts.copilot` is filled in.
 
 ### P5 — Orchestrator replaces the scripts
