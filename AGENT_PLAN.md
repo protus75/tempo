@@ -1,8 +1,13 @@
 # tempo — conversion plan
 
-This plan converts chupa's script-driven orchestration into an agent-driven orchestration called tempo.
+This plan **ports** chupa's working software, its completed code, to an agent-driven orchestration called
+tempo. Tempo is a port. It never builds itself:
+- None of chupa's self-build process is carried over: seed phases, registries, plan entry units, plan
+  hardening, seeding tickets, phase exits, and the conductor.
+- Where the completed code contains that machinery, the port removes it (§2.5, P2).
 
-**Status:** revision 4. It applies the Kill, Cut, and two BuildIt rounds of review findings, 2026-11-01. Nothing runs until
+**Status:** revision 5. It applies the Kill, Cut, and two BuildIt rounds of review findings, and the
+port-not-self-build correction, 2026-11-01. Nothing runs until
 you approve it. Each phase ends at a stop point, and nothing moves past a stop point without your OK.
 
 ## 1. Goal
@@ -20,9 +25,9 @@ you approve it. Each phase ends at a stop point, and nothing moves past a stop p
 | R5 | Run under Claude Code, GitHub Copilot, and Codex, each with its rule files in its native location | §5, P4 (live gate), P6, P7 |
 | R6 | New repository `tempo` | P0 |
 | R7 | Rename every chupa reference in carried-over code, specs, tests, and docs | P1 |
-| R8 | Carry over the working system, not its build evidence | §2.3, P1 |
+| R8 | Port the working system: carry its code, not its build evidence (§2.3), and remove its self-build machinery (§2.5) | §2.3, §2.5, P1, P2 |
 | R9 | `uv build` produces a wheel for PyPI. The wheel ships the AI rules as data files, and `tempo init` places them in the host repo's top-level folders (§6 explains why an installer cannot) | §6, P6 |
-| R10 | `TEMPO_PLAN.md` starts as SEED_PLAN.md (latest seed) filled with "tempo", and is amended as §10 lists | P1, §10 |
+| R10 | `TEMPO_PLAN.md` holds the product features from SEED_PLAN.md (latest seed), filled with "tempo". The seed's build-process sections and passages are left out. It is amended as §10 lists. | P1, §10 |
 | R11 | Every operator tunable lives in `config.yaml` and is validated at load. Contract constants stay in code, pinned by tests (§4.4.1). | §4.4, P4 |
 | R12 | When a provider or host reports it hit its limit, work continues on an alternate. There is no cost accounting. Implement failover needs a second `routing` candidate, which the operator configures. | §4.4.5, §4.6, P2, P4 |
 
@@ -77,7 +82,6 @@ These come from read-only research on chupa at commit `63b89e4`.
 - dead dependencies
 - spiral response
 - triage and retro cadence
-- phase sequencing (`bootstrap/conductor.py`)
 
 **Kept modules depend on scripted modules.** `merge`, `mergequeue`, and `box` import from `daemon`,
 `runner`, `stages`, and `drain`:
@@ -99,6 +103,17 @@ modules. Only 3 of 146 test files touch only kept modules.
 - `hosts/`
 - `CHUPA_PLAN.md`
 - chupa's `README.md` and `uv.lock`
+- 22 test files whose subject is the scripted layer that P5 removes, so carrying them would only mean
+  editing them to delete them:
+  - `test_drain`, `test_drain_reentry`, `test_drain_upgrade`
+  - `test_daemon_admission`, `test_daemon_composition`, `test_daemon_config`, `test_daemon_pause`,
+    `test_daemon_tasks`
+  - `test_diagnose`
+  - `test_kill_cli_activation`, `test_kill_executor_abort`, `test_kill_failure_suppression`,
+    `test_kill_signal_journal`, `test_kill_worker_stop`
+  - `test_rework`
+  - `test_seed_path`, `test_seed_successor`
+  - `test_serve`, `test_storm_hold`, `test_terminal`, `test_scheduler`, `test_restart_timers`
 - 66 evidence test files:
   - all `test_seeded_*`
   - all `test_phase*_exit`
@@ -126,22 +141,29 @@ modules. Only 3 of 146 test files touch only kept modules.
 SEED_PLAN.md §9.7 defines the only spiral signal as spend-without-progress, so spiral detection goes
 with cost.
 
-### 2.5 Where SEED_PLAN.md and chupa's code disagree (R10)
+### 2.5 Self-build machinery in the completed code (removed in P2)
 
-- **Identical sections.** Sections 2-6, 10, 14-16, 18, 20, and 21 are byte-identical apart from the
-  name.
-- **Entry units.** The seed makes the registry row the entry unit and has no `### 19.P<n>.<stem>`
-  headings. Chupa's resolver, `unit_sha`, scope-fence plan anchor, and hardening text all read those
-  headings. **P2 converts the code to rows.** This is coupled: the kept scope-fence gate needs it.
-- **Other seed rules the code lacks.** These serve tempo building itself, which no requirement commits
-  to, so they are not built. They are listed as optional phase P8 and in §10:
-  - `fence_add`
-  - plan size caps
-  - requisition reply-shape and whole-ticket re-review
-  - implement spec-gap discipline text
-  - the fixture-corpus diff-budget exemption
-  - closed-set pinning tests
-- **Phase-exit triage duty.** Kept, as an orchestrator rule (§4.2).
+Chupa's completed code still carries the machinery it used to build itself. Tempo removes it:
+
+| Where | What |
+|---|---|
+| `hardening.py` (whole module) | plan-hardening rounds |
+| `specs.py` | plan-unit resolver (`resolve_plan_contract`, `unit_sha`, `hardenable_units`, `entry_unit_gap`), plan lint, registry rows |
+| `tickets.py` | the `## Plan contract` and `## Exit-read window` sections, plan-unit and seed citation rules, `#19.P…` plan-anchored fence entries |
+| `stages.py` | seed-ticket review (`_review_one`, `_restore_approved_seeds`, `_seed_verdicts`), the plan-unit scope-fence anchor (`_unit_confined`), the exit-read window, the eval-report artifacts in `KNOWN_ARTIFACTS` (shakeout, daemon soak, reliability battery, review baseline, host loop, exit receipt) |
+| `merge.py` | `SeedSafetyGate`, `gather_seeds` |
+| `runner.py` | `hold_on_hardening`, `file_hardening`, `hardening_text`, the `spec_gap` unit routing |
+| `journal.py` | the `spec_gap_hold` dispatch value |
+| `artifacts.py` | the eval-report and `ExitReceipt` schemas; the `unit` field on findings |
+| `requisition.py` | spec-gap plan-unit naming |
+| `caps` / `config` | the `hardening` cap |
+| `specs/implement.md`, `specs/requisition_review.md` | the `plan_contract`/`render` data blocks and plan-unit text |
+
+**Kept, because they are product behavior:**
+- `premise_failed`: the implement outcome for a ticket whose premise is false. The ticket parks until
+  its `ticket.md` changes.
+- `## On-demand`: repo paths the implementer may read.
+- `spec_gap`/`authoring_error` finding kinds, without the plan `unit`.
 
 ## 3. Communication design: chupa's mechanism, run by host subagents
 
@@ -363,7 +385,7 @@ Every tool is an existing effect-keyed function, or a thin wrapper over one.
 |---|---|
 | Read | `status` (includes open calls, so a resumed session recovers them), `list_eligible` (the mechanical half of `drain._select`: confirmed, deps settled, not held, caps remaining, no drought), `read_ticket`, `read_attempts` (`prior_attempts`), `read_box` |
 | Run | `start(stem)` (journals `{to: running}` and allocates `attempt`/`run_seq`, as `drain._run_one` did), `prepare`, `submit`, `implement`, `check`, `job`, `merge` |
-| Decide | `retry`, `escalate` (offers only `caps.next_rung`'s rung), `reject`, `park`, `release_hold`, `reoffer`, `split` (runs rework's existing proposal checks plus requisition review), `confirm`, `advance_phase`. Each journals the same `state_transition` shape as `failure_terminal`: `{to, stage, reason, dispatch, rung}`. Each takes a required `lessons` argument, which the tool appends to `tickets/<stem>/decisions.md`. |
+| Decide | `retry`, `escalate` (offers only `caps.next_rung`'s rung), `reject`, `park`, `release_hold`, `reoffer`, `split` (runs rework's existing proposal checks plus requisition review), `confirm`. Each journals the same `state_transition` shape as `failure_terminal`: `{to, stage, reason, dispatch, rung}`. Each takes a required `lessons` argument, which the tool appends to `tickets/<stem>/decisions.md`. |
 | Record | `file_box`, `notify`, `write_handoff` (rewrites `tickets/orchestrator/handoff.md`) |
 
 **Refusals, enforced in the tool:**
@@ -399,9 +421,8 @@ Every tool is an existing effect-keyed function, or a thin wrapper over one.
 | hold release, re-offer | `release_hold`, `reoffer` | hold and premise-bounce caps |
 | `rework` surface | `split` | proposal checks, requisition review |
 | `_dead_dependents` | re-scope or succession | detection, box filing |
-| serve box consumer | triage whenever any box message is pending, and at every phase exit (hardcoded) | — |
+| serve box consumer | triage whenever any box message is pending (hardcoded) | — |
 | drain retro trigger | runs retro when `select_trigger` fires | trigger facts |
-| conductor rungs | `advance_phase`, from the §19 registry rows (TEMPO_PLAN) | registry data, phase-exit receipts |
 | watchdog spiral warning | nothing; it was spend-based and is removed | stuck kill (time-based) |
 
 P5 confirms that `IDENTICAL_K` compares `state_transition` reasons, not diagnose output, before
@@ -445,7 +466,7 @@ pinning its value.
 | Ladder | `caps.next_rung` (code) | next tier with a distinct implement model, then effort +1, then the Reject queue | `escalate` |
 | Repeated-failure threshold | `IDENTICAL_K` (constant) | 3 | `retry` refusal |
 | Re-prompts per call | `caps.retry` | 6 | `prepare`/`submit` |
-| Other per-ticket caps | `caps.{decisions, infra, premise_bounce, hardening}` | chupa defaults (`diagnosis` renamed `decisions`) | decide tools |
+| Other per-ticket caps | `caps.{decisions, infra, premise_bounce}` | chupa defaults (`diagnosis` renamed `decisions`) | decide tools |
 | Ticket wall-clock limit | `tickets.max_minutes` (was `drain.max_ticket_minutes`) | chupa default | `implement` job, `list_eligible` |
 | Implement stuck limit | ticket `stuck_minutes` | chupa default | `implement` stuck kill |
 | Prompt size bound | `RENDER_BOUND_CHARS` 400,000, `REQ_RENDER_HEADROOM` 0.75 (constants) | same | `prepare` |
@@ -655,9 +676,8 @@ These were decided first, then revised by the review dispositions you accepted.
   `config.yaml`, and escalation picks the rung. Review separation is enforced by §4.4.2.
 - **D3 — cost.** Decided. There is no cost accounting. The only provider concern is failing over on a
   limit (§4.4.5, §4.6).
-- **D4 — seed plan units.** Revised by Cut C1.
-  - P2 converts the code to row-based entry units only.
-  - The other seed rules move to optional P8, which runs only if tempo is committed to building itself.
+- **D4 — self-build.** Decided: tempo never builds itself. Its self-build machinery is removed in P2
+  (§2.5). No seed build rules are ported.
 - **D5 — test host.** Revised by Cut C5 and Kill K1.
   - Host fakes and a minimal fixture repo are built in P4, where the exits first need them.
   - P7 uses the same fixture for live runs.
@@ -693,8 +713,12 @@ series, one commit per removed module.
 **Work:**
 - Carry over chupa's 54 `chupa/` modules as `tempo/`.
 - Carry over `specs/`, `config.yaml`, `docs/host-contract.md`, `CLAUDE.md`, `AGENTS.md`,
-  `.gitignore`, `pyproject.toml`, and the 80 test files not listed in §2.3.
-- Write `TEMPO_PLAN.md` as SEED_PLAN.md filled with "tempo".
+  `.gitignore`, `pyproject.toml`, and the 58 test files not listed in §2.3.
+- Write `TEMPO_PLAN.md` from SEED_PLAN.md filled with "tempo", keeping only the product features. The
+  exact cut list is posted for approval first:
+  - drop §0 cold start, §19 phases and registries, §21 bootstrap blocks, and §22 build provenance
+  - drop the self-build passages inside the feature sections: seeding tickets, plan entry units, plan
+    hardening, phase exits, GO-grade corpus building
 - Generate `README.md` from TEMPO_PLAN's README block.
 - Rename chupa → tempo in identifiers, markers, `.chupa/`, and data sentinels.
 - Run the full suite. Classify every failure as one of:
@@ -706,17 +730,22 @@ series, one commit per removed module.
 - No "chupa" string remains in carried code, specs, tests, or docs.
 - `python -m tempo status` runs.
 
-### P2 — Reconcile and remove cost
+### P2 — Strip self-build machinery and cost
 
 **Work:**
-- Convert entry units to registry rows in `specs.py`, `stages.py`, `tickets.py`, and `runner.py`
-  (§2.5).
-- Point the P1 (a) tests at TEMPO_PLAN.md.
+- Remove the §2.5 self-build machinery from code, specs, and config.
+  - Its tests go in the same commit: `test_hardening`, plus the plan-unit, seed, and phase-exit tests
+    inside `test_specs`, `test_tickets`, `test_requisition`, `test_stages`, `test_merge`, and
+    `test_gates`.
+  - Each test deletion is listed for approval first.
 - Remove cost accounting (§4.4.5) from code, tests, and specs.
+- Resolve the P1 (a) failures. Each is either self-build pinning, and removed with its code, or a
+  feature test, pointed at TEMPO_PLAN.md.
 
 **Exit:**
-- Full suite green against TEMPO_PLAN.md.
-- Plan lint clean.
+- Full suite green.
+- No reference to plan units, seeding, hardening, phase exits, or cost remains in `tempo/` or
+  `specs/`.
 
 ### P3 — Cut the links
 
@@ -837,12 +866,6 @@ too. The move list above is a minimum, not the whole list.
 - One ticket per host goes through retry and escalate with a real model.
 - Results reported.
 
-### P8 — Self-build rules (optional)
-
-**Work:** Only if tempo is committed to building itself: the §2.5 seed rules the code lacks.
-
-**Exit:** Per §10.
-
 ## 9. Risks known now
 
 - **Host behavior may differ from assumptions.** Mitigation: the P4 live gate runs before P5 deletes
@@ -857,30 +880,26 @@ too. The move list above is a minimum, not the whole list.
   guard against thrashing.
 - **A host limit ends the whole session.** The call in flight loses its work and is re-prepared,
   uncharged.
-- **P1's failure count is unknown until run.** It is bounded by the 65 test files that mention the plan.
+- **P1's failure count is unknown until run.** 37 of the 58 carried test files read chupa's plan text.
 - **The orchestrator's decisions meet a real model only in P7**, through the retry and escalate runs.
   Nothing measures them before then.
 
 ## 10. Changes to TEMPO_PLAN.md
 
-These are made in the phase shown, so the plan and the code stay in step.
+`TEMPO_PLAN.md` starts in P1 as the seed's product features only (no build process). These later
+changes are made in the phase shown, so the plan and the code stay in step.
 
 - **P2:**
-  - Remove cost accounting from seed sections 0, 5, 6, 8, 9, 11-15, 17-20, and 22. Keep the failure
+  - Remove cost accounting from the feature sections. Keep the failure
     classes, breaker, cooldown, routing candidates, and `provider_drought`.
   - Remove the §9.7 spend-without-progress spiral signal.
-  - Mark these "not enforced until P8 (optional)": `fence_add`, plan size caps, requisition
-    reply-shape and whole-ticket re-review, implement spec-gap discipline text, the fixture-corpus
-    diff-budget exemption, and closed-set pinning tests.
 - **P4 (§6, §8, §15):**
   - The read-only surface call becomes `prepare` + subagent + `submit`.
   - Configuration per §4.4.
   - Session token, supervisor, and start-then-poll tools.
-- **P5 (§9, §11, §12, §14, §19, §21, §0):**
+- **P5 (§9, §11, §12, §14):**
   - Dispatch, failure routing, the ladder walk, diagnose, rework, and the drain and daemon loops become
     orchestrator decisions through the §4.1 tools. Caps and refusals stay in tools.
-  - Bootstrap and conductor blocks are deleted.
-  - Phase advance uses `advance_phase`.
 - **P5 (§13):**
   - Reserve `tickets/orchestrator/`.
   - Add `decisions.md` to the ticket dir listing.
