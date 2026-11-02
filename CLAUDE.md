@@ -23,9 +23,6 @@ file with the carried one; AGENTS.md carries the same rules, and a rule change t
   it. End every reply that leaves a question, option, or next step unresolved with `Still open:` and
   one line per thread, every turn until the list is empty. A thread closes only when the user resolves
   or dismisses it, or you finish it and say so. If unsure, it is open.
-- **Requirements stated by the user are binding.** Re-read AGENT_PLAN.md section 1 before proposing a
-  design. Never propose an option the requirements rule out (for example an agent CLI, R15, or a model
-  reviewing its own work, D19).
 - **Git safety.** Commit only files you authored, by explicit path. Never use a tree-wide destructive
   verb (`clean`, `reset --hard`, `checkout -- .`). Never push unless told to.
 - **Terse.** Answer first. No hedging, filler, or restating the question.
