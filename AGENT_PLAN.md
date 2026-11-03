@@ -508,6 +508,23 @@ process.
 | Decide | `retry`, `escalate` (offers only `caps.next_rung`'s rung), `reject`, `park`, `release_hold`, `reoffer`, `split_propose` / `split_commit` (see Split above), `confirm`. Each journals the same `state_transition` shape as `failure_terminal`: `{to, stage, reason, dispatch, rung}`. Each takes a required `lessons` argument, which the tool appends to `tickets/<stem>/decisions.md`. |
 | Record | `file_box`, `notify`, `write_handoff` (rewrites `tickets/orchestrator/handoff.md`) |
 
+**Decide tools on a failed run (P5a).** The tool that sees a stage end final and not ok (`prepare`,
+`submit`, `check`, `merge`) journals a `stage_failed` signal `{stage, outcome, reason}`; `reason` is the
+sorted finding codes, or the outcome when there are none. A Decide tool on a running stem reads that
+signal, then does what `runner.drive` did after a failure: harvest the attempt, draw the caps (`infra`
+for `infra_error`/`timeout`, `premise_bounce` for `premise_failed` except `render_over_bound`, and
+`decisions` for every decision), append `lessons` to `decisions.md` and commit it, journal the terminal,
+and remove the worktree.
+
+| Tool | Does | Refuses |
+|---|---|---|
+| `retry` | terminal with dispatch `retry`; the next `start` re-offers it | caps spent; `IDENTICAL_K` |
+| `escalate` | terminal with dispatch `escalate` and `caps.next_rung` for the session host; the next `start` runs at that rung | caps spent; no next rung |
+| `reject` | on a failed run, terminal with dispatch `reject_queue`, then the ticket is stamped `rejected`; on an idle stem, only the stamp | settled stem |
+| `park` | terminal with no dispatch; `list_eligible` skips the stem until its `ticket.md` changes, as for `premise_failed` | — |
+| `reoffer` | releases a park or a `premise_failed` park at the same `ticket.md` | stem not parked; caps spent |
+| `release_hold` | journals the accepted `resume` control decision that releases a storm hold; `list_eligible` skips storm-held stems | hold not live |
+
 **Refusals, enforced in the tool:**
 - caps spent
 - bad or missing session token
@@ -906,8 +923,8 @@ These were decided first, then revised by the review dispositions you accepted.
 
 ## 8. Phases
 
-Before each phase, its exact file list is posted for approval. P1–P3, each of P4a, P4b, and P4c, and P6 are one commit each. P5 is a
-series, one commit per removed module.
+Before each phase, its exact file list is posted for approval. P1–P3, each of P4a, P4b, and P4c, and P6 are one commit each. P5a and P5b
+are each a series, one commit per removed module.
 
 ### P0 — Plan
 
@@ -1095,38 +1112,50 @@ gate:
     an open gap; it does not block the others.
   - Copilot is enabled when it passes **and** `hosts.copilot` is filled in.
 
-### P5 — Orchestrator replaces the scripts
+### P5a — Orchestrator replaces the scripts: the ticket flow
 
 **Work:**
-- Decide and record tools (§4.1).
-- Confirm where `IDENTICAL_K` gets its data.
+- Decide tools for the ticket flow (`retry`, `escalate`, `reject`, `park`, `reoffer`, `release_hold`)
+  and the Record tools `file_box` and `notify` (§4.1).
+- `IDENTICAL_K` moves from `runner` to `caps`.
 - Remove one scripted module per commit, listing each one's test deletions first. The 22 carried
   scripted-layer test files (D14) are deleted with their modules; tests of kept code inside them are
   first moved to the kept module's tests:
   - `drain`
   - `stages.diagnose` + `specs/diagnose.md`
-  - rework routing + `specs/rework.md`
+  - rework routing + `specs/rework.md` (`rework.py` itself stays, unused, until P5b)
   - ladder routing in `runner`
   - the `daemon` loop and `serve`
   - `runner` dispatch
-  - the old `Driver._run` path (§3.1). The CLI adapters went in P4a. `FAILURE_MARKERS` stay, for
-    `stop.txt`.
-- Each removal also deletes its CLI command. At the end of P5, `__main__` joins the kept set and the
+- Each removal also deletes its CLI command. At the end of P5a, `__main__` joins the kept set and the
   import-graph test covers it.
-- `rework` keeps only its proposal checks and `record_supersedes`, renamed in place to `split`, behind
-  `split_propose` and `split_commit`.
 - Removed with the daemon, because only the daemon or `serve` called them: `restart`, `watcher`,
   `scheduler`, `heartbeat`, `checkpoint` (the push to `origin` every 5 merges; local main is the
   blessed line, and the user pushes), and `flake` (never wired into a run). The `pause`, `resume`, and
   `kill` CLI commands go too (§2.6).
 
 **Exit:**
-- A fake-host orchestrator session runs a ticket from intake to merge, and through each failure
-  decision.
+- A fake-host orchestrator session runs a ticket from intake to merge, and through each P5a decision.
 - No code path in `tempo/` spawns an agent CLI. A test scans for the agent binary names in argv
   construction.
 - A session killed mid-ticket resumes correctly from `status`.
 - Suite green after every removal.
+
+### P5b — Orchestrator replaces the scripts: split, confirm, triage, author, retro
+
+Triage, author, retro, and rework each make their model calls inside one process pass, some nested (author
+and rework run requisition review on each proposal). Each becomes separate prepare/submit calls.
+
+**Work:**
+- `split_propose` / `split_commit` and `confirm` (§4.1).
+- `prepare` serves `triage`, `author`, and `retro`.
+- `rework` keeps only its proposal checks and `record_supersedes`, renamed in place to `split`.
+- Remove the old `Driver._run` path (§3.1). The CLI adapters went in P4a. `FAILURE_MARKERS` stay, for
+  `stop.txt`.
+
+**Exit:**
+- A fake-host session runs split, confirm, a triage pass, and a retro.
+- `rework` and `Driver._run` are gone; suite green.
 
 ### P6 — Governing files and packaging
 
