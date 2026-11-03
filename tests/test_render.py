@@ -29,7 +29,7 @@ def test_render_writes_agents_for_reachable_hosts_and_hooks_for_all(repo):
     render.write(repo, config(repo), FS)
     agents = sorted(p.name for p in (repo / ".claude/agents").iterdir())
     assert agents == ["tempo-author-claude-sonnet-5-5.md", "tempo-implement-claude-sonnet-5-5.md",
-                      "tempo-orchestrator.md", "tempo-requisition_review-claude-sonnet-5-5.md",
+                      "tempo-orchestrator.md", "tempo-requisition_review-claude-opus-5-5.md",
                       "tempo-retro-claude-sonnet-5-5.md", "tempo-review-claude-opus-5-5.md",
                       "tempo-triage-claude-sonnet-5-5.md"]
     # Codex carries effort; max maps to its highest level, and review runs only on the pinned model.

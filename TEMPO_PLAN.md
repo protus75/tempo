@@ -251,7 +251,7 @@ Only one call is open at a time. `Driver.run` and the `LLM` protocol remain only
 
 ### 6.8 Hosts and models
 
-Instance config names each host and its subagent models: `hosts.<host>.models_by_tier` (low, medium, high, max) and `pins`, a per-surface override. A surface's model is its pin, else `models_by_tier[tier]`. Every surface invoked FOR a ticket resolves at that ticket's `agent_tier`; calls no ticket owns (triage, retro, Author) resolve at their spec's tier. `pins.review` is required and must not appear in that host's `models_by_tier`, so a model never reviews its own work (AGENT_PLAN.md D19). Each host also needs an `orchestrator.models` entry, and the reverse. Agent names are `tempo-<surface>-<model>` (Codex adds the effort); two model ids that render the same name are refused at load. The journal and run record stamp the host and resolved model of each call. No provider key is configured or injected: every child process inherits the parent environment.
+Instance config names each host and its subagent models: `hosts.<host>.models_by_tier` (low, medium, high, max) and `pins`, a per-surface override. A surface's model is its pin, else `models_by_tier[tier]`. Every surface invoked FOR a ticket resolves at that ticket's `agent_tier`; calls no ticket owns (triage, retro, Author) resolve at their spec's tier. `pins.review` and `pins.requisition_review` are required and must not appear in that host's `models_by_tier`, so a model never reviews its own work (AGENT_PLAN.md D19) and no ticket's feasibility is judged by a capped model (AGENT_PLAN.md P7). Each host also needs an `orchestrator.models` entry, and the reverse. Agent names are `tempo-<surface>-<model>` (Codex adds the effort); two model ids that render the same name are refused at load. The journal and run record stamp the host and resolved model of each call. No provider key is configured or injected: every child process inherits the parent environment.
 
 ### 6.9 One call at a time
 
@@ -570,7 +570,7 @@ The orchestrator runs retro when `status` shows `retro_due` (the trigger below),
   hosts:                            # section 6.8; claude | codex | copilot
     <host>:
       models_by_tier: {low: <model>, medium: <model>, high: <model>, max: <model>}
-      pins: {review: <model>}       # per-surface override; review is required and outside models_by_tier
+      pins: {review: <model>, requisition_review: <model>}  # per-surface override; both required, outside models_by_tier
       quota_window_minutes: 60      # cooldown Timer length on a limit hit (section 6.10)
   orchestrator:
     models: {<host>: <model>}       # the chat agent's model per host; same hosts as `hosts`

@@ -30,7 +30,7 @@ CONFIG = textwrap.dedent(
     hosts:
       claude:
         models_by_tier: {low: sonnet, medium: sonnet, high: sonnet, max: sonnet}
-        pins: {review: opus}
+        pins: {review: opus, requisition_review: opus}
         quota_window_minutes: 30
     orchestrator:
       models: {claude: opus}

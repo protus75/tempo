@@ -25,7 +25,7 @@ VALID = textwrap.dedent(
     hosts:
       claude:
         models_by_tier: {low: haiku, medium: sonnet, high: sonnet, max: sonnet}
-        pins: {review: opus}
+        pins: {review: opus, requisition_review: opus}
     orchestrator:
       models: {claude: opus}
     engine_plane_safety_inventory: [specs/, tempo/gates.py, config.yaml]
@@ -56,7 +56,7 @@ def test_valid_config_loads_from_cwd_with_shipped_defaults(tmp_path):
     assert cfg.schema_version == SCHEMA_VERSION == 1
     assert cfg.state_dir == tmp_path / ".tempo"
     assert cfg.worktree_root == tmp_path / ".tempo" / "worktrees"
-    assert cfg.hosts["claude"].quota_window_minutes == 60 and cfg.hosts["claude"].pins == {"review": "opus"}
+    assert cfg.hosts["claude"].quota_window_minutes == 60 and cfg.hosts["claude"].pins == {"review": "opus", "requisition_review": "opus"}
     assert cfg.review.mechanical[0].trigger == "always"
     assert cfg.review.mechanical[1].trigger == ["tempo/"]
     assert cfg.merge.strategies[0].argv == ["uv", "lock"]
@@ -181,16 +181,21 @@ def test_hosts_resolve_each_surface_with_review_pinned_outside_the_tiers(tmp_pat
     cfg = load_config(None, cwd=write(tmp_path, VALID).parent)
     assert resolve_model(cfg, "claude", "implement", "low") == "haiku"
     assert resolve_model(cfg, "claude", "review", "low") == "opus"
+    assert resolve_model(cfg, "claude", "requisition_review", "low") == "opus"
     assert cfg.orchestrator.session.max_tickets == 5 and cfg.orchestrator.session.max_minutes == 240
 
 
 @pytest.mark.parametrize("old,new,key", [
-    ("pins: {review: opus}", "pins: {review: sonnet}", "hosts.claude.pins.review"),
-    ("pins: {review: opus}", "pins: {}", "hosts.claude.pins.review"),
+    ("pins: {review: opus, requisition_review: opus}", "pins: {review: sonnet, requisition_review: opus}",
+     "hosts.claude.pins.review"),
+    ("pins: {review: opus, requisition_review: opus}", "pins: {}", "hosts.claude.pins.review"),
+    ("pins: {review: opus, requisition_review: opus}", "pins: {review: opus, requisition_review: haiku}",
+     "hosts.claude.pins.requisition_review"),
+    ("pins: {review: opus, requisition_review: opus}", "pins: {review: opus}", "hosts.claude.pins.requisition_review"),
     ("models: {claude: opus}", "models: {claude: opus, codex: x}", "orchestrator.models.codex"),
     ("models: {claude: opus}", "models: {copilot: opus}", "orchestrator.models.copilot"),
-    ("pins: {review: opus}", "pins: {review: opus, diagnose: opus}", "hosts.claude.pins.diagnose"),
-    ("pins: {review: opus}", "pins: {review: opus}\n    effort: high", "hosts.claude.effort"),
+    ("requisition_review: opus}", "requisition_review: opus, diagnose: opus}", "hosts.claude.pins.diagnose"),
+    ("requisition_review: opus}", "requisition_review: opus}\n    effort: high", "hosts.claude.effort"),
     ("{low: haiku, medium: sonnet, high: sonnet", "{low: s/1, medium: s:1, high: sonnet", "hosts.claude"),
 ])
 def test_host_config_refusals_name_the_key(tmp_path, old, new, key):

@@ -78,7 +78,7 @@ merge: {}
 hosts:
   codex:
     models_by_tier: {low: A, medium: A, high: B, max: B}
-    pins: {review: C}
+    pins: {review: C, requisition_review: C}
 orchestrator:
   models: {codex: C}
 engine_plane_safety_inventory: [config.yaml]

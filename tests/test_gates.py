@@ -189,7 +189,7 @@ def test_runner_applies_soft_severity_from_config(tmp_path):
             hosts:
               claude:
                 models_by_tier: {low: a, medium: b, high: c, max: c}
-                pins: {review: d}
+                pins: {review: d, requisition_review: d}
             orchestrator:
               models: {claude: d}
             engine_plane_safety_inventory: []

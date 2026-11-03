@@ -17,6 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationIn
 from tempo.seams import FileSystem
 
 SCHEMA_VERSION = 1
+# Surfaces that judge work: each is pinned to a model outside models_by_tier (AGENT_PLAN.md D19, P7).
+PINNED_SURFACES = ("review", "requisition_review")
 
 Tier = Literal["low", "medium", "high", "max"]
 Severity = Literal["hard", "soft"]
@@ -378,11 +380,13 @@ def _check_hosts(path: Path, cfg: Config) -> None:
             raise ConfigError(path, f"hosts.{host}",
                               f"host {host!r} has no orchestrator.models.{host} entry; add the orchestrator model")
         tiers = set(entry.models_by_tier.model_dump().values())
-        review = entry.pins.get("review")
-        if review is None or review in tiers:
-            raise ConfigError(path, f"hosts.{host}.pins.review",
-                              "review must be pinned to a model not in models_by_tier, so a model never reviews"
-                              " its own work; pin the host's strongest model and cap models_by_tier below it")
+        for surface in PINNED_SURFACES:
+            pinned = entry.pins.get(surface)
+            if pinned is None or pinned in tiers:
+                raise ConfigError(path, f"hosts.{host}.pins.{surface}",
+                                  f"{surface} must be pinned to a model not in models_by_tier, so a model never"
+                                  " reviews its own work and no ticket is judged by a capped model; pin the"
+                                  " host's strongest model and cap models_by_tier below it")
         names: dict[str, str] = {}
         models = {*tiers, *entry.pins.values()}
         for surface in SURFACES:

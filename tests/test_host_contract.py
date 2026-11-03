@@ -55,7 +55,7 @@ def test_host_contract_example_loads(tmp_path):
     assert cfg.schema_version == 1
     assert cfg.state_dir == tmp_path / ".tempo"
     assert cfg.worktree_root == cfg.state_dir / "worktrees"
-    assert cfg.hosts["claude"].pins == {"review": "host-review-model"}
+    assert cfg.hosts["claude"].pins == {"review": "host-review-model", "requisition_review": "host-review-model"}
     assert cfg.review.mechanical[0].argv == ["uv", "run", "pytest", "-q"]
     assert cfg.review.mechanical[1].trigger == ["src/"]
     assert cfg.review.surfaces[0].rules_doc == Path("docs/review.md")
@@ -99,6 +99,7 @@ def test_host_contract_schema_coverage(tmp_path):
         with pytest.raises(config.ConfigError):
             load(tmp_path, {**raw, key: value})
     for change in (lambda r: r["hosts"]["claude"]["pins"].pop("review"),
+                   lambda r: r["hosts"]["claude"]["pins"].pop("requisition_review"),
                    lambda r: r["orchestrator"]["models"].update(codex="x"),
                    lambda r: r["merge"]["strategies"][1].update(argv=["x"]),
                    lambda r: r["review"]["mechanical"][0].update(severity="warn")):

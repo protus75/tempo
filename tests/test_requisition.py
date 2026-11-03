@@ -65,7 +65,7 @@ merge: {}
 hosts:
   claude:
     models_by_tier: {low: sonnet, medium: sonnet, high: sonnet, max: sonnet}
-    pins: {review: opus}
+    pins: {review: opus, requisition_review: opus}
 orchestrator:
   models: {claude: opus}
 engine_plane_safety_inventory: [context.txt]

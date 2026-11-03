@@ -16,10 +16,10 @@ presets. Loading this example does not run its commands or contact a provider.
 ```yaml host-example
 schema_version: 1
 state_dir: .tempo
-hosts: # subagent models per host; review is pinned to a model outside models_by_tier
+hosts: # subagent models per host; review and requisition_review are pinned to a model outside models_by_tier
   claude: # the one host that passed the P4c live gate (docs/livegate/)
     models_by_tier: {low: host-model, medium: host-model, high: host-model, max: host-model}
-    pins: {review: host-review-model}
+    pins: {review: host-review-model, requisition_review: host-review-model}
 orchestrator:
   models: {claude: host-orchestrator-model} # every host here needs a hosts entry, and the reverse
 review:
@@ -119,8 +119,9 @@ and NUL-free strings.
 Tempo runs no agent CLI: every model call is a subagent of the host's VS Code
 chat. `hosts` names each host (`claude`, `codex`, `copilot`) and its subagent
 models. A surface's model is its `pins` entry, else `models_by_tier[tier]`.
-`pins.review` is required and must not appear in `models_by_tier`, so a model
-never reviews its own work. Every host in `hosts` needs an `orchestrator.models`
+`pins.review` and `pins.requisition_review` are required and must not appear
+in `models_by_tier`, so a model never reviews its own work and no ticket is
+judged by a capped model. Every host in `hosts` needs an `orchestrator.models`
 entry, and the reverse. Two model ids that render the same agent name are
 refused. Host check codes are strings; engine gate overrides use engine codes. `trigger` is `always` or a path-prefix list.
 Regenerate requires argv; union accepts no argv and only resolves append-only

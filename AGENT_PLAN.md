@@ -1272,6 +1272,11 @@ Only Claude passed the live gate, so P7 runs Claude.
   `requisition_review`, so `_decide` journaled `harvest_failed` and `read_attempts` showed no findings.
   The stage is allowed, and `prior_attempts` falls back to the harvest's findings when the failed
   stage left no review or checks artifact. A fixture-flow test covers it.
+- **Fix from the run: requisition_review is pinned like review.** It resolved at the ticket's tier, so
+  a `low` ticket had its feasibility judged by Haiku, which twice blocked a sound ticket. Config load
+  now requires `pins.requisition_review` outside `models_by_tier`, as for `pins.review`. The default
+  config, the fixture config, the test configs, `docs/host-contract.md`, and TEMPO_PLAN.md section 15
+  say so.
 
 **Exit:**
 - Each host completes a ticket end to end with verified artifacts.

@@ -8,7 +8,7 @@ from tempo.policy import policy_row, start_state, touches_inventory
 
 ROOT = Path(__file__).resolve().parent.parent
 HOSTS = ("hosts:\n  claude:\n    models_by_tier: {low: low, medium: medium, high: medium, max: medium}\n"
-         "    pins: {review: max}\norchestrator:\n  models: {claude: max}\n")
+         "    pins: {review: max, requisition_review: max}\norchestrator:\n  models: {claude: max}\n")
 
 
 def config(tmp_path: Path):
