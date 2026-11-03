@@ -153,3 +153,27 @@ def test_init_keeps_an_existing_config_and_reports_an_edited_ticket_doc(repo, ca
     assert (repo / "config.yaml").read_bytes() == kept and "wrote: config.yaml" not in out
     assert (repo / "docs/tempo/tickets.md").read_text() == "ours\n"
     assert "skipped: docs/tempo/tickets.md" in out
+
+
+def test_init_ignores_the_state_dir_once(tmp_path):
+    assert main(["init"], cwd=tmp_path) == 0
+    assert (tmp_path / ".gitignore").read_text() == "/.tempo/state/\n"
+    assert main(["init"], cwd=tmp_path) == 0
+    assert (tmp_path / ".gitignore").read_text() == "/.tempo/state/\n"
+
+
+def test_init_appends_to_an_existing_gitignore_and_ignores_a_separate_worktree_root(repo):
+    (repo / ".gitignore").write_text(".venv/")
+    with (repo / "config.yaml").open("a") as f:
+        f.write("worktree_root: .trees\n")
+    assert main(["init"], cwd=repo) == 0
+    assert (repo / ".gitignore").read_text() == ".venv/\n/.tempo/state/\n/.trees/\n"
+
+
+def test_init_adds_no_line_for_a_state_dir_outside_the_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "config.yaml").write_text((FIXTURE / "config.yaml").read_text().replace(
+        "state_dir: .tempo/state", f"state_dir: {tmp_path / 'state'}"))
+    assert main(["init"], cwd=repo) == 0
+    assert not (repo / ".gitignore").exists()

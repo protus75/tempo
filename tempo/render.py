@@ -24,6 +24,7 @@ from tempo.seams import FileSystem
 RULES = Path(__file__).resolve().parent / "rules"
 CONFIG = "config.yaml"
 TICKETS_DOC = "docs/tempo/tickets.md"
+GITIGNORE = ".gitignore"
 ORCHESTRATOR = "tempo-orchestrator"
 _TOOLS = {
     "claude": ("Read, Grep, Glob, Write", "Read, Grep, Glob, Write, Edit, MultiEdit, Bash"),
@@ -180,4 +181,26 @@ def init(repo: Path, config_path: Path | None, fs: FileSystem) -> list[str]:
         lines.append(f"wrote: {TICKETS_DOC}")
     elif doc.read_bytes() != shipped:
         lines.append(f"skipped: {TICKETS_DOC} differs from the shipped copy; merge it by hand")
+    if _ignore(repo, config, fs):
+        lines.append(f"wrote: {GITIGNORE}")
     return lines
+
+
+def _ignore(repo: Path, config: Config, fs: FileSystem) -> bool:
+    """Append `/<dir>/` for the state and worktree dirs inside the repo; True when `.gitignore` changed."""
+    path = repo / GITIGNORE
+    data = path.read_bytes() if path.is_file() else b""
+    present = {line.strip() for line in data.decode(errors="replace").splitlines()}
+    root, state = repo.resolve(), Path(config.state_dir).resolve()
+    dirs = [state] + [w for w in [Path(config.worktree_root).resolve()] if not w.is_relative_to(state)]
+    wanted = []
+    for dir in dirs:
+        line = f"/{dir.relative_to(root).as_posix()}/" if dir.is_relative_to(root) and dir != root else None
+        if line is not None and line not in present and line not in wanted:
+            wanted.append(line)
+    if not wanted:
+        return False
+    if data and not data.endswith(b"\n"):
+        data += b"\n"
+    fs.write(path, data + "".join(f"{line}\n" for line in wanted).encode())
+    return True

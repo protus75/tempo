@@ -8,7 +8,8 @@ Install the `tempo` command, then set a repo up:
 
     uv tool install tempo-agents
     cd <your repo>
-    tempo init                  # config.yaml, managed blocks, hook and agent files, docs/tempo/tickets.md
+    tempo init                  # config.yaml, managed blocks, hook and agent files, docs/tempo/tickets.md,
+                                # and .gitignore lines for tempo's state
     git add -A && git commit -m "tempo init"
 
 `tempo init` is safe to rerun; it changes nothing when the repo is current. After editing
