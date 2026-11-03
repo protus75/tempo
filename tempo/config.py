@@ -130,7 +130,6 @@ class Caps(_Strict):
     retry: Count = 6
     premise_bounce: Count = 2
     infra: Count = 6
-    poison: Count = 2
 
 
 class CircuitBreaker(_Strict):

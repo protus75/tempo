@@ -115,7 +115,7 @@ def test_journal_closed_sets_and_constants():
     assert dict(journal.EVENT_VERSIONS) == {'cap_consumed': 1, 'checkpoint': 1, 'effect_completion': 1, 'effect_intent': 1, 'signal': 1, 'state_transition': 1, 'timer_armed': 1, 'timer_fired': 1}
     assert {e.value for e in journal.EventType} == {'cap_consumed', 'checkpoint', 'effect_completion', 'effect_intent', 'signal', 'state_transition', 'timer_armed', 'timer_fired'}
     assert journal.ROLL_BYTES == 67108864
-    assert journal.SIGNAL_NAMES == frozenset({'author_invoked', 'control_decision', 'dead_dependency', 'draft_confirmed', 'handoff_written', 'harvest_failed', 'kill_applied', 'merge_conflict_facts', 'merge_red_streak', 'merge_tree_mismatch', 'provider_call_outcome', 'recovery_alert', 'reject_verdict', 'reoffered', 'requisition_verdict', 'retro_failed', 'retro_prompt_spec_change_merged', 'retro_ticket_authored', 'rework_order', 'session_begun', 'stage_failed', 'storm_breaker_trip', 'storm_occurrence', 'subagent_call_closed', 'supersedes', 'ticket_intake', 'tombstone_auto_reopened', 'triage_pass'})
+    assert journal.SIGNAL_NAMES == frozenset({'author_invoked', 'control_decision', 'dead_dependency', 'draft_confirmed', 'handoff_written', 'harvest_failed', 'kill_applied', 'merge_conflict_facts', 'merge_red_streak', 'merge_tree_mismatch', 'provider_call_outcome', 'reject_verdict', 'reoffered', 'requisition_verdict', 'retro_failed', 'retro_prompt_spec_change_merged', 'retro_ticket_authored', 'rework_order', 'session_begun', 'stage_failed', 'storm_breaker_trip', 'storm_occurrence', 'subagent_call_closed', 'supersedes', 'ticket_intake', 'tombstone_auto_reopened', 'triage_pass'})
     assert journal.TERMINAL_STATES == frozenset({'abandoned', 'already_satisfied', 'gate_failed', 'infra_error', 'invalid_artifact', 'merged', 'premise_failed', 'rejected', 'timeout'})
 
 def test_llm_closed_sets_and_constants():
@@ -130,7 +130,6 @@ def test_mergequeue_closed_sets_and_constants():
     assert mergequeue.RED_STREAK_LIMIT == 3
 
 def test_notify_closed_sets_and_constants():
-    assert notify.NOTIFY_RETRY_S == 60.0
     assert notify.NOTIFY_TIMEOUT_S == 30.0
 
 def test_providers_closed_sets_and_constants():

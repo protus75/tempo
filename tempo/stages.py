@@ -15,23 +15,20 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from tempo.artifacts import OUTCOMES, Artifact, Finding, Harvest, NonBlank, Outcome, ReviewVerdict, StageResult
 from tempo.box import BOX_DIR
-from tempo.checkout import SPECS_DIR, Checkout
 from tempo.storm import arrival_id
 from tempo.config import Config, ConfigSnapshot, Severity
 from tempo.control import protected_cleanup
 from tempo.driver import Driver, LlmStage
-from tempo.effects import Effects
 from tempo.gates import BugEvidence, GateReport, RegressionRun, run_gates
 from tempo.git import Git, GitError
 from tempo.hostfiles import CORE_TEMPLATE, CoreDriftGate, committed_core
 from tempo.journal import EventType, run_seq
-from tempo.llm import LLM
 from tempo.seams import ExecutableNotFound, FileSystem, ProcessExec
 from tempo.specs import RenderOverBound, Spec, load_spec, render
 from tempo.tickets import _HEADING, TICKET_FILE, TICKETS_DIR, Ticket, ticket_path
@@ -1010,12 +1007,3 @@ async def harvest(
     await lift_outbox(ctx, stem, kind, attempt=attempt, only=f"attempts/{attempt}/harvest.json")
 
 
-async def harvest_orphan(checkout: Checkout, stem: str, attempt: int) -> None:
-    """Use the run-terminal harvest with an effects context; an orphan makes no model call."""
-    driver = Driver.from_config(checkout.config, llm=cast(LLM, None), env=checkout.env,
-                                clock=checkout.clock, sleep=checkout.sleep, fs=checkout.fs)
-    driver.journal = checkout.journal
-    driver.effects = Effects(checkout.journal)
-    ctx = StageContext(repo=checkout.repo, config=checkout.config, env=checkout.env, exec_=checkout.exec_,
-                       git=checkout.git, fs=checkout.fs, driver=driver, specs_dir=SPECS_DIR)
-    await harvest(ctx, stem, attempt=attempt, stage=None, terminal="abandoned", findings=[], wall_seconds=None)

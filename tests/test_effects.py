@@ -135,7 +135,7 @@ def test_crash_after_completion_journaled_does_not_double_execute(tmp_path):
     assert len(exec_.calls) == 1
 
 
-def test_intent_only_crash_reexecutes_because_reconcile_owns_that_window(tmp_path):
+def test_intent_only_crash_reexecutes(tmp_path):
     exec_ = FakeExec()
 
     async def dies_mid_effect():

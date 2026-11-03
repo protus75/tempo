@@ -182,7 +182,7 @@ class AdmissionBoundary:
 
 
 def squash_message(ticket: Ticket, reviewed_sha: str) -> str:
-    """Subject `tempo(<stem>): <Goal line>` plus the trailers reconcile maps a commit back by (section 10)."""
+    """Subject `tempo(<stem>): <Goal line>` plus the trailers that map a commit back to its ticket (section 10)."""
     goal = next(line.strip() for line in ticket.sections["Goal / Why"].splitlines() if line.strip())
     return f"tempo({ticket.stem}): {goal}\n\ntempo-ticket: {ticket.stem}\ntempo-reviewed-sha: {reviewed_sha}\n"
 

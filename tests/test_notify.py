@@ -1,6 +1,5 @@
 import json
 import sys
-from types import SimpleNamespace
 
 import pytest
 
@@ -11,12 +10,11 @@ from tempo.effects import Effects
 from tempo.enginelog import EngineLog
 from tempo.git import Git
 from tempo.journal import EventType, Journal
-from tempo.notify import NOTIFY_RETRY_S, NotificationReconciler, notification_key, send
+from tempo.notify import notification_key, send
 from tempo.redact import Redactor
 from tempo.seams import CommandNotifications, LocalFileSystem, NotificationFailed, SubprocessExec
 from tests.test_config import VALID
 from tests.support import Time
-from tests.support import turn
 
 
 @pytest.mark.asyncio
@@ -105,47 +103,3 @@ async def test_notify_seam_uses_argv_and_ambient_env(tmp_path):
             await seam.notify(malformed)
 
 
-@pytest.mark.asyncio
-async def test_notify_timeout_backoff_and_unchanged_poll_cache(tmp_path, monkeypatch):
-    (tmp_path / "config.yaml").write_text(VALID + "notify: [notify]\n")
-    config = load_config(None, cwd=tmp_path)
-    clock = Time()
-    journal = Journal(tmp_path / "state", clock)
-    journal.append(EventType.SIGNAL, {"kind": "merge_tree_mismatch", "hold_id": "hold",
-        "checked_tree": "checked", "main_tree": "main"}, ticket="stem")
-    loads, reads, calls = [], [], []
-    read = journal.read
-    def reading():
-        reads.append(None)
-        return read()
-    monkeypatch.setattr(journal, "read", reading)
-    def load():
-        loads.append(None)
-        return config
-    class TimeoutExec:
-        async def run(self, argv, **kwargs):
-            calls.append(argv)
-            raise TimeoutError("scripted timeout")
-    seam = CommandNotifications(TimeoutExec(), cwd=tmp_path, env={}, timeout=30, scrub=lambda s: s)
-    log = EngineLog(tmp_path / "engine.log", Redactor({}), clock)
-    reconciler = NotificationReconciler(journal=journal, clock=clock, config_path=tmp_path / "config.yaml",
-        load=load, compose=lambda _: seam, log=log)
-    try:
-        reconciler.poll(startup=True)
-        await turn()
-        reconciler.poll()
-        snapshot = len(reads), len(loads)
-        for _ in range(100):
-            reconciler.poll()
-            clock.advance(.1)
-            await turn()
-        assert (len(reads), len(loads)) == snapshot and len(calls) == 1
-        assert len(reconciler.pending) == 1 and not any(
-            e.type == EventType.EFFECT_COMPLETION for e in read())
-        clock.advance(NOTIFY_RETRY_S)
-        reconciler.poll()
-        await turn()
-        assert len(calls) == 2
-        assert "retry pending evidence" in log.path.read_text()
-    finally:
-        await reconciler.close()

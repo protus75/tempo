@@ -54,7 +54,7 @@ Config:
   required: [schema_version, state_dir, hosts, orchestrator, review, merge, engine_plane_safety_inventory]
   defaults:
     worktree_root: unset
-    caps: {decisions: 6, retry: 6, premise_bounce: 2, infra: 6, poison: 2}
+    caps: {decisions: 6, retry: 6, premise_bounce: 2, infra: 6}
     circuit_breaker: {k: 3, cooldown_minutes: 10}
     tickets: {max_minutes: 90}
     box_policy: {failure_report: confirmed, retro_finding: confirmed, override_report: draft, suggestion: draft, bug_report_self_diagnosed: confirmed, bug_report_player_repro: confirmed, bug_report_player_no_repro: draft}
@@ -93,7 +93,7 @@ UnionStrategy:
   defaults: {}
 Caps:
   required: []
-  defaults: {decisions: 6, retry: 6, premise_bounce: 2, infra: 6, poison: 2}
+  defaults: {decisions: 6, retry: 6, premise_bounce: 2, infra: 6}
 CircuitBreaker:
   required: []
   defaults: {k: 3, cooldown_minutes: 10}

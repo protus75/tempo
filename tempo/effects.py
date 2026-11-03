@@ -2,8 +2,7 @@
 
 Once is COMPLETION-keyed: a key with a journaled completion replays its recorded
 result. An intent with no completion (crash mid-effect) re-executes here on
-purpose -- that window belongs to reconcile-on-entry (section 11), not this
-primitive. A completion may carry a `served` body field naming the provider and model that served it.
+purpose: a lost job or an abandoned call re-runs its step (AGENT_PLAN.md section 4.1). A completion may carry a `served` body field naming the provider and model that served it.
 """
 
 import functools

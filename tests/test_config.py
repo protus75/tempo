@@ -61,7 +61,7 @@ def test_valid_config_loads_from_cwd_with_shipped_defaults(tmp_path):
     assert cfg.review.mechanical[1].trigger == ["tempo/"]
     assert cfg.merge.strategies[0].argv == ["uv", "lock"]
     assert cfg.caps.model_dump() == {
-        "decisions": 6, "retry": 6, "premise_bounce": 2, "infra": 6, "poison": 2,
+        "decisions": 6, "retry": 6, "premise_bounce": 2, "infra": 6,
     }
     assert cfg.circuit_breaker.k == 3
     assert cfg.circuit_breaker.cooldown_minutes == 10
