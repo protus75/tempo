@@ -1,12 +1,16 @@
+#!/usr/bin/env -S uv run --script
 """Build, check, and upload the tempo-agents package (AGENT_PLAN.md section 6, Publishing).
 
-`uv run python -m dev.release` builds a clean `dist/`, refuses an sdist entry outside the allowlist,
-smoke-tests the wheel in a fresh venv (`tempo init`, `tempo render --check`), then runs `uv publish`
-with `UV_PUBLISH_TOKEN` from the environment. `--check` stops before the upload.
+`dev/release.py` builds a clean `dist/`, refuses an sdist entry outside the allowlist, smoke-tests the
+wheel in a fresh venv (`tempo init`, `tempo render --check`), then runs `uv publish`. Without a PyPI
+token in `UV_PUBLISH_TOKEN`, it asks for one and saves it as the `export` line in ~/.bashrc.
+`--check` stops before the upload.
 """
 
 import argparse
+import getpass
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -19,6 +23,8 @@ DIST = ROOT / "dist"
 # Mirrors [tool.hatch.build.targets.sdist] include, plus what the build backend always adds.
 SDIST_ALLOWED = {"tempo", "README.md", "pyproject.toml", "PKG-INFO", ".gitignore"}
 PLACEHOLDER = "pypi-PASTE-YOUR-TOKEN-HERE"
+BASHRC = Path.home() / ".bashrc"
+EXPORT = re.compile(r"^export UV_PUBLISH_TOKEN=.*$", re.MULTILINE)
 
 
 def run(argv: list[str], cwd: Path = ROOT, env: dict[str, str] | None = None) -> None:
@@ -61,25 +67,45 @@ def smoke(wheel: Path) -> None:
         run([tempo, "render", "--check"], cwd=repo)
 
 
-def publish() -> None:
-    token = os.environ.get("UV_PUBLISH_TOKEN", "")
-    if not token.startswith("pypi-") or token == PLACEHOLDER:
-        fail("UV_PUBLISH_TOKEN is not set to a PyPI token",
-             "put the full token in the `export UV_PUBLISH_TOKEN=...` line of ~/.bashrc, then open a new terminal")
-    run(["uv", "publish"])
+def valid(token: str) -> bool:
+    return token.startswith("pypi-") and token != PLACEHOLDER
+
+
+def token() -> str:
+    """The env token, else one typed now and saved as the ~/.bashrc export line."""
+    if valid(found := os.environ.get("UV_PUBLISH_TOKEN", "")):
+        return found
+    typed = getpass.getpass("PyPI token (starts with pypi-, input hidden): ").strip()
+    if not valid(typed):
+        fail("that is not a PyPI token", "copy the whole token from https://pypi.org/manage/account/token/")
+    line = f'export UV_PUBLISH_TOKEN="{typed}"'
+    text = BASHRC.read_text() if BASHRC.is_file() else ""
+    if EXPORT.search(text):
+        text = EXPORT.sub(lambda _: line, text, count=1)
+    else:
+        text = f"{text.rstrip()}\n\n# PyPI upload token for `uv publish`\n{line}\n"
+    BASHRC.write_text(text)
+    print(f"saved the token to {BASHRC}")
+    return typed
+
+
+def publish(key: str) -> None:
+    run(["uv", "publish"], env={**os.environ, "UV_PUBLISH_TOKEN": key})
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="python -m dev.release")
+    parser = argparse.ArgumentParser(prog="dev/release.py")
     parser.add_argument("--check", action="store_true", help="build and check, but do not upload")
     args = parser.parse_args()
+    key = None if args.check else token()  # ask before the build, not after it
     wheel, sdist = build()
     check_sdist(sdist)
     smoke(wheel)
     if args.check:
         print("release: checks passed; not uploaded (--check)")
         return
-    publish()
+    assert key is not None
+    publish(key)
     print("release: uploaded; see https://pypi.org/project/tempo-agents/")
 
 
