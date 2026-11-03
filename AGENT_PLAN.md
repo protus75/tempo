@@ -193,7 +193,7 @@ starting list, verified against chupa at `63b89e4`.
 | review or requisition `rma` ("a human must change the ticket") | the orchestrator writes a successor ticket through `split`, which gets requisition review |
 | `premise_failed` park until a human edits `ticket.md` | the orchestrator writes a successor ticket or rejects |
 | draft `confirm` verb | automatic |
-| operator `pause` / `resume` / `kill` | kept as optional emergency controls; never a step in the loop |
+| operator `pause` / `resume` / `kill` | removed in P5: they spoke to the daemon, which is gone. Stopping the orchestrator chat stops the run; `/tempo-run` resumes it from `status`. |
 
 **Spec text.** Text in the specs telling the model a human will act is reworded to name the
 orchestrator.
@@ -504,7 +504,7 @@ process.
 |---|---|
 | Read | `status` (includes open calls, so a resumed session recovers them), `list_eligible` (the mechanical half of `drain._select`: confirmed, deps settled, not held, caps remaining, no drought), `read_ticket`, `read_attempts` (`prior_attempts`), `read_box` |
 | Session | `begin_session` (takes the lock, §4.6); `write_handoff` releases it |
-| Run | `start(stem)` (journals `{to: running}`, allocates `attempt`/`run_seq` as `drain._run_one` did, and creates the worktree), `prepare`, `submit`, `check`, `job`, `merge` |
+| Run | `start(stem)` (journals `{to: running}`, allocates `attempt`/`run_seq` as `drain._run_one` did, and creates the worktree), `prepare`, `submit`, `check`, `job`, `merge`. `prepare` serves `requisition_review`, `implement`, `review`, `triage`, `author`, and `retro`. |
 | Decide | `retry`, `escalate` (offers only `caps.next_rung`'s rung), `reject`, `park`, `release_hold`, `reoffer`, `split_propose` / `split_commit` (see Split above), `confirm`. Each journals the same `state_transition` shape as `failure_terminal`: `{to, stage, reason, dispatch, rung}`. Each takes a required `lessons` argument, which the tool appends to `tickets/<stem>/decisions.md`. |
 | Record | `file_box`, `notify`, `write_handoff` (rewrites `tickets/orchestrator/handoff.md`) |
 
@@ -545,8 +545,9 @@ process.
 | drain retro trigger | runs retro when `select_trigger` fires | trigger facts |
 | watchdog spiral warning | nothing; it was spend-based and is removed | call deadline (time-based, §4.4.3) |
 
-P5 confirms that `IDENTICAL_K` compares `state_transition` reasons, not diagnose output, before
-`diagnose` is deleted.
+`IDENTICAL_K` (confirmed in P5): it compares the `reason` of the ticket's earlier terminal
+`state_transition` events, never diagnose output. It moves from `runner` to `caps`, beside `spent` and
+`next_rung`.
 
 ### 4.3 Single depth (R2)
 
@@ -1112,6 +1113,12 @@ gate:
     `stop.txt`.
 - Each removal also deletes its CLI command. At the end of P5, `__main__` joins the kept set and the
   import-graph test covers it.
+- `rework` keeps only its proposal checks and `record_supersedes`, renamed in place to `split`, behind
+  `split_propose` and `split_commit`.
+- Removed with the daemon, because only the daemon or `serve` called them: `restart`, `watcher`,
+  `scheduler`, `heartbeat`, `checkpoint` (the push to `origin` every 5 merges; local main is the
+  blessed line, and the user pushes), and `flake` (never wired into a run). The `pause`, `resume`, and
+  `kill` CLI commands go too (§2.6).
 
 **Exit:**
 - A fake-host orchestrator session runs a ticket from intake to merge, and through each failure
@@ -1142,6 +1149,7 @@ gate:
 
 **Work:** On the P4 fixture repo, run real tickets from the VS Code extension of each host that passed
 the live gate.
+Include one round trip with a prompt at `RENDER_BOUND_CHARS`; P4c's live gate did not run it.
 
 **Exit:**
 - Each host completes a ticket end to end with verified artifacts.
