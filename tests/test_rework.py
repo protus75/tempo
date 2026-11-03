@@ -451,21 +451,6 @@ def test_supersedes_dependency_folds(ctx, leaf_state):
     assert bool({"original"} & dead) == (leaf_state in {"rejected", "abandoned"})
 
 
-def test_rework_is_reachable_from_production():
-    root = Path(__file__).resolve().parents[1]
-    sources = {"tempo." + p.stem: p.read_text() for p in (root / "tempo").glob("*.py")}
-    def reachable(material):
-        assert "tempo.rework" in import_closure("tempo.__main__", material)
-    reachable(sources)
-    removed = {name: "\n".join((line[:len(line) - len(line.lstrip())] + "pass")
-               if line.lstrip().startswith("from tempo.rework import") else line
-               for line in source.splitlines()) for name, source in sources.items()}
-    with pytest.raises(AssertionError):
-        reachable(removed)
-    for spelling in ["import tempo.rework as rework", "from tempo import rework as stage"]:
-        reachable({**removed, "tempo.runner": removed["tempo.runner"] + "\n" + spelling})
-
-
 def test_admission_never_invokes_rework_inline(ctx, monkeypatch):
     async def forbidden(*args, **kwargs):
         pytest.fail("admission must never invoke Rework inline")

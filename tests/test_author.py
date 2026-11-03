@@ -11,13 +11,13 @@ from tempo.llm import FakeLLM
 from tempo.seams import LocalFileSystem
 from tempo.tickets import validate_ticket
 from tests.test_cli import ENV, git_out
-from tests.support import Clock, commit_ticket, confirmed, make_root
+from tests.support import Clock, commit_ticket, confirmed, make_root, triage
 from tests.test_triage import author_reply, reply
 from tempo.__main__ import main
 
 
 def _run(root, monkeypatch, llm):
-    return main(["triage"], cwd=root, env=ENV, clock=Clock(), llm=llm)
+    return triage(root, llm)
 
 
 def _box(root):
@@ -335,7 +335,7 @@ def test_prior_author_invocation_records_decision_without_author_call(tmp_path, 
 def test_reopened_retro_ticket_starts_draft(tmp_path, monkeypatch):
     from tempo.box import RereportJournal
     from tempo.config import load_config
-    from tests.test_retro_box import PROPOSAL
+    from tests.support import PROPOSAL
     root = make_root(tmp_path)
     path = root / "config.yaml"
     path.write_text(path.read_text().replace("engine_plane_safety_inventory: []", "engine_plane_safety_inventory: [config.yaml]"))
@@ -362,7 +362,7 @@ def test_reopened_retro_ticket_starts_draft(tmp_path, monkeypatch):
 @pytest.mark.parametrize("point", ["bridge", "resolution"])
 @pytest.mark.parametrize("after", [False, True])
 def test_retro_author_bridge_and_resolution_recover_without_another_call(tmp_path, monkeypatch, point, after):
-    from tests.test_retro_box import PROPOSAL
+    from tests.support import PROPOSAL
     class Crash(BaseException):
         pass
     root = make_root(tmp_path)

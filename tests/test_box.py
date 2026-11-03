@@ -316,7 +316,7 @@ def test_late_rereport_replay_preserves_later_arrival_count(tmp_path, monkeypatc
 
 
 def test_tombstone_visibility_uses_message_class(tmp_path, monkeypatch):
-    from tests.test_retro_box import PROPOSAL
+    from tests.support import PROPOSAL
     box = Box(tmp_path / "box", LocalFileSystem())
     expected = []
     for cls, bug, repro, visible in [("suggestion", None, None, False), ("override_report", None, None, False),

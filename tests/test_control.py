@@ -12,8 +12,7 @@ from tempo import control
 from tempo.control import ControlProjection, ControlRequest, publish_request, validate_request
 from tempo.journal import EventType, Journal
 from tempo.seams import FileSystem, LocalFileSystem
-from tests.test_cli import Stages, cli, journal, root, ticket, write
-from tests.test_daemon_composition import CoreRig, assert_startup_pause_wiring
+from tests.test_cli import cli, journal, root, ticket, write
 from tests.test_effects import Crash, FakeClock
 
 
@@ -374,31 +373,3 @@ def test_current_kill_is_only_an_idempotent_projection(tmp_path):
     assert rig.decisions()[0]["decision"] == "accepted"
 
 
-def test_control_inbox_is_active(root, tmp_path, monkeypatch):
-    def forbidden(*args, **kwargs):
-        raise AssertionError("control boundary touched")
-
-    directory = tmp_path / "production"
-    directory.mkdir()
-    production = CoreRig(directory)
-    assert production.core.control.inbox.journal is production.journal
-    assert_startup_pause_wiring(production.core)
-    assert production.journal.read() == [] and production.fs.files == {}
-
-    # Removing the actual production binding must defeat the positive observable.
-    def assert_bound(core):
-        assert_startup_pause_wiring(core)
-    assert_bound(production.core)
-    with monkeypatch.context() as patch:
-        patch.setattr(production.core.admission, "_before_dispatch", None)
-        with pytest.raises(AssertionError):
-            assert_bound(production.core)
-
-    stem = "work-run"
-    write(root, stem, ticket())
-    stages = Stages()
-    with monkeypatch.context() as patch:
-        patch.setattr(control.ControlInbox, "consume", forbidden)
-        assert cli(root, "run", stem, stages=stages) == 0
-        assert stages.calls == [stem] and stages.lock_held == [True]
-    assert not any(e.body.get("kind") == control.CONTROL_DECISION for e in journal(root).read())

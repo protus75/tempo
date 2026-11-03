@@ -247,7 +247,7 @@ def test_host_contract_report_custody_and_instance(tmp_path):
     mentions("metadata-first", "1 MiB", "64 KiB", "exact boundaries", "recheck",
              "before message recording", "durable box custody", "untrusted data at every hop",
              "ticket's evidence/", "initial_state", "ordered actions", "ONE instance",
-             "never delete the lockfile", "each dispatch cycle", "tickets/decisions/",
+             "never delete the lockfile", "fresh process that reads config.yaml", "tickets/decisions/",
              "Foreign process-state adoption is excluded")
     clock = lambda: datetime(2026, 1, 1, tzinfo=timezone.utc)
     one = Lockfile(tmp_path, instance_id="one", clock=clock)

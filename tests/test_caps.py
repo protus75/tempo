@@ -2,7 +2,6 @@
 
 import pytest
 
-from tempo import runner
 from tempo.artifacts import StageResult
 from tempo.__main__ import main
 from tempo.caps import CAPS, IDENTICAL_K, capability, consume, draws, identical, next_rung, remaining, spent, spent_reason
@@ -13,7 +12,7 @@ from tempo.stages import StagesRun
 from tempo.tickets import validate_ticket
 from tests.test_cli import git_out
 from tests.support import Clock, commit_ticket, confirmed, journal, make_root
-from tests.test_terminal import ENV, STEM, author, clock, diagnosis_reply, repo
+from tests.support import ENV, STEM, author, clock, repo
 
 
 def test_fold_counts_only_named_cap_and_stem_across_ticket_revisions(tmp_path):
@@ -72,48 +71,6 @@ def test_retry_rung_is_rejected_on_other_caps_and_operator_keep_resets_it(repo):
     assert capability(ticket, j.read()) == ("medium", "medium")
     consume(j, STEM, "retry", "sha", rung={"tier": "medium", "effort": "high"})
     assert capability(ticket, j.read()) == ("medium", "high")
-
-
-def test_crashing_implement_draws_infra_immediately_before_terminal(repo):
-    author(repo)
-    llm = FakeLLM([RuntimeError("provider crashed"), diagnosis_reply()])
-    assert main(["run", STEM], cwd=repo, env=ENV, clock=clock,
-                pipeline=lambda c: runner.bind(c, llm)) == runner.EXIT_TICKET
-    assert [request.surface for request in llm.requests if request.surface != "diagnose"] == ["implement"]
-    events = [e for e in Journal(repo / ".tempo" / "state", clock).read() if e.ticket == STEM]
-    terminal = next(i for i, e in enumerate(events)
-                    if e.type == EventType.STATE_TRANSITION and e.body.get("to") == "infra_error")
-    sha = git_out(repo, "rev-parse", f"HEAD:tickets/{STEM}/ticket.md").strip()
-    infra = next(i for i, e in enumerate(events) if e.type == EventType.CAP_CONSUMED and e.body["cap"] == "infra")
-    assert infra < terminal
-    assert events[infra].body == {"cap": "infra", "ticket_sha": sha}
-    assert all((e.type == EventType.CAP_CONSUMED and e.body["cap"] == "decisions")
-               or (e.type == EventType.SIGNAL and e.body.get("signal") == "diagnosis")
-               or (e.key is not None and ("/diagnose/" in e.key or e.key.endswith("/diagnosis")))
-               for e in events[infra + 1:terminal])
-    assert draws(events, STEM, "infra") == 1
-
-
-@pytest.mark.parametrize("outcome,expected_draws", [("timeout", 1), ("gate_failed", 0)])
-def test_other_terminals_draw_only_when_infra(repo, monkeypatch, outcome, expected_draws):
-    author(repo)
-
-    async def stage_seam(ctx, ticket):
-        return StagesRun(attempt=0, results={"implement": StageResult(
-            outcome=outcome, artifact=None, findings=[])})
-
-    monkeypatch.setattr(runner, "run_stages", stage_seam)
-    assert main(["run", STEM], cwd=repo, env=ENV, clock=clock,
-                pipeline=lambda c: runner.bind(c, FakeLLM([]))) == runner.EXIT_TICKET
-    events = [e for e in Journal(repo / ".tempo" / "state", clock).read() if e.ticket == STEM]
-    assert events[-1].body == {"to": outcome, "stage": "implement", "reason": outcome,
-                               "dispatch": "reject_queue", "routed": "reject_queue"}
-    assert draws(events, STEM, "infra") == expected_draws
-    if expected_draws:
-        sha = git_out(repo, "rev-parse", f"HEAD:tickets/{STEM}/ticket.md").strip()
-        assert next(e.body for e in events if e.type == EventType.CAP_CONSUMED) == {"cap": "infra", "ticket_sha": sha}
-
-
 
 
 ROUTING = """schema_version: 1

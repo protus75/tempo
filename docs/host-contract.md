@@ -54,8 +54,7 @@ Config:
   required: [schema_version, state_dir, hosts, orchestrator, review, merge, engine_plane_safety_inventory]
   defaults:
     worktree_root: unset
-    scheduler: {max_unmerged: 2}
-    caps: {decisions: 6, retry: 6, premise_bounce: 2, infra: 6, quarantine: 5, poison: 2}
+    caps: {decisions: 6, retry: 6, premise_bounce: 2, infra: 6, poison: 2}
     circuit_breaker: {k: 3, cooldown_minutes: 10}
     tickets: {max_minutes: 90}
     box_policy: {failure_report: confirmed, retro_finding: confirmed, override_report: draft, suggestion: draft, bug_report_self_diagnosed: confirmed, bug_report_player_repro: confirmed, bug_report_player_no_repro: draft}
@@ -92,12 +91,9 @@ RegenerateStrategy:
 UnionStrategy:
   required: [paths, strategy]
   defaults: {}
-Scheduler:
-  required: []
-  defaults: {max_unmerged: 2}
 Caps:
   required: []
-  defaults: {decisions: 6, retry: 6, premise_bounce: 2, infra: 6, quarantine: 5, poison: 2}
+  defaults: {decisions: 6, retry: 6, premise_bounce: 2, infra: 6, poison: 2}
 CircuitBreaker:
   required: []
   defaults: {k: 3, cooldown_minutes: 10}
@@ -270,18 +266,18 @@ Active-work and notification executors are separate; abort targets the executor 
 ## Instance custody
 
 ONE instance writes a host repo line. Stable is a tagged release installed in
-its own venv; dev uses its own disposable checkout, worktree root and state dir,
-with checkpoint push disabled. Instances share only remotes. Upgrade by tag,
+its own venv; dev uses its own disposable checkout, worktree root and state dir.
+Instances share only remotes. Upgrade by tag,
 install and restart; rollback reinstalls the previous tag.
 `<state_dir>/tempo.lock` uses advisory flock before writes and records instance_id,
 pid, host, state_dir and started_at for diagnostics only. Kernel release on
 process death governs correctness, never stale-pid adoption. On LockHeld wait
 for or stop the holder; never delete the lockfile. Child descriptors do not pin it.
-State dir owns journal, box queue, quarantine ledgers, attempt spools, engine
-log and heartbeat. Decisions and tombstones are committed under
-`tickets/decisions/`, so dedup memory travels with the repo. Config is re-read at
-each dispatch cycle: watcher/debounce in daemon, re-parsing in scaffold verbs;
-model, severity and ceiling edits take effect without restart.
+State dir owns journal, box queue, attempt spools, and engine
+log. Decisions and tombstones are committed under
+`tickets/decisions/`, so dedup memory travels with the repo. Every `tempo tool`
+call is a fresh process that reads config.yaml, so model, severity and ceiling
+edits take effect on the next call.
 
 ## Report-inbox contract
 

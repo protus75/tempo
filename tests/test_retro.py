@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from tempo import runner
 from tempo.box import Box, DecisionRecord, render_record
 from tempo.effects import Effects
 from tempo.journal import EventType, Journal
@@ -17,16 +16,14 @@ from tempo.llm import FakeLLM
 from tempo.retro import (Retro, RetroArtifact, measurements, production_evidence, project_window,
                          render_report, select_trigger)
 from tempo.specs import RENDER_BOUND_CHARS, REQ_RENDER_HEADROOM, data_open, data_close
-from tests.support import Clock, make_root, pause_checkout, confirmed, commit_ticket
+from tests.support import Clock, Pipeline, make_root, checkout_at, confirmed, commit_ticket
 
 
 def rig(tmp_path, script=()):
-    from tempo.__main__ import build_control
-    c = pause_checkout(make_root(tmp_path))
-    c = replace(c, journal=Journal(c.config.state_dir, c.clock), control=None)
-    c = replace(c, control=build_control(c))
+    c = checkout_at(make_root(tmp_path))
+    c = replace(c, journal=Journal(c.config.state_dir, c.clock))
     llm = FakeLLM(list(script))
-    writer = runner.bind(c, llm)
+    writer = Pipeline(c, llm)
     writer.stages.driver.retry_cap = 0
     return c, writer, Retro(c, writer), llm
 
@@ -127,10 +124,12 @@ def test_retro_trigger_boundaries(tmp_path, kind):
         elif kind == "gate-failure":
             from tempo.tickets import validate_ticket
             ticket = validate_ticket(stem, confirmed(), c.repo)
-            assert asyncio.run(runner.failure_terminal(writer.ctx, ticket, outcome="gate_failed", stage="check",
-                               findings=[], attempt=n)) == "gate_failed"
+            j.append(EventType.STATE_TRANSITION, {"to": "gate_failed", "stage": "check", "reason": "gate_failed"},
+                     ticket=ticket.stem)
         elif kind == "integration-red":
-            writer.queue._facts(stem, set(), set(), red=["work/red.py"])
+            from tempo.mergequeue import MergeQueue
+            MergeQueue(writer.ctx, escalate=lambda event: None, control=None)._facts(
+                stem, set(), set(), red=["work/red.py"])
         elif kind == "override":
             from tempo.stages import Invoice
             path = f"tickets/{stem}/checks.json"
@@ -170,7 +169,9 @@ def test_mixed_spikes_do_not_sum_and_new_invocations_do_count(tmp_path):
     j = c.journal
     for n in range(4):
         j.append(EventType.STATE_TRANSITION, {"to": "running"}, ticket="same-stem")
-        writer.queue._facts("same-stem", set(), set(), red=["red.py"])
+        from tempo.mergequeue import MergeQueue
+        MergeQueue(writer.ctx, escalate=lambda event: None, control=None)._facts(
+            "same-stem", set(), set(), red=["red.py"])
         j.append(EventType.SIGNAL, {"signal": "rework_order", "attempt": n}, ticket="same-stem")
         j.append(EventType.STATE_TRANSITION, {"to": "gate_failed"}, ticket="same-stem")
     window = project_window(j.read())
@@ -337,7 +338,7 @@ def test_escape_report_projection(tmp_path, monkeypatch):
     from tempo.scorecard import project_scorecard
     from tempo.status import project, render as render_status
     async def scenario():
-        c, writer, box, checked, admitted = await escape_rig(tmp_path)
+        c, ctx, box, checked, admitted = await escape_rig(tmp_path)
         c, message, _ = await escape_report(c, commit=admitted.commit, paths=["tempo/thing.py"])
         window = project_window(c.journal.read())
         evidence = await production_evidence(window, c)
@@ -346,7 +347,7 @@ def test_escape_report_projection(tmp_path, monkeypatch):
             pytest.fail("pure escape projection performed an effect or read")
         with monkeypatch.context() as patch:
             for target, method in ((c.fs, "write"), (c.git, "_run"), (c.journal, "append"),
-                                   (c.journal, "read"), (writer.stages.driver.llm, "call"),
+                                   (c.journal, "read"), (ctx.driver.llm, "call"),
                                    (Path, "read_text"), (Path, "read_bytes"), (Box, "resolve")):
                 patch.setattr(target, method, forbidden)
             card = project_scorecard(window)
@@ -357,8 +358,7 @@ def test_escape_report_projection(tmp_path, monkeypatch):
             assert receipt.split("| Surface |")[1] == status.split("| Surface |")[1]
             assert "| review | 1 | 0 | 1 | 0 | 0.0000 | 1.0000 | false |" in receipt
         assert c.journal.read() == before
-        writer.stages.driver.llm = FakeLLM(['{"proposals": []}'])
-        result = await Retro(c, writer)(forced=True)
+        result = await Retro(c, Pipeline(c, FakeLLM(['{"proposals": []}'])))(forced=True)
         receipt = await c.git._run(c.repo, "show", f"{result['commit']}:tickets/retro/000001.md")
         assert "| review | 1 | 0 | 1 |" in receipt
     asyncio.run(scenario())

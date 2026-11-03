@@ -3,7 +3,7 @@
 from tempo.audit import INVARIANTS, audit, audit_journal
 from tempo.journal import Event, EventType, Journal
 from tests.test_stages import agent, implement_reply, verdict
-from tests.test_terminal import author, clock, diagnosis_reply, repo  # noqa: F401 -- fixture
+from tests.support import author, clock, repo  # noqa: F401 -- fixture
 
 
 COMMIT = "a" * 40

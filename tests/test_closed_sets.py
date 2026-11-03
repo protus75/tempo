@@ -10,7 +10,8 @@ from typing import get_args
 
 import pytest
 
-from tempo import (artifacts, audit, author, backlog, box, call, caps, checkpoint, config, control, enginelog, gates, hooks, hosts, inbox, jobs, journal, llm, lockfile, merge, mergequeue, notify, providers, requisition, runner, serve, specs, stages, storm, thresh, tickets, tools, triage)
+from tempo import (artifacts, audit, author, backlog, box, call, caps, config, control, enginelog, gates, hooks, hosts, inbox, jobs, journal, llm, lockfile, merge, mergequeue, notify, providers, requisition, specs, stages, storm, thresh, tickets, tools, triage)
+from tempo import __main__ as entry
 
 
 def ident(v):
@@ -85,9 +86,6 @@ def test_caps_closed_sets_and_constants():
     assert caps.LEVELS == ('low', 'medium', 'high', 'max')
     assert caps.IDENTICAL_K == 3
 
-def test_checkpoint_closed_sets_and_constants():
-    assert checkpoint.CHECKPOINT_MERGES == 5
-
 def test_config_closed_sets_and_constants():
     assert dict(config.BOX_POLICY_DEFAULTS) == {'bug_report_player_no_repro': 'draft', 'bug_report_player_repro': 'confirmed', 'bug_report_self_diagnosed': 'confirmed', 'failure_report': 'confirmed', 'override_report': 'draft', 'retro_finding': 'confirmed', 'suggestion': 'draft'}
     assert set(get_args_deep(config.BoxRow)) == {'bug_report_player_no_repro', 'bug_report_player_repro', 'bug_report_self_diagnosed', 'failure_report', 'override_report', 'retro_finding', 'suggestion'}
@@ -121,7 +119,7 @@ def test_journal_closed_sets_and_constants():
     assert dict(journal.EVENT_VERSIONS) == {'cap_consumed': 1, 'checkpoint': 1, 'effect_completion': 1, 'effect_intent': 1, 'signal': 1, 'state_transition': 1, 'timer_armed': 1, 'timer_fired': 1}
     assert {e.value for e in journal.EventType} == {'cap_consumed', 'checkpoint', 'effect_completion', 'effect_intent', 'signal', 'state_transition', 'timer_armed', 'timer_fired'}
     assert journal.ROLL_BYTES == 67108864
-    assert journal.SIGNAL_NAMES == frozenset({'author_invoked', 'checkpoint_push_failed', 'control_decision', 'dead_dependency', 'diagnosis', 'draft_confirmed', 'flake_detected', 'flake_released', 'handoff_written', 'harvest_failed', 'kill_applied', 'merge_conflict_facts', 'merge_red_streak', 'merge_tree_mismatch', 'provider_call_outcome', 'recovery_alert', 'reject_verdict', 'reoffered', 'requisition_verdict', 'retro_failed', 'retro_prompt_spec_change_merged', 'retro_ticket_authored', 'rework_order', 'session_begun', 'stage_failed', 'storm_breaker_trip', 'storm_occurrence', 'subagent_call_closed', 'supersedes', 'ticket_intake', 'tombstone_auto_reopened', 'triage_pass', 'watcher_parse_failure'})
+    assert journal.SIGNAL_NAMES == frozenset({'author_invoked', 'control_decision', 'dead_dependency', 'draft_confirmed', 'handoff_written', 'harvest_failed', 'kill_applied', 'merge_conflict_facts', 'merge_red_streak', 'merge_tree_mismatch', 'provider_call_outcome', 'recovery_alert', 'reject_verdict', 'reoffered', 'requisition_verdict', 'retro_failed', 'retro_prompt_spec_change_merged', 'retro_ticket_authored', 'rework_order', 'session_begun', 'stage_failed', 'storm_breaker_trip', 'storm_occurrence', 'subagent_call_closed', 'supersedes', 'ticket_intake', 'tombstone_auto_reopened', 'triage_pass'})
     assert journal.TERMINAL_STATES == frozenset({'abandoned', 'already_satisfied', 'gate_failed', 'infra_error', 'invalid_artifact', 'merged', 'premise_failed', 'rejected', 'timeout'})
 
 def test_llm_closed_sets_and_constants():
@@ -147,14 +145,10 @@ def test_providers_closed_sets_and_constants():
 def test_requisition_closed_sets_and_constants():
     assert requisition.REQUISITION_STUCK_S == 600.0
 
-def test_runner_closed_sets_and_constants():
-    assert runner.EXIT_MERGED == 0
-    assert runner.EXIT_REFUSED == 2
-    assert runner.EXIT_TICKET == 1
+def test_entry_closed_sets_and_constants():
+    assert entry.EXIT_REFUSED == 2
+    assert entry.GIT_TIMEOUT_S == 30.0
     assert stages.HARVEST_TAIL_CHARS == 4000
-
-def test_serve_closed_sets_and_constants():
-    assert serve.SERVE_POLL_S == 0.1
 
 def test_specs_closed_sets_and_constants():
     assert specs.ENGINE_LLM_SURFACES == frozenset({'author', 'diagnose', 'implement', 'requisition_review', 'retro', 'review', 'rework', 'triage'})

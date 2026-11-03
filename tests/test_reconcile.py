@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from tempo import journal as journal_module, runner, stages as stage_module
+from tempo import journal as journal_module, stages as stage_module
 from tempo.audit import audit_journal
 from tempo.git import Git
 from tempo.journal import EVENT_VERSIONS, SIGNAL_NAMES, EventType, Journal, render_ts, run_seq
@@ -12,7 +12,7 @@ from tempo.llm import FakeLLM
 from tempo.reconcile import RECOVERY_ALERT, orphans, reconcile
 from tempo.seams import SubprocessExec
 from tempo.status import last_states
-from tests.test_cli import ENV, Clock, Stages, cli, git_out, journal, root, ticket, write  # noqa: F401
+from tests.test_cli import ENV, Clock, cli, git_out, journal, root, ticket, write  # noqa: F401
 
 STATE = Path(".tempo") / "state"
 
@@ -35,26 +35,6 @@ def reap(root: Path) -> list[str]:
         pass
 
     return asyncio.run(reconcile(journal(root), git(), root, root / STATE / "worktrees", harvest))
-
-
-def test_running_with_no_terminal_is_reaped_to_abandoned_on_the_next_run(root):
-    write(root, "add-thing", ticket())
-    journal(root).append(EventType.STATE_TRANSITION, {"to": "running"}, ticket="dead-run")
-    path = orphan_worktree(root, "dead-run")
-    stages = Stages()
-    assert cli(root, "run", "add-thing", stages=stages) == 0
-    events = journal(root).read()
-    transitions = [(e.ticket, e.body["to"]) for e in events if e.type == EventType.STATE_TRANSITION]
-    # Reaped BEFORE the next run's own dispatch.
-    assert transitions.index(("dead-run", "abandoned")) < transitions.index(("add-thing", "running"))
-    [alert] = [e for e in events if e.ticket == "dead-run" and e.body.get("kind") == RECOVERY_ALERT]
-    assert alert.body == recovery_body(0)
-    assert events.index(alert) < next(i for i, e in enumerate(events)
-                                     if e.ticket == "add-thing" and e.body.get("to") == "running")
-    assert last_states(events)["dead-run"] == "abandoned"
-    assert run_seq(events, "dead-run") == 1  # the reap is a terminal: a re-run takes a fresh sequence
-    assert not path.exists()
-    assert str(path) not in git_out(root, "worktree", "list")
 
 
 def test_an_open_effect_intent_is_an_orphan(root):
@@ -102,16 +82,6 @@ def test_reap_without_a_worktree_still_journals_abandoned(root):
     j.append(EventType.STATE_TRANSITION, {"to": "running"}, ticket="dead-run")
     assert reap(root) == ["dead-run"]
     assert last_states(j.read()) == {"dead-run": "abandoned"}
-
-
-def test_a_reaped_stem_reruns(root):
-    write(root, "add-thing", ticket())
-    assert cli(root, "run", "add-thing", stages=Stages("gate_failed")) == 1
-    Journal(root / STATE, Clock()).append(EventType.STATE_TRANSITION, {"to": "running"}, ticket="add-thing")
-    stages = Stages()
-    assert cli(root, "run", "add-thing", stages=stages) == 0
-    assert stages.calls == ["add-thing"]
-    assert last_states(journal(root).read())["add-thing"] == "merged"
 
 
 def recovery_body(sequence):
@@ -277,38 +247,3 @@ def test_recovery_alert_failures_preserve_terminal_history(root, monkeypatch, fa
     assert audit_journal(j) == []
 
 
-def test_recovery_alert_does_not_change_disposition(root):
-    j = journal(root)
-    write(root, "work", ticket())
-    for stem in ("history", "work"):
-        j.append(EventType.STATE_TRANSITION, {"to": "running"}, ticket=stem)
-        j.append(EventType.EFFECT_INTENT, {}, ticket=stem, key=f"{stem}/incomplete")
-        orphan_worktree(root, stem)
-    j.append(EventType.STATE_TRANSITION, {"to": "infra_error"}, ticket="history")
-    before = j.read()
-    assert reap(root) == ["work"]
-    assert j.read() == before + j.read()[-2:]
-    terminal, alert = j.read()[-2:]
-    assert terminal.body == {"to": "abandoned"} and alert.body == recovery_body(0)
-    assert terminal.ticket == alert.ticket == "work" and terminal.key is alert.key is None
-    assert (root / STATE / "worktrees/history").exists()
-    assert not (root / STATE / "box").exists()
-    assert audit_journal(j) == []
-    stages = Stages()
-
-    def prepare(checkout):
-        callback = stages(checkout)
-        ctx = runner.bind(checkout, FakeLLM([])).ctx
-
-        async def dispatch(work):
-            assert run_seq(checkout.journal.read(), work.stem) == 1
-            fresh = await stage_module.prepare_worktree(ctx, work.stem)
-            assert fresh.exists() and not (fresh / "half-done.py").exists()
-            return await callback(work)
-
-        dispatch.stages = callback.stages
-        return dispatch
-
-    assert cli(root, "run", "work", stages=prepare) == 0
-    assert stages.calls == ["work"] and stages.lock_held == [True]
-    assert last_states(j.read()) == {"history": "infra_error", "work": "merged"}

@@ -5,7 +5,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from tempo import __main__ as cli, runner
+from tempo import __main__ as cli
 from tempo.__main__ import _status, main
 from tempo.box import Box, Resolution
 from tempo.storm import storm_producer
@@ -13,13 +13,14 @@ from tempo.git import Git
 from tempo.journal import EventType, Journal
 from tempo.llm import FakeLLM
 from tempo.lockfile import Lockfile
+from tempo.mergequeue import MergeQueue
 from tempo.retro import Retro, RetroArtifact, measurements, production_evidence, project_window, render_report
 from tempo.seams import LocalFileSystem, SubprocessExec
 from tempo.specs import load_spec
 from tempo.status import project, render
 from tests.test_cli import ENV
 from tests.support import Clock, make_root
-from tests.test_retro_box import PROPOSAL
+from tests.support import PROPOSAL
 from tests.test_retro import completed, merged, rig
 from tests.test_scorecard import invoice, review, rows
 from tempo.checkout import SPECS_DIR
@@ -90,7 +91,7 @@ def test_status_current_window_scorecard(tmp_path):
     merged(c.journal, "current-24", head)
     merged(c.journal, "current-24", head)
     c.journal.append(EventType.SIGNAL, {"signal": "rework_order", "attempt": 1}, ticket="current-24")
-    writer.queue._facts("current-24", set(), set(), red=["red.py"])
+    MergeQueue(writer.ctx, escalate=lambda event: None, control=None)._facts("current-24", set(), set(), red=["red.py"])
     c.journal.append(EventType.STATE_TRANSITION, {"to": "gate_failed", "reason": "diff_budget"}, ticket="failed")
     c.journal.append(EventType.EFFECT_INTENT, {}, key="retro/2")
     status = asyncio.run(_status(c))
@@ -189,7 +190,6 @@ def test_status_preserves_sections_and_is_write_free(tmp_path, monkeypatch, caps
     monkeypatch.setattr(FakeLLM, "call", forbidden)
     monkeypatch.setattr(CommandNotifications, "notify", forbidden)
     monkeypatch.setattr(Retro, "__call__", forbidden)
-    monkeypatch.setattr(runner, "bind", forbidden)
     for name in ("enqueue", "record_rereport", "record_verdict", "resolve", "recover"):
         monkeypatch.setattr(Box, name, forbidden)
     git_run = Git._run
@@ -197,9 +197,9 @@ def test_status_preserves_sections_and_is_write_free(tmp_path, monkeypatch, caps
         assert args[0] in {"show", "rev-parse"}
         return await git_run(git, repo, *args)
     monkeypatch.setattr(Git, "_run", read_only)
-    assert main(["status"], cwd=c.repo, env=ENV, clock=c.clock, pipeline=forbidden) == 0
+    assert main(["status"], cwd=c.repo, env=ENV, clock=c.clock) == 0
     first = capsys.readouterr().out
     assert first.split("\n\ncurrent-window scorecard:")[0] + "\n" == legacy
-    assert main(["status"], cwd=c.repo, env=ENV, clock=c.clock, pipeline=forbidden) == 0
+    assert main(["status"], cwd=c.repo, env=ENV, clock=c.clock) == 0
     assert capsys.readouterr().out == first
     assert {p: p.read_bytes() for p in c.repo.rglob("*") if p.is_file()} == before

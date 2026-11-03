@@ -5,16 +5,18 @@ from types import SimpleNamespace
 import pytest
 
 from tempo import __main__ as cli
+from tempo.checkout import Checkout
 from tempo.config import load_config
 from tempo.effects import Effects
 from tempo.enginelog import EngineLog
+from tempo.git import Git
 from tempo.journal import EventType, Journal
 from tempo.notify import NOTIFY_RETRY_S, NotificationReconciler, notification_key, send
 from tempo.redact import Redactor
-from tempo.seams import CommandNotifications, NotificationFailed, SubprocessExec
+from tempo.seams import CommandNotifications, LocalFileSystem, NotificationFailed, SubprocessExec
 from tests.test_config import VALID
-from tests.test_scheduler import Time
-from tests.test_scheduler import turn
+from tests.support import Time
+from tests.support import turn
 
 
 @pytest.mark.asyncio
@@ -75,10 +77,10 @@ async def test_notify_seam_uses_argv_and_ambient_env(tmp_path):
     clock = Time()
     journal = Journal(tmp_path / "state", clock)
     work = SubprocessExec()
-    checkout = SimpleNamespace(config=config, repo=tmp_path, env=env, exec_=work, journal=journal, clock=clock)
+    checkout = Checkout(repo=tmp_path, config=config, env=env, exec_=work, git=Git(work, env=env, timeout=30),
+                        journal=journal, fs=LocalFileSystem(), clock=clock)
+    seam = cli.build_tools(checkout, config_path=None).notifications
     log = EngineLog(tmp_path / "engine.log", Redactor({}), clock)
-    reconciler = cli.build_notifications(checkout, config_path=None, log=log)
-    seam = reconciler.compose(config)
     assert isinstance(seam, CommandNotifications)
     assert seam.exec_ is not work
     assert seam.cwd == tmp_path and seam.timeout == 30

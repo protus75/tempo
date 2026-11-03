@@ -130,11 +130,8 @@ def test_doctor_failures(root, capsys, monkeypatch, failure):
 @pytest.mark.parametrize("history", ["absent", "empty", "torn", "corrupt", "held", "idle"])
 def test_doctor_is_read_only(root, monkeypatch, capsys, history):
     import tempo.__main__ as module
-    from tempo import runner
     def forbidden(*args, **kwargs):
         pytest.fail("doctor invoked a writer or model")
-    monkeypatch.setattr(runner, "bind", forbidden)
-    monkeypatch.setattr(module, "build_control", forbidden)
     rendered(root)
     holder = Lockfile(root / ".tempo/state", instance_id="original", clock=Clock())
     if history in {"held", "idle"}:
@@ -154,7 +151,7 @@ def test_doctor_is_read_only(root, monkeypatch, capsys, history):
     before = snapshot(root)
     monkeypatch.setattr(Lockfile, "acquire", forbidden)
     try:
-        assert main(["doctor"], cwd=root, env=ENV, clock=Clock(), pipeline=forbidden) == (
+        assert main(["doctor"], cwd=root, env=ENV, clock=Clock()) == (
             2 if history in {"held", "corrupt"} else 0)
         assert snapshot(root) == before
         if history == "absent":

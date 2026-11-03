@@ -547,7 +547,7 @@ class Tools:
 
     async def _decide(self, stem: str, lessons: str, dispatch: Dispatch, *,
                       rung: dict[str, str] | None = None) -> dict[str, Any]:
-        """What `runner.drive` did after a failure: harvest, caps, lessons, the terminal, the worktree."""
+        """What chupa's `runner.drive` did after a failure: harvest, caps, lessons, the terminal, the worktree."""
         _need(lessons)
         _, attempt = self._running(stem)
         failure = self._failure(stem)

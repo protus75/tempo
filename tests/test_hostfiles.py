@@ -227,49 +227,6 @@ def test_core_classifier_is_pure(monkeypatch):
             assert [hostfiles.classify_core(data) for data in samples] == expected
 
 
-@pytest.mark.parametrize("mode", ["inline", "queue"])
-def test_core_drift_reachable_from_production_gates(root, monkeypatch, mode):
-    from tempo import merge, stages, runner
-    from tempo.gates import run_gates
-    from tempo.llm import FakeLLM
-    from tests.test_cli import ENV, Clock, write, ticket as ticket_text
-    from tempo.__main__ import main
-
-    calls, selections = [], []
-    classify = hostfiles.classify_core
-    def classified(*args, **kwargs):
-        calls.append(args[0])
-        return classify(*args, **kwargs)
-    monkeypatch.setattr(hostfiles, "classify_core", classified)
-    def observe(gates, *args, **kwargs):
-        gates = tuple(gates)
-        selections.append(tuple(g.code for g in gates))
-        return run_gates(gates, *args, **kwargs)
-    monkeypatch.setattr(stages, "run_gates", observe)
-    monkeypatch.setattr(merge, "run_gates", observe)
-    import tempo.mergequeue as queue_module
-    monkeypatch.setattr(queue_module, "run_gates", observe)
-    if mode == "inline":
-        write(root, "work", ticket_text())
-        llm = FakeLLM([agent({"tempo/thing.py": "ok\n"}), verdict()])
-        assert main(["run", "work"], cwd=root, env=ENV, clock=Clock(),
-                    pipeline=lambda checkout: runner.bind(checkout, llm)) == 0
-    else:
-        from tests.test_serve import admission_graph, admission_ticket, start_admission, until, finish
-        async def queued():
-            rig = await admission_graph(root, monkeypatch, {"work": {"tempo/thing.py": "ok\n"}})
-            admission_ticket(root, "work")
-            run = await start_admission(rig, monkeypatch)
-            try:
-                await until(rig, lambda: ("work", "merged") in rig.returns)
-                assert rig.owner.queue.ctx is rig.contexts["work"]
-            finally:
-                await finish(rig, run)
-        asyncio.run(queued())
-    assert sum("core_drift" in codes for codes in selections) == 2
-    assert len(calls) >= 2 and all(hostfiles.parse(data) is not None for data in calls)
-
-
 def test_core_activation_first_adoption():
     for name in ("CLAUDE.md", "AGENTS.md"):
         adopted = (REPO / name).read_bytes()

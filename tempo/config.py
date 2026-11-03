@@ -125,16 +125,11 @@ class Merge(_Strict):
     strategies: list[Annotated[RegenerateStrategy | UnionStrategy, Field(discriminator="strategy")]] = []
 
 
-class Scheduler(_Strict):
-    max_unmerged: Count = 2
-
-
 class Caps(_Strict):
     decisions: Count = 6
     retry: Count = 6
     premise_bounce: Count = 2
     infra: Count = 6
-    quarantine: Count = 5
     poison: Count = 2
 
 
@@ -155,7 +150,6 @@ class Config(_Strict):
     orchestrator: Orchestrator
     review: Review
     merge: Merge
-    scheduler: Scheduler = Scheduler()
     caps: Caps = Caps()
     circuit_breaker: CircuitBreaker = CircuitBreaker()
     tickets: Tickets = Tickets()

@@ -6,14 +6,13 @@ from unittest.mock import Mock
 
 import pytest
 
-from tempo import __main__ as cli, control, daemon, journal as journal_module, runner
+from tempo import __main__ as cli, control, journal as journal_module
 from tempo.box import Box, BoxError, Resolution, Verdict
 from tempo.effects import Effects
 from tempo.journal import EventType, Journal, JournalCorruption
 from tempo.llm import FakeLLM
 from tempo.seams import LocalFileSystem
 from tempo.storm import StormLedger
-from tests.test_daemon_composition import CoreRig
 from tests.test_journal import FakeClock, T0
 from tests.test_mergequeue import ctx as admission_context  # noqa: F401
 from tests.test_stages import STEM, TICKET, agent, verdict
@@ -232,51 +231,3 @@ def test_box_operations_without_arrivals_are_idle(tmp_path, monkeypatch):
     clock.assert_not_called()
 
 
-def assert_production_reachable(tmp_path, monkeypatch):
-    hook = Mock(wraps=storm.storm_producer)
-    monkeypatch.setattr(storm, "storm_producer", hook)
-    rig = CoreRig(tmp_path)
-    hook.assert_called_once()
-    assert rig.journal.read() == [] and rig.exec.calls == []
-    return hook
-
-
-@pytest.mark.parametrize("verb", ["run"])
-def test_storm_producer_hook_is_active(tmp_path, monkeypatch, admission_context, verb):
-    composition = tmp_path / "composition"
-    composition.mkdir()
-    hook = assert_production_reachable(composition, monkeypatch)
-    source = admission_context
-    source.fs.write(source.repo / f"tickets/{STEM}/ticket.md", TICKET.format(bypass="").encode())
-    implement = agent({"tempo/thing.py": "ok\n"})
-
-    def report(request):
-        reply = json.loads(implement(request).removeprefix("```json\n").removesuffix("\n```"))
-        reply["second_problems"] = [{"summary": "ordinary production arrival"}]
-        return "```json\n" + json.dumps(reply) + "\n```"
-
-    llm = FakeLLM([report, verdict(), '{"proposals": []}'])  # drain: the quiescence retro follows the merge
-    assert cli.main([verb, STEM] if verb == "run" else [verb], cwd=source.repo, env=source.env,
-                    clock=source.driver.clock, pipeline=lambda c: runner.bind(c, llm)) == 0
-    messages = Box(source.config.state_dir / "box", source.fs).messages()
-    assert len(messages) == 1 and messages[0].summary == "ordinary production arrival"
-    occurrences = [e for e in source.driver.journal.read() if e.body.get("kind") == "storm_occurrence"]
-    assert len(occurrences) == 1
-    assert occurrences[0].body["emitting_stage"] == "implement"
-    assert occurrences[0].body["emitting_origin"] == STEM
-    assert hook.call_count > 1
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("arrival producer invoked notify/dispatch")
-
-    monkeypatch.setattr(Effects, "run", forbidden)
-    monkeypatch.setattr(control, "publish_request", forbidden)
-    monkeypatch.setattr(daemon.DaemonAdmission, "dispatch", forbidden)
-    box, journal, clock = compose(tmp_path / "direct")
-    for n in range(12):
-        box.enqueue(**ARRIVAL, occurrence_id=str(n))
-    assert list(StormLedger(journal=journal, clock=clock).holds().values()) == ["one"]
-    assert len(box.messages()) == 2 and StormLedger(journal=journal, clock=clock).count(SIG) == 12
-    assert len([e for e in journal.read() if e.body.get("kind") == "storm_breaker_trip"]) == 1
-    assert len([e for e in journal.read() if e.body.get("kind") == "storm_occurrence"]) == 13
-    assert set(p.name for p in (tmp_path / "direct").iterdir()) == {"box", "journal"}

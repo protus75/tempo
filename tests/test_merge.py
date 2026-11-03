@@ -17,7 +17,6 @@ from tempo.journal import EventType
 from tempo.llm import FakeLLM
 from tempo.merge import Admission, AdmissionBoundary, Candidate, PostRebaseGate, merge
 from tempo.mergequeue import CONFLICT_FACTS, MergeQueue
-from tempo import runner
 from tempo.seams import LocalFileSystem, SubprocessExec
 from tempo.stages import StageContext, run_stages
 from tempo.tickets import validate_ticket
@@ -109,52 +108,6 @@ def test_a_passing_ticket_squash_merges_with_trailers_and_journals_merged(repo):
     assert not ctx.worktree(STEM).exists()
     assert git(repo, "branch", "--list", STEM) == ""
     assert git(repo, "status", "--porcelain") == ""
-
-
-@pytest.mark.parametrize("verb", ["bind", "run"])
-def test_bootstrap_pipeline_keeps_inline_admission(repo, monkeypatch, verb):
-    author(repo)
-    source = context(repo, [])
-    checkout = Checkout(repo, source.config, source.env, source.exec_, source.git,
-                               source.driver.journal, source.fs, source.driver.clock, source.driver.sleep)
-    from tempo.__main__ import build_control
-    checkout = dataclasses.replace(checkout, control=build_control(checkout))
-    llm = FakeLLM([agent({"tempo/thing.py": "ok\n"}), verdict()])
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("bootstrap dispatch used the composed queue")
-
-    monkeypatch.setattr(MergeQueue, "offer", forbidden)
-    monkeypatch.setattr(MergeQueue, "process", forbidden)
-    calls = []
-    original = runner.merge
-
-    async def inline(ctx, ticket, *, attempt):
-        calls.append((ctx, ticket, attempt))
-        return await original(ctx, ticket, attempt=attempt)
-
-    monkeypatch.setattr(runner, "merge", inline)
-    def pipeline(local):
-        dispatch = runner.bind(local, llm)
-        dispatch.queue.paused, dispatch.queue.hold_id = True, "daemon-only-hold"
-        local.control.hold(dispatch.queue.hold_id)
-        return dispatch
-    ticket = validate_ticket(STEM, (repo / "tickets" / STEM / "ticket.md").read_text(), repo)
-    if verb == "bind":
-        assert asyncio.run(pipeline(checkout)(ticket)) == "merged"
-    else:
-        from tempo.__main__ import main
-        assert main(["run", STEM], cwd=repo, env=ENV,
-                    clock=checkout.clock, pipeline=pipeline) == 0
-    [(ctx, original_ticket, attempt)] = calls
-    assert original_ticket.stem == ticket.stem and attempt == 0
-    assert len(merged_events(ctx)) == 1
-    assert not any(e.body.get("kind") == CONFLICT_FACTS for e in ctx.driver.journal.read())
-    assert (repo / "tempo/thing.py").read_text() == "ok\n" and not ctx.worktree(STEM).exists()
-
-
-def test_run_keeps_inline_admission(repo, monkeypatch):
-    test_bootstrap_pipeline_keeps_inline_admission(repo, monkeypatch, "run")
 
 
 def test_daemon_prechecks_precede_offer(repo, monkeypatch):
@@ -335,23 +288,6 @@ def test_a_conflicted_rebase_is_aborted_and_refused(repo):
     assert "re-branches from current main" in result.findings[0].paved_road
     assert git(repo, "rev-parse", STEM).strip() == head  # never left mid-rebase
     assert not (repo / ".git" / "worktrees" / STEM / "rebase-merge").exists()
-
-
-def test_pipeline_requires_supplied_control(repo):
-    from tempo import merge as owner
-    from tempo.__main__ import build_control
-    ctx = context(repo, [])
-    checkout = Checkout(repo, ctx.config, ctx.env, ctx.exec_, ctx.git,
-                               ctx.driver.journal, ctx.fs, ctx.driver.clock, ctx.driver.sleep)
-    consumer = build_control(checkout)
-    with pytest.raises(TypeError):
-        owner.compose_pipeline(ctx, escalate=lambda _: None)
-    with pytest.raises(Refusal, match="build_control.*Checkout.control"):
-        owner.compose_pipeline(ctx, escalate=lambda _: None, control=None)
-    queue = owner.compose_pipeline(ctx, escalate=lambda _: None, control=consumer)
-    assert queue.control is consumer and queue.hold_id is None
-    assert MergeQueue(ctx, escalate=lambda _: None).control is None
-    assert ctx.driver.journal.read() == []
 
 
 @pytest.mark.asyncio

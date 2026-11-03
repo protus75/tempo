@@ -13,7 +13,7 @@ from tempo.llm import FakeLLM
 from tempo.lockfile import Lockfile
 from tempo.seams import LocalFileSystem
 from tests.test_cli import ENV, git_out
-from tests.support import Clock, commit_ticket, confirmed, make_root
+from tests.support import Clock, commit_ticket, confirmed, make_root, triage
 
 
 def root_with_box(tmp_path: Path) -> tuple[Path, Box]:
@@ -74,7 +74,7 @@ def requisition_reply(verdict: str, findings: list | None = None) -> str:
 
 
 def run(root: Path, monkeypatch, llm: FakeLLM) -> int:
-    return main(["triage"], cwd=root, env=ENV, clock=Clock(), llm=llm)
+    return triage(root, llm)
 
 
 def subjects(root: Path) -> list[str]:
@@ -323,36 +323,36 @@ def test_reopened_message_bypasses_its_tombstone(tmp_path, monkeypatch, recorded
 
 
 async def escape_rig(tmp_path):
-    from tempo import runner, stages
+    from tempo import stages
+    from tempo.merge import merge
     from tempo.tickets import validate_ticket
-    from tests.support import pause_checkout
+    from tests.support import checkout_at, stage_context
     from tests.test_stages import implement_reply
     root, box = root_with_box(tmp_path)
-    c = pause_checkout(root)
-    writer = runner.bind(c, FakeLLM([implement_reply()]))
+    c = checkout_at(root)
+    ctx = stage_context(c, FakeLLM([implement_reply()]))
     text = confirmed().replace("uv run pytest", "true").replace("kind: feature",
         "kind: feature\ngate_bypass:\n  - {code: scope_fence, reason: witnessed fixture}")
     commit_ticket(root, "candidate", text)
     ticket = validate_ticket("candidate", text, root)
-    slip = (await stages.implement(writer.ctx, ticket, attempt=0)).artifact
-    wt = writer.ctx.worktree(ticket.stem)
+    slip = (await stages.implement(ctx, ticket, attempt=0)).artifact
+    wt = ctx.worktree(ticket.stem)
     for path in ("tempo/thing.py", "outside.py"):
         c.fs.write(wt / path, b"changed\n")
     await c.git.add(wt, ["tempo/thing.py", "outside.py"])
     await c.git.commit(wt, "code")
-    checked = (await stages.check(writer.ctx, ticket, slip, attempt=0)).artifact
+    checked = (await stages.check(ctx, ticket, slip, attempt=0)).artifact
     assert checked.passed and "scope_fence" in checked.bypassed
-    writer.stages.driver.llm = FakeLLM([requisition_reply("approve")])
-    review = (await stages.review(writer.ctx, ticket, checked, attempt=0)).artifact
+    ctx.driver.llm = FakeLLM([requisition_reply("approve")])
+    review = (await stages.review(ctx, ticket, checked, attempt=0)).artifact
     # A process commit forces the production admission's clean-rebase approval carry.
     c.fs.write(root / "tickets/process/note.md", b"process\n")
     await c.git.add(root, ["tickets/process/note.md"])
     await c.git.commit(root, "process")
-    writer.queue.offer(ticket, attempt=0)
-    [admitted] = await writer.queue.process()
+    admitted = await merge(ctx, ticket, attempt=0)
     assert admitted.outcome == "ok", admitted.findings
     assert admitted.artifact.reviewed_sha == review.reviewed_sha == checked.produced_at_sha
-    return c, writer, box, checked, admitted.artifact
+    return c, ctx, box, checked, admitted.artifact
 
 
 async def escape_report(c, *, commit, paths=(), stem="repair"):
@@ -384,7 +384,7 @@ def test_resolved_bug_escape_attribution(tmp_path):
     from tempo.retro import production_evidence, project_window
     from tempo.scorecard import project_scorecard
     async def scenario():
-        c, writer, box, checked, admitted = await escape_rig(tmp_path)
+        c, ctx, box, checked, admitted = await escape_rig(tmp_path)
         # Later evidence, unfinished lifts, and mutable copies cannot replace admission custody.
         c.journal.append(EventType.EFFECT_INTENT, {"result": {"commit": "missing"}},
                          ticket="candidate", key="ticket-plane/candidate/0/checks")
@@ -411,20 +411,20 @@ def test_resolved_bug_escape_attribution(tmp_path):
         # Crossing a retro boundary does not require a current-window Check for an old admission.
         c.journal.append(EventType.EFFECT_COMPLETION, {"result": {}}, key="retro/1")
         other = message.model_copy(update={"id": "second-report"})
-        await triage.attribute_escape(c, writer.stages.driver, other)
+        await triage.attribute_escape(c, ctx.driver, other)
         window = project_window(c.journal.read())
         await production_evidence(window, c)
         assert all(r.escapes == 1 and r.evaluated_tickets == 0 for r in project_scorecard(window).surfaces)
         no_paths = message.model_copy(update={"id": "wrong-path", "report": message.report.model_copy(
             update={"report": message.report.report.model_copy(update={"implicated_paths": ["unrelated.py"]})})})
-        result = await triage.attribute_escape(c, writer.stages.driver, no_paths)
+        result = await triage.attribute_escape(c, ctx.driver, no_paths)
         assert result["matches"] == [] and "unavailable" in result["confidence_note"]
         base = await c.git.rev_parse(c.repo, f"{admitted.commit}~1")
         end = await c.git.rev_parse(c.repo, "HEAD")
         ranged = message.model_copy(update={"id": "bounded-range", "report": message.report.model_copy(
             update={"report": message.report.report.model_copy(update={"app_commit": f"{base}..{end}",
                                                                        "implicated_paths": []})})})
-        bounded = await triage.attribute_escape(c, writer.stages.driver, ranged)
+        bounded = await triage.attribute_escape(c, ctx.driver, ranged)
         result_match = attribution(c)[0].body["result"]["matches"]
         assert bounded["matches"] == result_match
         assert "Bounded-range" in bounded["confidence_note"] and "without path narrowing" in bounded["confidence_note"]
@@ -447,7 +447,7 @@ def test_escape_attribution_retry(tmp_path, monkeypatch):
     from tempo.effects import Effects
     from tempo.git import GitError
     async def scenario():
-        c, writer, box, checked, admitted = await escape_rig(tmp_path)
+        c, ctx, box, checked, admitted = await escape_rig(tmp_path)
         original = c.git.first_parent_squashes
         async def failure(*args):
             raise GitError(["git"], 1, "", "unreadable repository")
@@ -489,17 +489,17 @@ def test_escape_attribution_retry(tmp_path, monkeypatch):
 def test_escape_unattributed_reports(tmp_path):
     from tempo import triage
     async def scenario():
-        c, writer, box, checked, admitted = await escape_rig(tmp_path)
+        c, ctx, box, checked, admitted = await escape_rig(tmp_path)
         c, message, _ = await escape_report(c, commit="f" * 40)
         assert attribution(c)[0].body["result"]["matches"] == []
         assert attribution(c)[0].body["result"]["confidence_note"]
         missing = message.model_copy(update={"id": "missing-report", "report": None})
-        result = await triage.attribute_escape(c, writer.stages.driver, missing)
+        result = await triage.attribute_escape(c, ctx.driver, missing)
         assert result["matches"] == [] and "missing" in result["confidence_note"]
         # Missing admission and absent Author completion provide no surface evidence.
         for stem in ("missing", "candidate"):
             item = message.model_copy(update={"id": stem, "resolution": Resolution(kind="ticket", link=stem)})
-            result = await triage.attribute_escape(c, writer.stages.driver, item)
+            result = await triage.attribute_escape(c, ctx.driver, item)
             assert result["matches"] == [] and result["confidence_note"]
         before = len(attribution(c))
         for kind in ("decision", "tombstone"):

@@ -11,6 +11,7 @@ from tempo.driver import LlmStage
 from tempo.journal import EventType
 from tempo.llm import FakeLLM
 from tempo.lockfile import Lockfile
+from tempo.mergequeue import MergeQueue
 from tempo.retro import RetroArtifact, measurements, production_evidence, project_window, render_report
 from tempo.scorecard import project_scorecard
 from tempo.stages import PackingSlip, check, implement
@@ -231,7 +232,7 @@ def test_scorecard_totals_and_rendering(tmp_path, monkeypatch):
     merged(c.journal, "one", head)
     merged(c.journal, "one", head)
     c.journal.append(EventType.SIGNAL, {"signal": "rework_order", "attempt": 1}, ticket="one")
-    writer.queue._facts("one", set(), set(), red=["red.py"])
+    MergeQueue(writer.ctx, escalate=lambda event: None, control=None)._facts("one", set(), set(), red=["red.py"])
     c.journal.append(EventType.STATE_TRANSITION, {"to": "gate_failed"}, ticket="other")
     window = project_window(c.journal.read())
     evidence = asyncio.run(production_evidence(window, c))

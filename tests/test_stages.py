@@ -33,11 +33,10 @@ from tempo.tickets import validate_ticket
 
 
 def test_retro_driver_access_is_public_and_read_only(repo):
-    from tempo import runner
     from tempo.retro import Retro, RetroConstructionError
-    from tests.support import pause_checkout
-    checkout = pause_checkout(repo)
-    writer = runner.bind(checkout, FakeLLM([]))
+    from tests.support import Pipeline, checkout_at
+    checkout = checkout_at(repo)
+    writer = Pipeline(checkout, FakeLLM([]))
     driver = writer.stages.driver
     assert Retro(checkout, writer).driver() is driver
     with pytest.raises(AttributeError):

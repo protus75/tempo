@@ -84,41 +84,6 @@ class Clock:
         return datetime(2026, 1, 1, tzinfo=UTC)
 
 
-def with_retro_driver(checkout, dispatch):
-    from tempo import runner
-    from tempo.llm import FakeLLM
-    dispatch.stages = runner.bind(checkout, FakeLLM(['{"proposals": []}'] * 10)).stages
-    return dispatch
-
-
-class Stages:
-    """Scripted fake for the stage-dispatch seam: records each dispatched ticket and the lock state."""
-
-    def __init__(self, terminal: str = "merged") -> None:
-        self.terminal = terminal
-        self.calls: list[str] = []
-        self.lock_held: list[bool] = []
-        self.checkout = None
-
-    def __call__(self, checkout):
-        self.checkout = checkout
-
-        async def dispatch(t):
-            self.calls.append(t.stem)
-            contender = Lockfile(checkout.config.state_dir, instance_id="contender", clock=Clock())
-            try:
-                contender.acquire()
-            except LockHeld:
-                self.lock_held.append(True)
-            else:
-                contender.release()
-                self.lock_held.append(False)
-            checkout.journal.append(EventType.STATE_TRANSITION, {"to": self.terminal}, ticket=t.stem)
-            return self.terminal
-
-        return with_retro_driver(checkout, dispatch)
-
-
 @pytest.fixture
 def root(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
@@ -138,8 +103,8 @@ def root(tmp_path: Path) -> Path:
     return root
 
 
-def cli(root: Path, *argv: str, stages=None) -> int:
-    return main(list(argv), cwd=root, env=ENV, clock=Clock(), pipeline=stages or Stages())
+def cli(root: Path, *argv: str) -> int:
+    return main(list(argv), cwd=root, env=ENV, clock=Clock())
 
 
 def journal(root: Path) -> Journal:
@@ -266,89 +231,6 @@ def test_status_escape_projection(tmp_path, monkeypatch, capsys):
 # --- run ----------------------------------------------------------------------------------------
 
 
-def test_run_dispatches_the_locked_validated_stem_to_the_stage_seam(root):
-    write(root, "add-thing", ticket())
-    stages = Stages()
-    assert cli(root, "run", "add-thing", stages=stages) == 0
-    assert stages.calls == ["add-thing"]
-    assert stages.lock_held == [True]  # the one process holding the lock is the one dispatching
-    assert git_out(root, "status", "--porcelain") == ""  # intake committed the ticket before dispatch
-    assert "tempo(add-thing): ticket" in git_out(root, "log", "--format=%s")
-    events = [(e.type, e.ticket, e.body.get("to")) for e in journal(root).read()]
-    assert (EventType.STATE_TRANSITION, "add-thing", "running") in events
-    assert events.index((EventType.STATE_TRANSITION, "add-thing", "running")) < events.index(
-        (EventType.STATE_TRANSITION, "add-thing", "merged"))
-    Lockfile(root / ".tempo" / "state", instance_id="after", clock=Clock()).acquire()  # released on exit
-
-
-def test_run_exits_1_on_a_non_ok_terminal(root):
-    write(root, "add-thing", ticket())
-    assert cli(root, "run", "add-thing", stages=Stages("gate_failed")) == 1
-    assert (root / "tickets" / "add-thing" / "ticket.md").is_file()
-
-
-def test_run_refused_when_the_lockfile_is_already_held(root, capsys):
-    write(root, "add-thing", ticket())
-    holder = Lockfile(root / ".tempo" / "state", instance_id="other", clock=Clock())
-    holder.acquire()
-    try:
-        stages = Stages()
-        assert cli(root, "run", "add-thing", stages=stages) == 2
-    finally:
-        holder.release()
-    assert stages.calls == []
-    assert "other" in capsys.readouterr().err  # the holder identity names who to wait for
-    assert git_out(root, "status", "--porcelain").startswith("??")  # intake never ran: nothing committed
-    assert journal(root).read() == []
-
-
-def test_run_refuses_an_invalid_ticket(root, capsys):
-    write(root, "add-thing", ticket().replace("## Verification", "## Verify"))
-    stages = Stages()
-    assert cli(root, "run", "add-thing", stages=stages) == 2
-    assert stages.calls == []
-    assert "ticket_schema" in capsys.readouterr().err
-    assert not any(e.type == EventType.STATE_TRANSITION for e in journal(root).read())
-
-
-def test_run_refuses_a_missing_stem(root, capsys):
-    stages = Stages()
-    assert cli(root, "run", "no-such", stages=stages) == 2
-    assert stages.calls == []
-    assert "new no-such" in capsys.readouterr().err
-
-
-def test_run_refuses_an_unmerged_dependency(root, capsys):
-    write(root, "first", ticket())
-    write(root, "second", ticket(depends="- first"))
-    stages = Stages()
-    assert cli(root, "run", "second", stages=stages) == 2
-    assert stages.calls == []
-    assert "run first" in capsys.readouterr().err
-    assert cli(root, "run", "first", stages=stages) == 0
-    assert cli(root, "run", "second", stages=stages) == 0
-    assert stages.calls == ["first", "second"]
-
-
-def test_run_refuses_a_merged_ticket(root, capsys):
-    write(root, "add-thing", ticket())
-    stages = Stages()
-    assert cli(root, "run", "add-thing", stages=stages) == 0
-    assert cli(root, "run", "add-thing", stages=stages) == 2
-    assert stages.calls == ["add-thing"]
-    assert "merged" in capsys.readouterr().err
-
-
-def test_run_refused_before_the_lock_when_the_pipeline_refuses(root, capsys):
-    def unbuilt(checkout):
-        raise Refusal("pipeline missing", "build it")
-
-    write(root, "add-thing", ticket())
-    assert main(["run", "add-thing"], cwd=root, env=ENV, clock=Clock(), pipeline=unbuilt) == 2
-    assert "pipeline missing -- build it" in capsys.readouterr().err
-    assert journal(root).read() == []
-
-
 def test_config_error_exits_2(root, capsys):
     (root / "config.yaml").write_text("schema_version: 1\n")
     assert cli(root, "status") == 2
@@ -385,117 +267,10 @@ def released(root):
     lock.release()
 
 
-@pytest.mark.parametrize("completed_report", [False, True])
-def test_retro_no_merge(root, capsys, completed_report):
-    if completed_report:
-        journal(root).append(EventType.STATE_TRANSITION, {"to": "merged"}, ticket="one")
-        assert cli(root, "retro") == 0
-        capsys.readouterr()
-    def factory(c):
-        class Dispatch:
-            async def prepare(self):
-                pytest.fail("unselected pipeline prepared")
-            async def __call__(self, ticket):
-                pytest.fail("ticket dispatched")
-        return Dispatch()
-    head = git_out(root, "rev-parse", "HEAD")
-    assert cli(root, "retro", stages=factory) == 0
-    assert capsys.readouterr().out == "retro: no merge since the latest completed report\n"
-    assert git_out(root, "rev-parse", "HEAD") == head
-    assert (root / "tickets/retro").exists() == completed_report
-    released(root)
-
-
-def test_retro_success(root, capsys, monkeypatch):
-    from tempo import runner
-    from tempo.llm import FakeLLM
-    from tempo.retro import project_window
-    import tempo.__main__ as module
-    llm = FakeLLM(['{"proposals": []}'])
-
-    class Held:
-        kind = "cli"
-
-        async def call(self, request):
-            contender = Lockfile(root / ".tempo/state", instance_id="model", clock=Clock())
-            with pytest.raises(LockHeld):
-                contender.acquire()
-            return await llm.call(request)
-
-        def abort_current(self):
-            pass
-
-    journal(root).append(EventType.STATE_TRANSITION, {"to": "merged"}, ticket="one")
-    assert module.main(["retro"], cwd=root, env=ENV, clock=Clock(),
-                       pipeline=lambda c: runner.bind(c, Held())) == 0
-    assert capsys.readouterr().out == "retro: committed tickets/retro/000001.md\n"
-    assert len(llm.requests) == 1
-    assert project_window(journal(root).read()).boundary == "retro/1"
-    completion = next(e for e in journal(root).read() if e.key == "retro/1" and e.type == EventType.EFFECT_COMPLETION)
-    assert completion.body == {"result": {"commit": git_out(root, "rev-parse", "HEAD").strip()}}
-    assert git_out(root, "show", "--format=", "--name-only", "HEAD").splitlines() == ["tickets/retro/000001.md"]
-    released(root)
-
-
-@pytest.mark.parametrize("suppressed, later_merge", [(False, False), (True, False), (True, True)])
-def test_retro_no_commit(root, capsys, monkeypatch, suppressed, later_merge):
-    from tempo import runner
-    from tempo.llm import FakeLLM
-    llm = FakeLLM([RuntimeError("failed")])
-    j = journal(root)
-    j.append(EventType.STATE_TRANSITION, {"to": "merged"}, ticket="one")
-    if suppressed:
-        j.append(EventType.SIGNAL, {"kind": "retro_failed", "window_boundary": "initial"}, key="retro-failed/initial/forced")
-    def factory(c):
-        writer = runner.bind(c, llm)
-        writer.stages.driver.retry_cap = 0
-        return writer
-    if later_merge:
-        j.append(EventType.STATE_TRANSITION, {"to": "merged"}, ticket="later")
-    head = git_out(root, "rev-parse", "HEAD")
-    assert cli(root, "retro", stages=factory) == 1
-    assert git_out(root, "rev-parse", "HEAD") == head
-    assert capsys.readouterr().out == "retro: no report committed; inspect status and the Suggestion Box\n"
-    assert len(llm.requests) == (0 if suppressed and not later_merge else 1)
-    assert not (root / "tickets/retro").exists()
-    released(root)
-
-
-@pytest.mark.parametrize("failure", ["lock", "config", "journal", "driver", "prepare"])
-def test_retro_refusals(root, capsys, failure):
-    j = journal(root)
-    j.append(EventType.STATE_TRANSITION, {"to": "merged"}, ticket="one")
-    holder = Lockfile(root / ".tempo/state", instance_id="other", clock=Clock())
-    if failure == "lock":
-        holder.acquire()
-    elif failure == "config":
-        (root / "config.yaml").write_text("schema_version: 1\n")
-    elif failure == "journal":
-        next(j.dir.glob("*.jsonl")).write_bytes(b"bad\n")
-    def factory(c):
-        class Dispatch:
-            async def prepare(self):
-                if failure == "prepare":
-                    raise Refusal("preflight failed", "repair provider and retry")
-            async def __call__(self, ticket):
-                pytest.fail("dispatched")
-        return Dispatch()
-    try:
-        assert cli(root, "retro", stages=factory) == 2
-        err = capsys.readouterr().err
-        assert "Traceback" not in err
-        assert {"lock": "wait", "config": "repair", "journal": "never hand-edited",
-                "driver": "construct the pipeline", "prepare": "repair provider"}[failure] in err
-    finally:
-        if holder.held:
-            holder.release()
-    released(root)
-
-
 def test_doctor_cli(root, capsys):
-    assert cli(root, "render", stages=lambda c: pytest.fail("pipeline constructed")) == 0
+    assert cli(root, "render") == 0
     capsys.readouterr()
-    assert cli(root, "doctor", stages=lambda c: pytest.fail("pipeline constructed")) == 0
+    assert cli(root, "doctor") == 0
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == "doctor: ok"
     assert [line.split(":", 1)[0] for line in lines[1:]] == [
@@ -553,7 +328,7 @@ def test_core_refusal_and_no_git(tmp_path, monkeypatch, capsys):
     before = {p: p.read_bytes() for p in tmp_path.iterdir()}
     def forbidden(*args, **kwargs):
         pytest.fail("core constructed git, journal, provider, pipeline, or gate work")
-    for name in ("Git", "Journal", "SubprocessExec", "build_control"):
+    for name in ("Git", "Journal", "SubprocessExec"):
         monkeypatch.setattr(module, name, forbidden)
     monkeypatch.setattr(gates, "run_gates", forbidden)
     replacements = []
@@ -568,7 +343,7 @@ def test_core_refusal_and_no_git(tmp_path, monkeypatch, capsys):
         original_replace(src, dst)
     monkeypatch.setattr(os, "replace", observe_replace)
     monkeypatch.setattr(module, "LocalFileSystem", LocalFileSystem)
-    assert main(["--config", str(config), "core"], cwd=tmp_path, env=ENV, pipeline=forbidden) == 2
+    assert main(["--config", str(config), "core"], cwd=tmp_path, env=ENV) == 2
     assert replacements == []
     assert {p: p.read_bytes() for p in tmp_path.iterdir()} == before
     error = capsys.readouterr().err
@@ -577,11 +352,11 @@ def test_core_refusal_and_no_git(tmp_path, monkeypatch, capsys):
     repaired = before[corrupt].replace(b"tempo:core", b"tempo&#58;core")
     corrupt.write_bytes(repaired)
     before[corrupt] = repaired
-    assert main(["core"], cwd=tmp_path, env=ENV, pipeline=forbidden) == 0
+    assert main(["core"], cwd=tmp_path, env=ENV) == 0
     assert replacements == [clean, corrupt]
     assert clean.read_bytes() == hostfiles.render(project)
     assert corrupt.read_bytes() == hostfiles.render(repaired)
-    assert main(["core"], cwd=tmp_path, env=ENV, pipeline=forbidden) == 0
+    assert main(["core"], cwd=tmp_path, env=ENV) == 0
     assert replacements == [clean, corrupt]
     assert {p.name for p in tmp_path.iterdir()} == {"config.yaml", "CLAUDE.md", "AGENTS.md"}
 
@@ -602,21 +377,21 @@ def test_migrate_config_before_load(tmp_path, monkeypatch, capsys, explicit):
     monkeypatch.setattr(module, "LocalFileSystem", lambda: fs)
     def forbidden(*args, **kwargs):
         pytest.fail("migration invoked git, process, provider, journal, or pipeline work")
-    for name in ("Git", "Journal", "SubprocessExec", "build_control"):
+    for name in ("Git", "Journal", "SubprocessExec"):
         monkeypatch.setattr(module, name, forbidden)
     args = (["--config", str(path)] if explicit else []) + ["migrate-config"]
-    assert main(args, cwd=tmp_path, env=ENV, pipeline=forbidden) == 0
+    assert main(args, cwd=tmp_path, env=ENV) == 0
     backup = path.with_name(path.name + ".bak")
     expected = CONFIG.encode()
     assert fs.writes == [(backup, original), (path, expected)]
     assert path.read_bytes() == expected
     assert backup.read_bytes() == original
-    assert main(args, cwd=tmp_path, env=ENV, pipeline=forbidden) == 0
+    assert main(args, cwd=tmp_path, env=ENV) == 0
     assert len(fs.writes) == 2
     assert path.read_bytes() == expected and backup.read_bytes() == original
     path.write_bytes(original + b"caps: {retry: 7}\n")
     before = path.read_bytes()
-    assert main(args, cwd=tmp_path, env=ENV, pipeline=forbidden) == 2
+    assert main(args, cwd=tmp_path, env=ENV) == 2
     assert "caps.retry" in capsys.readouterr().err
     assert len(fs.writes) == 2
     assert path.read_bytes() == before and backup.read_bytes() == original

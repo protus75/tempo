@@ -1,16 +1,25 @@
-"""Shared test helpers: a fake clock, a temp checkout, and committed tickets (carried from test_drain.py)."""
+"""Shared test helpers: fake clocks, temp checkouts, and committed tickets, carried from the scripted layer's
+tests (test_drain, test_terminal, test_scheduler, test_retro_box) when P5a deleted them."""
 
-from dataclasses import replace
-from datetime import UTC, datetime
+import ast
+import asyncio
+import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from tempo.__main__ import build_control
-from tempo.checkout import Checkout
+import pytest
+
+from tempo.checkout import SPECS_DIR, Checkout
+from tempo.driver import Driver
+from tempo.effects import Effects
 from tempo.git import Git
 from tempo.journal import Journal
+from tempo.lockfile import LockHeld, Lockfile
 from tempo.seams import LocalFileSystem, SubprocessExec
-from tests.test_cli import CONFIG, ENV, git_out, ticket, write
-from tests.test_stages import adopt_conduct
+from tempo.stages import StageContext, Stages
+from tempo.timers import Timers
+from tests.test_cli import CONFIG, ENV, TICKET as CLI_TICKET, git_out, ticket, write
+from tests.test_stages import CONFIG as STAGES_CONFIG, STEM, TICKET, adopt_conduct, git
 
 START = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -55,9 +64,142 @@ def journal(root: Path) -> Journal:
     return Journal(root / ".tempo" / "state", Clock())
 
 
-def pause_checkout(root):
+def checkout_at(root: Path) -> Checkout:
     from tempo.config import load_config
     process = SubprocessExec()
-    checkout = Checkout(root, load_config(None, cwd=root), ENV, process,
+    return Checkout(root, load_config(None, cwd=root), ENV, process,
                     Git(process, env=ENV, timeout=30), journal(root), LocalFileSystem(), Clock())
-    return replace(checkout, control=build_control(checkout))
+
+
+# --- carried from test_terminal.py, test_scheduler.py, and test_retro_box.py with the scripted layer ---------
+
+
+def clock() -> datetime:
+    return datetime(2026, 10, 5, tzinfo=UTC)
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    (root / "tempo").mkdir(parents=True)
+    (root / "tempo" / "thing.py").write_text("")
+    (root / "config.yaml").write_text(STAGES_CONFIG)
+    (root / ".gitignore").write_text(".tempo/\n")
+    adopt_conduct(root)
+    git(root, "init", "-b", "main")
+    git(root, "add", ".")
+    git(root, "commit", "-m", "base")
+    return root
+
+
+def author(repo: Path, stem: str = STEM, depends: str = "none") -> None:
+    """Hand-author the ticket file only: intake commits it."""
+    path = repo / "tickets" / stem / "ticket.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(TICKET.format(bypass="").replace("## Depends on\nnone", f"## Depends on\n{depends}"))
+
+
+class Time:
+    def __init__(self):
+        self.now = datetime(2026, 1, 1, tzinfo=UTC)
+        self.waits = []
+
+    def __call__(self):
+        return self.now
+
+    async def sleep(self, seconds):
+        future = asyncio.get_running_loop().create_future()
+        self.waits.append((self.now + timedelta(seconds=seconds), future))
+        await future
+
+    def advance(self, seconds):
+        self.now += timedelta(seconds=seconds)
+        for deadline, future in self.waits:
+            if deadline <= self.now and not future.done():
+                future.set_result(None)
+
+
+async def turn():
+    # Yield through callbacks without a wall-clock sleep or a timer.
+    future = asyncio.get_running_loop().create_future()
+    asyncio.get_running_loop().call_soon(future.set_result, None)
+    await future
+
+
+def text(priority="P2", state="confirmed", depends="none"):
+    return CLI_TICKET.format(depends=depends).replace(
+        "priority: P2", f"state: {state}\nsource: human\npriority: {priority}", 1)
+
+
+def import_closure(sources):
+    pending, reached = ["tempo.__main__"], set()
+    while pending:
+        module = pending.pop()
+        if module in reached or module not in sources:
+            continue
+        reached.add(module)
+        if module != "tempo":
+            pending.append("tempo")  # Package initialization is also reachable.
+        for node in ast.walk(ast.parse(sources[module])):
+            if isinstance(node, ast.Import):
+                pending.extend(a.name for a in node.names if a.name.split(".")[0] == "tempo")
+            elif isinstance(node, ast.ImportFrom):
+                base = node.module or ""
+                if node.level:
+                    package = module.split(".")[:-node.level]
+                    base = ".".join([*package, *([base] if base else [])])
+                if base == "tempo" or base.startswith("tempo."):
+                    pending.append(base)
+                    pending.extend(f"{base}.{a.name}" for a in node.names)
+    return reached
+
+
+
+
+PROPOSAL = {"fixed_failure": "Observed café failure", "overcorrection_risk": "Rejecting useful inputs",
+            "proposed_spec_paths": ["specs/review.md", "specs/author.md"]}
+
+
+def stage_context(checkout: Checkout, llm) -> StageContext:
+    """The stage composition `runner.bind` built, on a fake model: what triage, author, and retro run on until
+    P5b moves them to prepare and submit."""
+    driver = Driver.from_config(checkout.config, llm=llm, env=checkout.env, clock=checkout.clock,
+                                sleep=checkout.sleep, fs=checkout.fs)
+    driver.journal = checkout.journal
+    driver.effects = Effects(checkout.journal)
+    return StageContext(repo=checkout.repo, config=checkout.config, env=checkout.env, exec_=checkout.exec_,
+                        git=checkout.git, fs=checkout.fs, driver=driver, specs_dir=SPECS_DIR)
+
+
+class Pipeline:
+    """The `stages.driver` handle Retro reads, as `runner.bind` exposed it."""
+
+    def __init__(self, checkout: Checkout, llm) -> None:
+        self.ctx = stage_context(checkout, llm)
+        self.stages = Stages(self.ctx)
+
+
+def triage(root: Path, llm) -> int:
+    """One triage pass under the writer lock, as the `tempo triage` verb ran it before P5a removed it."""
+    from tempo.triage import triage_pass
+
+    checkout = checkout_at(root)
+
+    async def one_pass():
+        lock = Lockfile(checkout.config.state_dir, instance_id="test", clock=checkout.clock)
+        lock.acquire()
+        try:
+            timers = Timers(journal=checkout.journal, clock=checkout.clock, sleep=checkout.sleep)
+            timers.reconstruct()
+            timers.fire_due()
+            return await triage_pass(checkout, llm)
+        finally:
+            lock.release()
+
+    try:
+        lines = asyncio.run(one_pass())
+    except LockHeld as e:
+        print(f"tempo triage: {e}", file=sys.stderr)
+        return 2
+    print("\n".join(line for _, line in lines) if lines else "no pending suggestions")
+    return 0

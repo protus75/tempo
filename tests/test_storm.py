@@ -1,5 +1,6 @@
 from dataclasses import asdict
 from datetime import timedelta, timezone
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -242,7 +243,7 @@ def test_occurrence_append_failures_and_crash_replay(tmp_path, monkeypatch, when
 
 
 def test_ledger_trip_uses_only_journal_and_box(tmp_path, monkeypatch):
-    from tempo import control, daemon
+    from tempo import control
     from tempo.effects import Effects
 
     def forbidden(*args, **kwargs):
@@ -250,7 +251,6 @@ def test_ledger_trip_uses_only_journal_and_box(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Effects, "run", forbidden)
     monkeypatch.setattr(control, "publish_request", forbidden)
-    monkeypatch.setattr(daemon.DaemonAdmission, "dispatch", forbidden)
     storm, journal, clock = ledger(tmp_path)
     box = storm_producer(root=tmp_path / "box", fs=LocalFileSystem(),
                                 journal=journal, clock=clock)
@@ -263,7 +263,10 @@ def test_ledger_trip_uses_only_journal_and_box(tmp_path, monkeypatch):
     assert len(box.messages()) == 2
 
 
-def test_storm_ledger_is_reachable(tmp_path, monkeypatch):
-    from tests.test_storm_producer import assert_production_reachable
+def test_storm_ledger_is_reachable():
+    from tests.support import import_closure
 
-    assert_production_reachable(tmp_path, monkeypatch)
+    root = Path(__file__).resolve().parents[1]
+    sources = {".".join(p.relative_to(root).with_suffix("").parts): p.read_text()
+               for p in (root / "tempo").glob("*.py")} | {"tempo": (root / "tempo/__init__.py").read_text()}
+    assert "tempo.storm" in import_closure(sources)
