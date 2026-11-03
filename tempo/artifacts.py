@@ -39,7 +39,7 @@ class Harvest(_Strict):
     """The closed, ticket-plane record extracted from one failed run."""
 
     attempt: Annotated[int, Field(ge=0)]
-    stage: Literal["implement", "check", "review", "merge"] | None
+    stage: Literal["requisition_review", "implement", "check", "review", "merge"] | None
     terminal: str
     findings: list[Finding]
     reason: str | None

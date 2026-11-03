@@ -1268,6 +1268,10 @@ Only Claude passed the live gate, so P7 runs Claude.
   `version` goes up by one, and a test pins that no spec tells the model to "reply with" its JSON.
   `submit` keeps reading only `output.txt`: a fallback to the final message would be a second reply
   channel.
+- **Fix from the run: a requisition_review failure is harvested.** `Harvest.stage` did not allow
+  `requisition_review`, so `_decide` journaled `harvest_failed` and `read_attempts` showed no findings.
+  The stage is allowed, and `prior_attempts` falls back to the harvest's findings when the failed
+  stage left no review or checks artifact. A fixture-flow test covers it.
 
 **Exit:**
 - Each host completes a ticket end to end with verified artifacts.

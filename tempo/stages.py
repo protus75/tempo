@@ -292,7 +292,9 @@ def prior_attempts(ctx: StageContext, stem: str) -> str | None:
     current = Harvest.model_validate_json(harvest_path.read_text()) if harvest_path.is_file() else None
     stage = terminal.get("stage")
     where = f" at {stage}" if stage else ""
-    findings = _prior_findings(ctx, stem, stage) if terminal["to"] == "gate_failed" else []
+    # A stage with no durable artifact (requisition_review, implement) keeps its findings in the harvest only.
+    findings = ((_prior_findings(ctx, stem, stage) or (list(current.findings) if current else []))
+                if terminal["to"] == "gate_failed" else [])
     head = (f"{PRIOR_ATTEMPTS}\n\nThe previous attempt ended `{terminal['to']}`{where}. These findings are"
             " this attempt's to clear, beside the acceptance criteria above; they are not part of the ticket.\n\n")
     items = [f"- [{f.code}] {f.path or '-'}:{f.line or '-'} {_one_line(f.message)}"
