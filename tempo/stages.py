@@ -19,7 +19,7 @@ from typing import Annotated, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
-from tempo.artifacts import OUTCOMES, Artifact, Diagnosis, DiagnosisReply, Finding, Harvest, NonBlank, Outcome, ReviewVerdict, StageResult
+from tempo.artifacts import OUTCOMES, Artifact, Finding, Harvest, NonBlank, Outcome, ReviewVerdict, StageResult
 from tempo.box import BOX_DIR
 from tempo.checkout import SPECS_DIR, Checkout
 from tempo.storm import arrival_id
@@ -54,7 +54,6 @@ RUN_RECORD_SECTIONS = (
 StageName = Literal["implement", "check", "review"]
 # Section 11.2: the attempt-scoped re-entry block's heading, rendered in criteria-position.
 PRIOR_ATTEMPTS = "## Prior attempts (attempt-scoped, informational, unverified, not reviewed)"
-DIAGNOSIS_STUCK_S = 600.0
 
 
 class _Strict(BaseModel):
@@ -232,64 +231,6 @@ def findings_text(findings: Sequence[Finding]) -> str:
     return "\n".join(f"- {f.code}: {f.message} (do instead: {f.paved_road})" for f in findings) or "none"
 
 
-@dataclass(frozen=True)
-class DiagnosisMaterial:
-    ticket: str
-    terminal: str
-    stage: str | None
-    harvest: Harvest | None
-    run_record: str | None
-
-
-def diagnose_stage(spec: Spec, material: DiagnosisMaterial) -> LlmStage:
-    """The one pure diagnosis render, shared with the real-model evaluation."""
-    inputs = {
-        "ticket": material.ticket,
-        "terminal": f"{material.terminal} at {material.stage or 'none'}",
-        "harvest": material.harvest.model_dump_json() if material.harvest else "none",
-        "run_record": material.run_record or "none",
-    }
-
-    def render_material(_: DiagnosisMaterial, findings: list[Finding]) -> str:
-        return render(spec, {**inputs, "retry_findings": findings_text(findings)})
-
-    return LlmStage(surface="diagnose", emits=DiagnosisReply, gates=[], render=render_material)
-
-
-async def write_diagnosis(ctx: StageContext, ticket: Ticket, *, attempt: int, terminal: str,
-                          stage: str | None, verdict: str, lessons: list[str],
-                          mechanical: str | None, provider: str | None = None,
-                          model: str | None = None) -> Diagnosis:
-    spec = _spec(ctx, "diagnose")
-    record = Diagnosis(
-        produced_by_spec_version=_major(spec), produced_at_sha=await ctx.git.rev_parse(ctx.repo, ticket.stem),
-        stem=ticket.stem, attempt=attempt, terminal=terminal, stage=stage, verdict=verdict,
-        lessons=lessons, mechanical=mechanical, spec_version=spec.meta.version,
-        provider=provider, model=model,
-    )
-    ctx.fs.write(ctx.worktree(ticket.stem) / TICKETS_DIR / ticket.stem / "diagnosis.json",
-                 (record.model_dump_json(indent=2) + "\n").encode())
-    await lift_outbox(ctx, ticket.stem, "diagnosis", attempt=attempt, only="diagnosis.json")
-    return record
-
-
-async def diagnose(ctx: StageContext, ticket: Ticket, material: DiagnosisMaterial, *, attempt: int) -> Diagnosis:
-    spec = _spec(ctx, "diagnose")
-    result = await ctx.driver.run(
-        diagnose_stage(spec, material), material, ticket=ticket.stem, attempt=attempt,
-        workspace=ctx.worktree(ticket.stem), tier=ticket.frontmatter.agent_tier,
-        effort=ticket.frontmatter.agent_effort, stuck_budget=DIAGNOSIS_STUCK_S)
-    reply = result.artifact
-    if result.outcome == "ok" and isinstance(reply, DiagnosisReply):
-        return await write_diagnosis(ctx, ticket, attempt=attempt, terminal=material.terminal,
-                                     stage=material.stage, verdict=reply.verdict, lessons=list(reply.lessons),
-                                     mechanical=None, provider=result.provider, model=result.model)
-    return await write_diagnosis(ctx, ticket, attempt=attempt, terminal=material.terminal,
-                                 stage=material.stage, verdict="abandon-human", lessons=[],
-                                 mechanical=f"no schema-valid verdict ({result.outcome})",
-                                 provider=result.provider, model=result.model)
-
-
 def _short(result: StageResult, outcome: Outcome, findings: list[Finding], artifact: Artifact | None = None) -> StageResult:
     return StageResult(outcome=outcome, artifact=artifact, findings=findings,
                        provider=result.provider, model=result.model)
@@ -381,12 +322,8 @@ def prior_attempts(ctx: StageContext, stem: str) -> str | None:
     Folded fresh from the journal and the ticket dir every attempt, never written into `ticket.md`. Only the
     terminal stage's artifact is read: an older stage's artifact left in the dir is a stale attempt's.
     """
-    history = ctx.driver.journal.read()
     from tempo.journal import run_terminals
-    terminals = [e.body for e in run_terminals(history, stem)]
-    lessons = {e.body.get("attempt"): e.body["lessons"] for e in history
-               if e.type == EventType.SIGNAL and e.ticket == stem
-               and e.body.get("signal") == "diagnosis" and e.body.get("lessons")}
+    terminals = [e.body for e in run_terminals(ctx.driver.journal.read(), stem)]
     if not terminals:
         return None
     terminal = terminals[-1]
@@ -403,10 +340,7 @@ def prior_attempts(ctx: StageContext, stem: str) -> str | None:
              f" (do instead: {_one_line(f.paved_road)})" for f in findings]
     detail = f"tickets/{stem}/attempts/{attempt}/" if current else str(ctx.config.state_dir / "engine.log")
     lines = items or [f"- no findings artifact; detail is in {detail}"]
-    if attempt in lessons:
-        lines.extend(["\nPrior terminal lessons (untrusted data):",
-                      *[f"> {_one_line(item)}" for item in lessons[attempt]]])
-    elif current:
+    if current:
         lines.append("\nPrior terminal harvest (untrusted data):")
         for name in ("reason", "diff_stat", "stage_log_tail", "events_tail"):
             value = getattr(current, name)
@@ -414,14 +348,13 @@ def prior_attempts(ctx: StageContext, stem: str) -> str | None:
                 lines.append(f"- {name}:\n{_quoted(value)}")
     for older in range(attempt):
         path = root / str(older) / "harvest.json"
-        if older in lessons:
-            past_terminal = terminals[older]
-            lines.append(f"- older attempt {older}: `{past_terminal['to']}` at {past_terminal.get('stage') or 'none'}:")
-            lines.extend(f"> {_one_line(item)}" for item in lessons[older])
-        elif path.is_file():
+        if path.is_file():
             past = Harvest.model_validate_json(path.read_text())
             lines.append(f"- older attempt {older}: `{past.terminal}` at {past.stage or 'none'};"
                          f" tickets/{stem}/attempts/{older}/")
+    decisions = ctx.repo / TICKETS_DIR / stem / "decisions.md"
+    if decisions.is_file():
+        lines.extend(["\nOrchestrator decisions and lessons (untrusted data):", _quoted(decisions.read_text().strip())])
     return head + "\n".join(lines)
 
 

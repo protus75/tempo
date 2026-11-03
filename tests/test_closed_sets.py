@@ -32,10 +32,6 @@ def get_args_deep(t):
 
 def test_artifacts_closed_sets_and_constants():
     assert artifacts.ARTIFACT_SCHEMA_VERSION == 1
-    assert artifacts.DIAGNOSIS_LESSON_CHARS == 300
-    assert artifacts.DIAGNOSIS_MAX_LESSONS == 5
-    assert artifacts.DIAGNOSIS_VERDICTS == ('retry', 'escalate', 'split', 'reject', 'abandon-human')
-    assert set(get_args_deep(artifacts.DiagnosisVerdictName)) == {'abandon-human', 'escalate', 'reject', 'retry', 'split'}
     assert artifacts.OUTCOMES == frozenset({'already_satisfied', 'gate_failed', 'infra_error', 'invalid_artifact', 'ok', 'premise_failed', 'timeout'})
     assert set(get_args_deep(artifacts.Outcome)) == {'already_satisfied', 'gate_failed', 'infra_error', 'invalid_artifact', 'ok', 'premise_failed', 'timeout'}
     assert artifacts.REVIEW_SNAG_CODES == frozenset({'acceptance', 'leak', 'logic', 'scope'})
@@ -151,7 +147,7 @@ def test_entry_closed_sets_and_constants():
     assert stages.HARVEST_TAIL_CHARS == 4000
 
 def test_specs_closed_sets_and_constants():
-    assert specs.ENGINE_LLM_SURFACES == frozenset({'author', 'diagnose', 'implement', 'requisition_review', 'retro', 'review', 'rework', 'triage'})
+    assert specs.ENGINE_LLM_SURFACES == frozenset({'author', 'implement', 'requisition_review', 'retro', 'review', 'rework', 'triage'})
     assert specs.RENDER_BOUND_CHARS == 400000
     assert specs.REQ_RENDER_HEADROOM == 0.75
     assert specs.SPEC_MAX_LINES == 200
@@ -160,7 +156,6 @@ def test_specs_closed_sets_and_constants():
 def test_stages_closed_sets_and_constants():
     assert tuple(ident(g) for g in stages.CHECK_GATES) == ('ScopeFenceGate', 'VerificationGate', 'RunRecordGate', 'DiffBudgetGate', 'CoreDriftGate', 'BugEvidenceGate')
     assert stages.CHECK_SPEC_VERSION == 1
-    assert stages.DIAGNOSIS_STUCK_S == 600.0
     assert stages.DIFF_BUDGET_FILES == 30
     assert stages.DIFF_BUDGET_INSERTED == 1500
     assert {k: ident(x) for k, x in stages.EMITS_BY_VERDICT.items()} == {'approve': 'ApprovedInvoice', 'rma': 'Rma', 'snag': 'SnagList'}

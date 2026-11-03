@@ -240,3 +240,4 @@ def test_a_retry_after_a_review_snag_renders_its_findings_in_the_next_implement_
     parts = [line.removeprefix("part: ") for line in prepared["spawn_prompt"].splitlines() if line.startswith("part: ")]
     prompt = "".join(Path(p).read_text() for p in parts)
     assert PRIOR_ATTEMPTS in prompt and "subtract swaps its operands" in prompt
+    assert "the operands were swapped" in prompt  # the retry's lessons, from decisions.md

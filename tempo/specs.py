@@ -28,9 +28,9 @@ QUOTED_DELIM = "[tempo-data:"
 
 SPEC_SECTIONS = ("Role", "Task", "Inputs", "Output format", "On-failure")
 SPEC_MAX_LINES = 200
-# Section 5: the LLM stage names plus `diagnose` and `requisition_review`; config load extends with host surfaces.
+# Section 5: the LLM stage names plus `requisition_review`; config load extends with host surfaces.
 ENGINE_LLM_SURFACES: frozenset[str] = frozenset(
-    {"author", "implement", "review", "rework", "triage", "retro", "diagnose", "requisition_review"}
+    {"author", "implement", "review", "rework", "triage", "retro", "requisition_review"}
 )
 
 _NAME = r"[a-z][a-z0-9_]*"

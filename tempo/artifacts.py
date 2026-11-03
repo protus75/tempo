@@ -97,32 +97,6 @@ class StageResult:
 
 
 ReviewVerdictName = Literal["approve", "snag", "rma"]
-DiagnosisVerdictName = Literal["retry", "escalate", "split", "reject", "abandon-human"]
-DIAGNOSIS_VERDICTS = get_args(DiagnosisVerdictName)
-DIAGNOSIS_MAX_LESSONS = 5
-DIAGNOSIS_LESSON_CHARS = 300
-
-
-class DiagnosisReply(_Strict):
-    verdict: DiagnosisVerdictName
-    lessons: Annotated[list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1,
-                                                              max_length=DIAGNOSIS_LESSON_CHARS)]],
-                       Field(min_length=1, max_length=DIAGNOSIS_MAX_LESSONS)]
-
-
-class Diagnosis(Artifact):
-    stem: NonBlank
-    attempt: Annotated[int, Field(ge=0)]
-    terminal: str
-    stage: str | None
-    verdict: DiagnosisVerdictName
-    lessons: list[str]
-    mechanical: str | None
-    spec_version: NonBlank
-    provider: str | None
-    model: str | None
-
-
 # specs/review.md's closed finding codes: `ticket` is the rma code, the rest are snag codes.
 REVIEW_SNAG_CODES = frozenset({"logic", "acceptance", "scope", "leak"})
 
