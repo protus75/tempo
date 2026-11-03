@@ -1,12 +1,12 @@
-"""The kept set never imports the scripted layer (AGENT_PLAN.md P3), counting every import statement:
-module-level, function-level, and TYPE_CHECKING alike, followed transitively."""
+"""The kept set, `__main__` included since P5a, never imports what is left of the scripted layer (AGENT_PLAN.md
+P3, P5a), counting every import statement: module-level, function-level, and TYPE_CHECKING alike, followed
+transitively. `rework` stays, unused, until P5b."""
 
 import ast
 from pathlib import Path
 
 PACKAGE = Path(__file__).resolve().parent.parent / "tempo"
-SCRIPTED = frozenset({"drain", "daemon", "serve", "runner", "rework"})
-EXCLUDED = SCRIPTED | {"__main__"}
+EXCLUDED = frozenset({"rework"})
 
 
 def _edges(package: Path = PACKAGE) -> dict[str, set[str]]:
