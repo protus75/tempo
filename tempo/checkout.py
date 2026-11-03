@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 # Engine plane: the prompt specs ship with the engine, not the host checkout it runs against.
-SPECS_DIR = Path(__file__).resolve().parent.parent / "specs"
+SPECS_DIR = Path(__file__).resolve().parent / "specs"
 
 
 # The provider backstop is the ceiling every ticket stuck budget fits under (section 9.7):

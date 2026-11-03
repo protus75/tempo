@@ -24,7 +24,7 @@ class RetroProposal(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
     fixed_failure: NonBlank
     overcorrection_risk: NonBlank
-    proposed_spec_paths: list[Annotated[str, Field(pattern=r"^specs/[a-z0-9_-]+\.md$")]] = Field(min_length=1)
+    proposed_spec_paths: list[Annotated[str, Field(pattern=r"^tempo/specs/[a-z0-9_-]+\.md$")]] = Field(min_length=1)
 
 
 class RetroArtifact(BaseModel):

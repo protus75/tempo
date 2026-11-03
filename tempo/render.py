@@ -1,10 +1,11 @@
 """`tempo render`: the host files generated from config.yaml (AGENT_PLAN.md sections 4.4.2, 5).
 
-Hook files and `tempo:protocol` blocks are written for every host. Model-bearing files (the
+Hook files and the `tempo:protocol` and `tempo:session` blocks are written for every host. A hook file
+keeps every key but the ones tempo owns (`hooks`, plus `version` on Copilot). Model-bearing files (the
 orchestrator rules, the start command, and one agent file per reachable surface and model, plus effort
 on Codex) are written only for reachable hosts, those with an `orchestrator.models` entry. Stale
 generated `tempo-*` files are deleted. `drift` is the one staleness check, for `render --check`,
-`doctor`, and `begin_session`.
+`doctor`, and `begin_session`. `init` sets a repo up from nothing (AGENT_PLAN.md section 6).
 """
 
 import json
@@ -14,12 +15,15 @@ from string import Template
 from tempo import hostfiles
 from tempo.call import CODEX_EFFORT, SURFACES, agent_name, resolve_model
 from tempo.caps import LEVELS
-from tempo.config import Config, ConfigSnapshot
+from tempo.checkout import Refusal
+from tempo.config import Config, ConfigSnapshot, load_config
 from tempo.hosts import HOSTS, LAYOUTS, hook_config
 from tempo.providers import WRITING_SURFACES
 from tempo.seams import FileSystem
 
 RULES = Path(__file__).resolve().parent / "rules"
+CONFIG = "config.yaml"
+TICKETS_DOC = "docs/tempo/tickets.md"
 ORCHESTRATOR = "tempo-orchestrator"
 _TOOLS = {
     "claude": ("Read, Grep, Glob, Write", "Read, Grep, Glob, Write, Edit, MultiEdit, Bash"),
@@ -58,8 +62,6 @@ def _agent_file(host: str, name: str, surface: str, model: str, effort: str) -> 
 def files(config: Config | ConfigSnapshot) -> dict[str, str]:
     """Every whole generated file, by repo-relative path."""
     out = {}
-    for host in HOSTS:
-        out[LAYOUTS[host].hooks] = json.dumps(hook_config(host), indent=2) + "\n"
     for host in reachable(config):
         layout = LAYOUTS[host]
         model = config.orchestrator.models[host]
@@ -84,14 +86,32 @@ def files(config: Config | ConfigSnapshot) -> dict[str, str]:
 
 
 def _instructions(repo: Path) -> dict[str, bytes]:
-    """Each host's instruction file with its `tempo:protocol` block rendered in."""
-    template = (RULES / "protocol.md").read_bytes()
+    """Each host's instruction file with its `tempo:protocol` and `tempo:session` blocks rendered in."""
     out = {}
     for host in HOSTS:
         rel = LAYOUTS[host].instructions
         path = repo / rel
-        current = path.read_bytes() if path.is_file() else b""
-        out[rel] = hostfiles.render(current, template=template, name="protocol")
+        data = path.read_bytes() if path.is_file() else b""
+        for name in ("session", "protocol"):
+            data = hostfiles.render(data, template=(RULES / f"{name}.md").read_bytes(), name=name)
+        out[rel] = data
+    return out
+
+
+def _hooks(repo: Path) -> dict[str, bytes | None]:
+    """Each host's hook file with tempo's keys merged in; None when the file is not a JSON object."""
+    out = {}
+    for host in HOSTS:
+        rel = LAYOUTS[host].hooks
+        path = repo / rel
+        current = {}
+        if path.is_file():
+            try:
+                current = json.loads(path.read_bytes())
+            except ValueError:
+                current = None
+        out[rel] = (None if not isinstance(current, dict)
+                    else (json.dumps({**current, **hook_config(host)}, indent=2) + "\n").encode())
     return out
 
 
@@ -106,8 +126,8 @@ def _stale(repo: Path, expected: dict[str, bytes]) -> list[str]:
     return sorted(found - set(expected))
 
 
-def _expected(repo: Path, config: Config | ConfigSnapshot) -> dict[str, bytes]:
-    return {**{rel: text.encode() for rel, text in files(config).items()}, **_instructions(repo)}
+def _expected(repo: Path, config: Config | ConfigSnapshot) -> dict[str, bytes | None]:
+    return {**{rel: text.encode() for rel, text in files(config).items()}, **_instructions(repo), **_hooks(repo)}
 
 
 def drift(repo: Path, config: Config | ConfigSnapshot, only: set[str] | None = None) -> list[str]:
@@ -122,6 +142,9 @@ def drift(repo: Path, config: Config | ConfigSnapshot, only: set[str] | None = N
 def write(repo: Path, config: Config | ConfigSnapshot, fs: FileSystem) -> list[str]:
     """Write every changed generated file and delete stale ones; returns the paths touched."""
     expected = _expected(repo, config)
+    if invalid := [rel for rel, data in expected.items() if data is None]:
+        raise Refusal(f"{invalid[0]} is not a JSON object",
+                      f"repair {invalid[0]} to a JSON object, or delete it, then rerun `tempo render`")
     stale = _stale(repo, expected)
     touched = []
     for rel, data in expected.items():
@@ -132,3 +155,29 @@ def write(repo: Path, config: Config | ConfigSnapshot, fs: FileSystem) -> list[s
     for rel in stale:
         (repo / rel).unlink()
     return sorted(touched + stale)
+
+
+def init(repo: Path, config_path: Path | None, fs: FileSystem) -> list[str]:
+    """Write a default config if there is none, then `tempo core`, `render`, and the ticket contract doc.
+
+    Returns one report line per file written or skipped.
+    """
+    lines = []
+    path = repo / (config_path or CONFIG)
+    if not path.exists():
+        fs.write(path, (RULES / CONFIG).read_bytes())
+        lines.append(f"wrote: {config_path or CONFIG}")
+    config = load_config(path, cwd=repo)
+    conduct = hostfiles.conduct_paths(config, repo)
+    before = {p: p.read_bytes() if p.is_file() else None for p in conduct}
+    hostfiles.refresh(conduct, fs)
+    touched = {p.relative_to(repo).as_posix() for p in conduct if before[p] != p.read_bytes()}
+    touched |= set(write(repo, config, fs))
+    lines += [f"wrote: {rel}" for rel in sorted(touched)]
+    doc, shipped = repo / TICKETS_DOC, (RULES / "tickets.md").read_bytes()
+    if not doc.exists():
+        fs.write(doc, shipped)
+        lines.append(f"wrote: {TICKETS_DOC}")
+    elif doc.read_bytes() != shipped:
+        lines.append(f"skipped: {TICKETS_DOC} differs from the shipped copy; merge it by hand")
+    return lines

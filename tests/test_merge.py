@@ -284,15 +284,15 @@ async def test_retro_prompt_spec_merge_requires_unique_bridge(repo, monkeypatch,
     path = repo / f"tickets/{STEM}/ticket.md"
     source = "human" if case == "unrelated" else "box:retro_finding"
     ctx.fs.write(path, path.read_text().replace("source: human", f"source: {source}").replace(
-        "## Scope fence\n- tempo/thing.py", "## Scope fence\n- tempo/thing.py\n- specs/").encode())
-    for rel in ("specs/z.md", "specs/a.md", "specs/readme.txt"):
+        "## Scope fence\n- tempo/thing.py", "## Scope fence\n- tempo/thing.py\n- tempo/specs/").encode())
+    for rel in ("tempo/specs/z.md", "tempo/specs/a.md", "tempo/specs/readme.txt"):
         ctx.fs.write(repo / rel, b"before\n")
-    await ctx.git.add(repo, [str(path.relative_to(repo)), "specs/z.md", "specs/a.md", "specs/readme.txt"])
+    await ctx.git.add(repo, [str(path.relative_to(repo)), "tempo/specs/z.md", "tempo/specs/a.md", "tempo/specs/readme.txt"])
     await ctx.git.commit(repo, "retro admission fixture")
     ticket = validate_ticket(STEM, path.read_text(), repo)
     changes = {"tempo/thing.py": "ok\n"}
     if case != "no-spec":
-        changes.update({"specs/z.md": "fixed\n", "specs/a.md": "fixed\n", "specs/readme.txt": "fixed\n"})
+        changes.update({"tempo/specs/z.md": "fixed\n", "tempo/specs/a.md": "fixed\n", "tempo/specs/readme.txt": "fixed\n"})
     run = await drive(ctx, ticket, [agent(changes), verdict()])
     assert run.results["review"].outcome == "ok"
     body = {"kind": "retro_ticket_authored", "box_id": "box-000001-1234abcd",
@@ -348,10 +348,10 @@ async def test_retro_prompt_spec_merge_requires_unique_bridge(repo, monkeypatch,
         assert signal.key == f"retro-prompt-spec-change/{STEM}/{sha}"
         assert signal.body == {"kind": "retro_prompt_spec_change_merged", "box_id": body["box_id"],
             "retro_report_key": "retro/1", "ticket_stem": STEM, "squash_sha": sha,
-            "changed_spec_paths": ["specs/a.md", "specs/z.md"]}
+            "changed_spec_paths": ["tempo/specs/a.md", "tempo/specs/z.md"]}
         assert sha == await ctx.git.rev_parse(repo, "main")
         assert (await ctx.git._run(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", sha)).splitlines() == [
-            "specs/a.md", "specs/readme.txt", "specs/z.md", "tempo/thing.py"]
+            "tempo/specs/a.md", "tempo/specs/readme.txt", "tempo/specs/z.md", "tempo/thing.py"]
         ctx.driver.effects = Effects(journal)
         before = journal.read()
         assert (await write_squash(ctx, ticket, reviewed_sha, attempt=run.attempt)).commit == sha

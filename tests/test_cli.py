@@ -150,6 +150,29 @@ def test_new_refuses_a_bad_stem(root, capsys):
     assert "kebab-case" in capsys.readouterr().err
 
 
+# --- lint ---------------------------------------------------------------------------------------
+
+
+def test_lint_passes_a_filled_ticket(root, capsys):
+    write(root, "add-thing", ticket().replace("---\npriority", "---\nstate: confirmed\nsource: human\npriority"))
+    assert cli(root, "lint", "add-thing") == 0
+    assert capsys.readouterr().out == "lint: add-thing ok\n"
+
+
+def test_lint_lists_every_finding_with_its_paved_road(root, capsys):
+    write(root, "add-thing", ticket("- no-such-stem").replace("## Time budget\n- stuck: 20m\n", ""))
+    assert cli(root, "lint", "add-thing") == 1
+    out = capsys.readouterr().out
+    assert "`## Depends on` stem 'no-such-stem' does not resolve" in out and "(name an existing" in out
+    assert "missing or empty body section `## Time budget` (add a non-empty `## Time budget` section)" in out
+    assert "frontmatter `state`" in out
+
+
+def test_lint_refuses_a_missing_ticket(root, capsys):
+    assert cli(root, "lint", "add-thing") == 2
+    assert "run `tempo new add-thing` first" in capsys.readouterr().err
+
+
 # --- status -------------------------------------------------------------------------------------
 
 

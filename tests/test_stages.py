@@ -41,7 +41,7 @@ from tempo.specs import RenderOverBound
 from tempo.tickets import validate_ticket
 
 
-SPECS = Path(__file__).resolve().parent.parent / "specs"
+SPECS = Path(__file__).resolve().parent.parent / "tempo" / "specs"
 SECRET = "sk-test-not-for-children"
 ENV = {
     "PATH": "/usr/bin:/bin",

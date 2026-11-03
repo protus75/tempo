@@ -280,7 +280,7 @@ async def write_squash(ctx: StageContext, ticket: Ticket, reviewed: str, *, atte
             (checked_tree is None or await ctx.git.rev_parse(ctx.repo, "main^{tree}") == checked_tree)):
         paths = sorted(p for p in (await ctx.git._run(ctx.repo, "diff-tree", "--no-commit-id", "--name-only",
                                                      "-r", commit)).splitlines()
-                       if re.fullmatch(r"specs/[^/]+\.md", p))
+                       if re.fullmatch(r"tempo/specs/[^/]+\.md", p))
         if paths:
             body = {"kind": "retro_prompt_spec_change_merged", "box_id": bridge["box_id"],
                     "retro_report_key": bridge["retro_report_key"], "ticket_stem": stem,

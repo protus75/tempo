@@ -1,0 +1,26 @@
+# Tempo instance config, written by `tempo init`. Operator-owned: edit between runs, then `tempo render`.
+schema_version: 1
+state_dir: .tempo/state
+# Subagent models per host. Review is pinned to each host's strongest model, which never appears in
+# models_by_tier: a model never reviews its own work.
+hosts:
+  claude:
+    models_by_tier: {low: claude-sonnet-5-5, medium: claude-sonnet-5-5, high: claude-sonnet-5-5, max: claude-sonnet-5-5}
+    pins: {review: claude-opus-5-5}
+    quota_window_minutes: 60
+  codex:
+    models_by_tier: {low: gpt-6-luna, medium: gpt-6.1-sol, high: gpt-6.1-sol, max: gpt-6.1-sol}
+    pins: {review: gpt-6-astra}
+    quota_window_minutes: 60
+  # copilot:                       # fill in model ids to enable Copilot
+  #   models_by_tier: {low: <id>, medium: <id>, high: <id>, max: <id>}
+  #   pins: {review: <id>}
+  #   quota_window_minutes: 60
+orchestrator:
+  models: {claude: claude-opus-5-5, codex: gpt-6-astra}   # add copilot: <id> to start tempo from Copilot
+  session:
+    max_tickets: 5                 # tickets started before the session hands off
+    max_minutes: 240               # tools refuse new work after this; the session hands off
+review: {}
+merge: {}
+engine_plane_safety_inventory: [config.yaml]

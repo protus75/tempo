@@ -17,7 +17,7 @@ from tempo.stages import StageContext, implement_inputs, implement_stage
 from tempo.tickets import TicketInvalid
 from tempo.specs import render
 
-SPECS = Path(__file__).resolve().parent.parent / "specs"
+SPECS = Path(__file__).resolve().parent.parent / "tempo" / "specs"
 TICKET = """---
 state: confirmed
 source: human

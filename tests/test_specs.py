@@ -19,7 +19,7 @@ from tempo.specs import (
 
 
 def test_implement_spec_defines_both_premise_kinds():
-    specs = Path(__file__).resolve().parent.parent / "specs"
+    specs = Path(__file__).resolve().parent.parent / "tempo" / "specs"
     body = " ".join(load_spec((specs / "implement.md").read_text()).body.split())
     for rule in (
         "A ticket that contradicts stated spec or merged code, or is malformed, is `kind: authoring_error`.",
@@ -30,7 +30,7 @@ def test_implement_spec_defines_both_premise_kinds():
 
 
 def test_spec_lint_accepts_the_implement_and_requisition_specs():
-    specs = Path(__file__).resolve().parent.parent / "specs"
+    specs = Path(__file__).resolve().parent.parent / "tempo" / "specs"
     for name, version in (("implement", "1.7"), ("requisition_review", "2.3")):
         text = (specs / f"{name}.md").read_text()
         assert lint_spec(text) == []

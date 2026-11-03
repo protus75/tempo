@@ -73,7 +73,7 @@ class Message(_Strict):
     retro_report_key: NonBlank | None = None
     fixed_failure: NonBlank | None = None
     overcorrection_risk: NonBlank | None = None
-    proposed_spec_paths: list[Annotated[str, Field(pattern=r"^specs/[a-z0-9_-]+\.md$")]] = []
+    proposed_spec_paths: list[Annotated[str, Field(pattern=r"^tempo/specs/[a-z0-9_-]+\.md$")]] = []
     reports: Annotated[int, Field(ge=0)] = 0
     reopen: bool = False
     report: ReportDescriptor | None = None

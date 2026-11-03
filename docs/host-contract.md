@@ -35,7 +35,7 @@ merge:
   strategies: # choose paths suitable for your host
     - {paths: [uv.lock], strategy: regenerate, argv: [uv, lock]}
     - {paths: [CHANGELOG.md], strategy: union}
-engine_plane_safety_inventory: [config.yaml, specs/, tempo/gates.py]
+engine_plane_safety_inventory: [config.yaml, tempo/specs/, tempo/gates.py]
 # worktree_root: .tempo/worktrees
 # report_inbox: reports
 # notify: [notify-send, tempo]

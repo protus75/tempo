@@ -25,4 +25,4 @@ review: {}
 merge: {}
 tickets:
   max_minutes: 180  # raised from the shipped 90 to admit longer ticket stuck budgets (section 18)
-engine_plane_safety_inventory: [specs/, tempo/gates.py, tempo/config.py, tempo/providers.py, config.yaml]
+engine_plane_safety_inventory: [tempo/specs/, tempo/gates.py, tempo/config.py, tempo/providers.py, config.yaml]

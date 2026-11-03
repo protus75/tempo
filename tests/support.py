@@ -156,7 +156,7 @@ def import_closure(sources):
 
 
 PROPOSAL = {"fixed_failure": "Observed café failure", "overcorrection_risk": "Rejecting useful inputs",
-            "proposed_spec_paths": ["specs/review.md", "specs/author.md"]}
+            "proposed_spec_paths": ["tempo/specs/review.md", "tempo/specs/author.md"]}
 
 
 def stage_context(checkout: Checkout) -> StageContext:

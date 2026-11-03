@@ -97,12 +97,12 @@ class StageResult:
 
 
 ReviewVerdictName = Literal["approve", "snag", "rma"]
-# specs/review.md's closed finding codes: `ticket` is the rma code, the rest are snag codes.
+# tempo/specs/review.md's closed finding codes: `ticket` is the rma code, the rest are snag codes.
 REVIEW_SNAG_CODES = frozenset({"logic", "acceptance", "scope", "leak"})
 
 
 class ReviewVerdict(_Strict):
-    """The review surface's model-facing reply (specs/review.md); the stage stamps provenance around it."""
+    """The review surface's model-facing reply (tempo/specs/review.md); the stage stamps provenance around it."""
 
     verdict: ReviewVerdictName
     summary: NonBlank

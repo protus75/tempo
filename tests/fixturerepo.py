@@ -1,15 +1,14 @@
 """The minimal fixture repo (AGENT_PLAN.md D5, P4 step e).
 
 P4 tests run tempo in a copy of `fixture/`, and the P4c live gate opens one in VS Code:
-`uv run python -m tests.fixturerepo <dest>`. Render writes the host files there, never into this repo.
+`uv run python -m tests.fixturerepo <dest>`. Init writes the host files there, never into this repo.
 """
 
 import subprocess
 import sys
 from pathlib import Path
 
-from tempo import hostfiles, render
-from tempo.config import load_config
+from tempo import render
 from tempo.seams import LocalFileSystem
 
 FIXTURE = Path(__file__).resolve().parent.parent / "fixture"
@@ -21,7 +20,7 @@ def _git(repo: Path, *args: str) -> str:
 
 
 def materialize(dest: Path) -> Path:
-    """Copy the fixture to `dest`, commit it on main, then adopt `tempo core`, render, and commit those."""
+    """Copy the fixture to `dest`, commit it on main, then run `tempo init` and commit what it wrote."""
     dest.mkdir(parents=True)
     for src in FIXTURE.rglob("*"):
         if src.is_file():
@@ -32,11 +31,9 @@ def materialize(dest: Path) -> Path:
     _git(dest, "config", "user.name", "fixture")
     _git(dest, "add", "-A")
     _git(dest, "commit", "-q", "-m", "fixture")
-    config = load_config(None, cwd=dest)
-    hostfiles.refresh(hostfiles.conduct_paths(config, dest), LocalFileSystem())
-    render.write(dest, config, LocalFileSystem())
+    render.init(dest, None, LocalFileSystem())
     _git(dest, "add", "-A")
-    _git(dest, "commit", "-q", "-m", "tempo core and render")
+    _git(dest, "commit", "-q", "-m", "tempo init")
     return dest
 
 

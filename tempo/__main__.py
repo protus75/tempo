@@ -56,6 +56,8 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("migrate-config", help="validate and migrate schema_version: 0 to the current config schema")
     new = sub.add_parser("new", help="template tickets/<stem>/ticket.md and lint it")
     new.add_argument("stem")
+    sub.add_parser("lint", help="validate tickets/<stem>/ticket.md; exit 1 with findings").add_argument("stem")
+    sub.add_parser("init", help="set this repo up for tempo: default config, managed blocks, host files, ticket doc")
     tool = sub.add_parser("tool", help="run one orchestrator tool and print its JSON result")
     tool.add_argument("name")
     tool.add_argument("args", nargs="?", default="{}", help="the tool's arguments as one JSON object")
@@ -85,6 +87,11 @@ def main(
             return 0
         if args.verb == "new":
             return _new(repo, args.stem)
+        if args.verb == "lint":
+            return _lint(repo, args.stem)
+        if args.verb == "init":
+            print("\n".join(host_render.init(repo, args.config, LocalFileSystem())) or "init: current")
+            return 0
         if args.verb == "doctor":
             from tempo import doctor
             results = asyncio.run(doctor.check(repo=repo, config_path=args.config, env=env,
@@ -191,9 +198,28 @@ def _new(repo: Path, stem: str) -> int:
         validate_ticket(stem, text, repo)
     except TicketInvalid as e:
         print(f"fill these before {stem} runs:")
-        for f in e.findings:
-            print(f"- {f.message} ({f.paved_road})")
+        _findings(e)
     return 0
+
+
+def _lint(repo: Path, stem: str) -> int:
+    """The same full lint `new` runs, on the ticket as it stands: 0 clean, 1 with every finding."""
+    rel = ticket_path(stem)
+    if not (repo / rel).is_file():
+        raise Refusal(f"{rel} does not exist", f"run `tempo new {stem}` first")
+    try:
+        validate_ticket(stem, (repo / rel).read_text(), repo)
+    except TicketInvalid as e:
+        print(f"lint: {stem} has findings:")
+        _findings(e)
+        return 1
+    print(f"lint: {stem} ok")
+    return 0
+
+
+def _findings(e: TicketInvalid) -> None:
+    for f in e.findings:
+        print(f"- {f.message} ({f.paved_road})")
 
 
 if __name__ == "__main__":

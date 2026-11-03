@@ -303,7 +303,7 @@ def test_artifact_is_closed_and_proposals_pair_the_risks():
 
 def test_receipt_uses_engine_provenance_and_tombstones(tmp_path):
     proposal = {"fixed_failure": "A witnessed failure", "overcorrection_risk": "Rejecting useful inputs",
-                "proposed_spec_paths": ["specs/review.md"]}
+                "proposed_spec_paths": ["tempo/specs/review.md"]}
     c, ctx, hook, llm = rig(tmp_path, [json.dumps({"proposals": [proposal]})])
     commit_ticket(c.repo, "one", confirmed())
     record = DecisionRecord(id="retired", kind="tombstone", link="one", reopen_after_days=7)

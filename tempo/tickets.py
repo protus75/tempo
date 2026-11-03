@@ -283,7 +283,7 @@ def parse_ticket(stem: str, text: str, repo: Path) -> Ticket:
         for item in items:
             if errs := _repo_path(item, "Context", path):
                 findings += errs
-            elif Path(item).parent == Path("specs") and item.endswith(".md"):
+            elif Path(item).parent == Path("tempo/specs") and item.endswith(".md"):
                 findings.append(_f(f"`## Context` cites the prompt spec {item}; prompt-spec files are never Context",
                                    "drop it from Context; the engine renders its own prompt spec", path))
             elif not (repo / item).exists():

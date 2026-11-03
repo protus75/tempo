@@ -236,7 +236,7 @@ def test_triage_authors_ticket_and_journals_intake(tmp_path, monkeypatch):
 @pytest.mark.parametrize(("message_class", "extra", "expected"), [
     ("failure_report", {}, "confirmed"),
     ("retro_finding", {"retro_report_key": "retro/1", "fixed_failure": "broken behavior",
-                       "overcorrection_risk": "useful inputs", "proposed_spec_paths": ["specs/review.md"]}, "confirmed"),
+                       "overcorrection_risk": "useful inputs", "proposed_spec_paths": ["tempo/specs/review.md"]}, "confirmed"),
     ("override_report", {}, "draft"),
     ("suggestion", {}, "draft"),
     ("bug_report", {"bug_origin": "self_diagnosed", "has_repro": True}, "confirmed"),

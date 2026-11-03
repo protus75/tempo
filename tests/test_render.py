@@ -6,6 +6,7 @@ import pytest
 
 from tempo import hostfiles, render
 from tempo.__main__ import main
+from tempo.checkout import Refusal
 from tempo.config import load_config
 from tempo.seams import LocalFileSystem
 from tests.fixturerepo import FIXTURE
@@ -94,3 +95,61 @@ def test_render_cli_writes_then_check_passes(repo, capsys):
     assert main(["render"], cwd=repo) == 0
     assert main(["render", "--check"], cwd=repo) == 0
     assert capsys.readouterr().out.endswith("render: current\n")
+
+
+def test_session_block_lands_in_all_three_instruction_files_beside_core(repo):
+    render.write(repo, config(repo), FS)
+    for rel in ("CLAUDE.md", "AGENTS.md", ".github/copilot-instructions.md"):
+        data = (repo / rel).read_bytes()
+        assert hostfiles.parse(data, name="session") is not None, rel
+        assert data.count(b"## Chat session conduct") == 1
+    assert hostfiles.classify_core((repo / "CLAUDE.md").read_bytes()).state == "current"
+
+
+def test_hook_file_keeps_the_repos_own_keys(repo):
+    (repo / ".claude").mkdir()
+    (repo / ".claude/settings.json").write_text('{"permissions": {"allow": ["Bash(ls)"]}, "hooks": {"x": []}}\n')
+    render.write(repo, config(repo), FS)
+    settings = json.loads((repo / ".claude/settings.json").read_text())
+    assert settings["permissions"] == {"allow": ["Bash(ls)"]}
+    assert settings["hooks"] == render.hook_config("claude")["hooks"]
+    assert render.drift(repo, config(repo)) == []
+
+
+def test_a_hook_file_that_is_not_a_json_object_is_refused(repo):
+    (repo / ".claude").mkdir()
+    (repo / ".claude/settings.json").write_text("[1]\n")
+    assert ".claude/settings.json" in render.drift(repo, config(repo))
+    with pytest.raises(Refusal, match="not a JSON object"):
+        render.write(repo, config(repo), FS)
+    assert (repo / ".claude/settings.json").read_text() == "[1]\n"
+
+
+def test_init_into_an_empty_repo_writes_the_layout_and_a_second_run_changes_nothing(tmp_path, capsys):
+    assert main(["init"], cwd=tmp_path) == 0
+    assert (tmp_path / "config.yaml").read_bytes() == (render.RULES / "config.yaml").read_bytes()
+    assert (tmp_path / "docs/tempo/tickets.md").read_bytes() == (render.RULES / "tickets.md").read_bytes()
+    for rel in ("CLAUDE.md", "AGENTS.md", ".github/copilot-instructions.md"):
+        assert hostfiles.parse((tmp_path / rel).read_bytes(), name="session") is not None, rel
+    for rel in ("CLAUDE.md", "AGENTS.md"):  # the default config's hosts get tempo:core
+        assert hostfiles.parse((tmp_path / rel).read_bytes()) is not None, rel
+    for rel in (".claude/settings.json", ".claude/agents/tempo-orchestrator.md", ".claude/commands/tempo-run.md",
+                ".codex/hooks.json", ".codex/tempo-orchestrator.md", ".agents/skills/tempo-run/SKILL.md",
+                ".github/hooks/tempo.json"):
+        assert (tmp_path / rel).is_file(), rel
+    snapshot = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    capsys.readouterr()
+    assert main(["init"], cwd=tmp_path) == 0
+    assert capsys.readouterr().out == "init: current\n"
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == snapshot
+
+
+def test_init_keeps_an_existing_config_and_reports_an_edited_ticket_doc(repo, capsys):
+    kept = (repo / "config.yaml").read_bytes()
+    (repo / "docs/tempo").mkdir(parents=True)
+    (repo / "docs/tempo/tickets.md").write_text("ours\n")
+    assert main(["init"], cwd=repo) == 0
+    out = capsys.readouterr().out
+    assert (repo / "config.yaml").read_bytes() == kept and "wrote: config.yaml" not in out
+    assert (repo / "docs/tempo/tickets.md").read_text() == "ours\n"
+    assert "skipped: docs/tempo/tickets.md" in out

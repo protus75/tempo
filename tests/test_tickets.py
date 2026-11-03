@@ -78,13 +78,13 @@ def repo(tmp_path: Path):
     g = Git(SubprocessExec(), env=ENV, timeout=30.0)
     root = tmp_path / "repo"
     (root / "tempo").mkdir(parents=True)
-    (root / "specs").mkdir()
+    (root / "tempo" / "specs").mkdir()
     (root / "tempo" / "thing.py").write_text("")
-    (root / "specs" / "review.md").write_text("spec\n")
+    (root / "tempo" / "specs" / "review.md").write_text("spec\n")
 
     async def seed():
         await g.init(root, branch="main")
-        await g.add(root, ["tempo", "specs"])
+        await g.add(root, ["tempo"])
         await g.commit(root, "base")
 
     run(seed())
@@ -178,7 +178,7 @@ def test_time_budget_is_one_nonzero_stuck_bullet(repo, budget):
 @pytest.mark.parametrize(
     ("old", "new", "needle"),
     [
-        ("- tempo/thing.py\n\n## Goal", "- specs/review.md\n\n## Goal", "prompt spec"),
+        ("- tempo/thing.py\n\n## Goal", "- tempo/specs/review.md\n\n## Goal", "prompt spec"),
         ("- tempo/thing.py\n\n## Goal", "- tempo/later.py\n\n## Goal", "does not exist"),
         ("- tempo/thing.py\n\n## Goal", "- ../etc/passwd\n\n## Goal", "repo-relative"),
         ("## Depends on\nnone", "## Depends on\n- ghost", "does not resolve"),
