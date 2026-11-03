@@ -1239,6 +1239,24 @@ and rework run requisition review on each proposal). Each becomes separate prepa
 **Work:** On the P4 fixture repo, run real tickets from the VS Code extension of each host that passed
 the live gate.
 Include one round trip with a prompt at `RENDER_BOUND_CHARS`; P4c's live gate did not run it.
+Only Claude passed the live gate, so P7 runs Claude.
+
+- **Repo.** `~/livegate/p7`, made by `tests/fixturerepo.py`. Its `config.yaml` sets Claude's `low`
+  tier to Haiku (`claude-haiku-4-5-20251001`), so an escalate changes the model, and `max_tickets: 10`,
+  because every retry is a new `start`.
+- **One `/tempo-run`, three tickets**, on the extension's default approvals (Manual):
+  - `add-subtract`: the fixture ticket, end to end.
+  - `big-context`: a small change whose Context lists a data file sized with tempo's renderer, so the
+    requisition_review prompt (ticket plus the base Implement render) is just under `RENDER_BOUND_CHARS`.
+    The Implement render alone stays under authoring headroom.
+  - `retry-escalate` at `agent_tier: low`: its Verification also runs `gate.py`, outside the scope
+    fence. It fails its first 3 runs in the ticket worktree (a counter outside the repo), passes in the
+    merge-base worktree (so the failure is not attributed to main), and passes from run 4. The expected
+    path is retry, retry, a retry refused by `IDENTICAL_K`, escalate to Sonnet, merge. The
+    orchestrator's choices are its own; whatever it decides is reported.
+- **Checked after the run:** the journal, merge commits, `decisions.md`, each spawn's
+  `resolvedModel`, no permission prompt, and the 20-part prompt's round trip.
+- **Results** go in a P7 section of `docs/livegate/claude.md`.
 
 **Exit:**
 - Each host completes a ticket end to end with verified artifacts.
