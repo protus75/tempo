@@ -173,7 +173,7 @@ def test_tickets_closed_sets_and_constants():
     assert set(get_args_deep(tickets.Level)) == {'high', 'low', 'max', 'medium'}
     assert tickets.OPTIONAL_SECTIONS == ('On-demand', 'Regression')
     assert tickets.REQUIRED_SECTIONS == ('Depends on', 'Context', 'Goal / Why', 'Scope in / Scope out', 'Scope fence', 'Acceptance criteria', 'Verification', 'Definition of rejected', 'Time budget')
-    assert tickets.RESERVED_STEMS == frozenset({'decisions', 'retro'})
+    assert tickets.RESERVED_STEMS == frozenset({'decisions', 'orchestrator', 'retro'})
     assert tickets.SECTIONS == ('Depends on', 'Context', 'Goal / Why', 'Scope in / Scope out', 'Scope fence', 'Acceptance criteria', 'Verification', 'Definition of rejected', 'Time budget', 'On-demand', 'Regression')
 
 def test_triage_closed_sets_and_constants():

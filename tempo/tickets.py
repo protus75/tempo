@@ -23,7 +23,7 @@ from tempo.seams import FileSystem
 TICKETS_DIR = "tickets"
 TICKET_FILE = "ticket.md"
 STEM = re.compile(r"^[a-z0-9][a-z0-9-]{1,63}$")
-RESERVED_STEMS = frozenset({"decisions", "retro"})  # sibling dirs that match the stem regex (sections 14, 15)
+RESERVED_STEMS = frozenset({"decisions", "orchestrator", "retro"})  # sibling dirs that match the stem regex (sections 13, 14, 15)
 INTAKE_SIGNAL = "ticket_intake"
 CODE = "ticket_schema"
 

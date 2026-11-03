@@ -1277,7 +1277,6 @@ changes are made in the phase shown, so the plan and the code stay in step.
 - **P5 (§13):**
   - Reserve `tickets/orchestrator/`.
   - Add `decisions.md` to the ticket dir listing.
-  - Add `orchestrator` to the `source` vocabulary.
 - **P6 (§17):** Root agent files become three, each with `tempo:core`, `tempo:protocol`, and
   `tempo:session`. Rule set B is replaced by the `tempo:session` block.
 - **P6 (§13):** Add the `lint <stem>` verb to touchpoint 1, idea intake.
