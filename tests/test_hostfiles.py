@@ -205,7 +205,6 @@ def test_core_drift_uses_branch_render(monkeypatch):
 def test_core_classifier_is_pure(monkeypatch):
     from tempo.git import Git
     from tempo.journal import Journal
-    from tempo.llm import FakeLLM
     from tempo.seams import SubprocessExec
 
     samples = [None, b"Project", hostfiles.render(b"Project"),
@@ -219,7 +218,7 @@ def test_core_classifier_is_pure(monkeypatch):
                              (Path, ("read_bytes", "read_text", "write_bytes", "write_text", "open")),
                              (builtins, ("open",)), (SubprocessExec, ("run", "kill_group")),
                              (asyncio, ("create_subprocess_exec", "create_subprocess_shell")),
-                             (Git, ("_call",)), (FakeLLM, ("call",)),
+                             (Git, ("_call",)),
                              (Journal, ("append",))):
             for name in names:
                 pure.setattr(owner, name, forbidden)
@@ -249,10 +248,10 @@ if __name__ == "__main__":
 @pytest.mark.asyncio
 @pytest.mark.parametrize('dirty', [False, True])
 async def test_committed_core_preserves_raw_bytes(repo, dirty):
-    from tests.test_merge import context
+    from tests.test_stages import context
     from tempo.config import load_config
     from tests.test_stages import evidence
-    ctx = context(repo, [])
+    ctx = context(repo)
     raw = hostfiles.render(b'project\xff\r\nno final newline')
     path = repo / 'AGENTS.md'
     path.write_bytes(raw)
@@ -278,11 +277,11 @@ async def test_committed_core_preserves_raw_bytes(repo, dirty):
                                    'CORE_TEMPLATE = b"a"\nCORE_TEMPLATE = b"b"\n'])
 async def test_committed_core_template_extraction_refuses(repo, source):
     from tempo import stages
-    from tests.test_merge import context
+    from tests.test_stages import context
     from tests.test_stages import author, STEM, evidence
     from tempo.tickets import validate_ticket
     author(repo)
-    ctx = context(repo, [])
+    ctx = context(repo)
     ctx.fs.write(repo / 'tempo/hostfiles.py', source.encode())
     await ctx.git.add(repo, ['tempo/hostfiles.py'])
     await ctx.git.commit(repo, 'malformed candidate template')

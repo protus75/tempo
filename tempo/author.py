@@ -2,6 +2,7 @@
 
 import json
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -9,14 +10,14 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field
 
 from tempo.box import Box, BoxError, DecisionRecord, Message, Resolution, record_path, render_record
-from tempo.driver import Driver, LlmStage, unwrap_fence
+from tempo.driver import Driver, LlmStage, unrendered, unwrap_fence
 from tempo.gates import GateReport
 from tempo.git import GitError
 from tempo.artifacts import Finding
 from tempo.inbox import CAPS, bounded, report_data
 from tempo.journal import EventType
 from tempo.policy import policy_row, start_state
-from tempo.requisition import RequisitionVerdict, review_ticket
+from tempo.requisition import RequisitionVerdict, requisition
 from tempo.checkout import SPECS_DIR, Checkout
 from tempo.specs import Spec, load_spec, render
 from tempo.stages import findings_text
@@ -90,6 +91,12 @@ class AuthorGate:
                 if message.bug_origin == "player" and message.summary in split_frontmatter(candidate)[1]:
                     findings.append(Finding(code=self.code, path=path, message="raw player prose appears in ticket body",
                         paved_road="write your own summary; cite the delimited evidence file instead"))
+            if message is not None and not findings:
+                # The mechanical requisition snag, decided before any review call.
+                reviewed = requisition(self.checkout.repo, artifact.stem,
+                                       stamped(self.checkout, message, artifact)[0], SPECS_DIR)
+                if (snag := reviewed.precheck()) is not None:
+                    findings.extend(snag.findings)
         except TicketInvalid as exc:
             findings.extend(exc.findings)
         except (OSError, ValueError) as exc:
@@ -194,86 +201,70 @@ async def recover_retro_ticket(checkout: Checkout, box: Box, message: Message) -
     return AuthorOutcome(stem=stem)
 
 
-async def author(checkout: Checkout, driver: Driver, box: Box, message: Message, pass_no: int) -> AuthorOutcome:
-    """Author and ticket-plane commit one recorded author verdict."""
+async def author_render(checkout: Checkout, box: Box, message: Message) -> Callable[[object, list], str] | str:
+    """The author prompt for a recorded author verdict, or the evidence for a failure decision when it cannot run."""
     try:
-        row = policy_row(message.message_class, message.bug_origin, message.has_repro)
+        policy_row(message.message_class, message.bug_origin, message.has_repro)
     except ValueError as exc:
-        return await failure_decision(checkout, driver, box, message, str(exc))
+        return str(exc)
     assert message.verdict is not None
     spec: Spec = load_spec((SPECS_DIR / "author.md").read_text())
     files = "\n".join(await checkout.git.ls_files(checkout.repo))
     try:
         report = report_data(message.report, box.root) if message.report else None
     except (OSError, ValueError) as exc:
-        return await failure_decision(checkout, driver, box, message, f"report custody refused: {exc}")
+        return f"report custody refused: {exc}"
     request = json.dumps({"class": message.message_class, "rationale": message.verdict.rationale,
                           "summary": message.summary, "retro_report_key": message.retro_report_key,
                           "fixed_failure": message.fixed_failure,
                           "overcorrection_risk": message.overcorrection_risk,
                           "proposed_spec_paths": message.proposed_spec_paths, "reopen": message.reopen,
                           "report": report})
+    open_tickets = await _open_tickets(checkout)
 
     def render_author(_: object, findings: list) -> str:
-        inputs = {"request": request, "files": files, "open_tickets": open_tickets,
-                  "retry_findings": findings_text(findings)}
-        return render(spec, inputs)
+        return render(spec, {"request": request, "files": files, "open_tickets": open_tickets,
+                             "retry_findings": findings_text(findings)})
+    return render_author
 
-    open_tickets = await _open_tickets(checkout)
-    reviewed: RequisitionVerdict | None = None
-    reviewed_text: str | None = None
-    reviewed_state: str | None = None
-    author_gate = AuthorGate(checkout, message.message_class)
-    author_gate.message = message
 
-    async def review_candidate(artifact: BaseModel, call_seq: int) -> GateReport:
-        nonlocal reviewed, reviewed_text, reviewed_state
-        assert isinstance(artifact, AuthorReply)
-        if author_gate.check(artifact, checkout.repo).verdict == "fail":
-            # Grammar-invalid candidates never reach a requisition review call.
-            return GateReport(code="requisition_review", verdict="pass")
-        provisional = stamp(stamp(artifact.ticket, "source", f"box:{message.message_class}"), "state", "draft")
-        parsed = validate_ticket(artifact.stem, provisional, checkout.repo)
-        state = start_state(checkout.config, row=row, fence=parsed.scope_fence,
-                            gate_bypass=parsed.frontmatter.gate_bypass,
-                            reopen=message.reopen)
-        text = stamp(provisional, "state", state)
-        reviewed = await review_ticket(
-            driver, repo=checkout.repo, stem=artifact.stem, text=text, specs_dir=SPECS_DIR,
-            tier=spec.meta.tier, stem_slot="author", run_seq=pass_no,
-            attempt=message.seq, call_seq=call_seq)
-        reviewed_text = text
-        reviewed_state = state
-        findings = reviewed.findings
-        if reviewed.verdict != "approve":
-            author_gate.cleanup()
-        if reviewed.verdict == "rma":
-            findings = [finding.model_copy(update={"code": "requisition_rma"}) for finding in findings]
-        return GateReport(code="requisition_review", verdict="pass" if reviewed.verdict == "approve" else "fail",
-                          findings=findings)
+def author_spec() -> Spec:
+    return load_spec((SPECS_DIR / "author.md").read_text())
 
-    checkout.journal.append(EventType.SIGNAL, {"signal": "author_invoked", "message": message.id})
-    try:
-        result = await driver.run(
-            LlmStage(surface="author", emits=AuthorReply, gates=[author_gate],
-                     render=render_author, review=review_candidate,
-                     terminal_findings=frozenset({"requisition_rma"})), None,
-            ticket=None, run_seq=pass_no, attempt=message.seq, workspace=checkout.repo,
-            tier=spec.meta.tier, effort=spec.meta.effort, stuck_budget=AUTHOR_STUCK_S)
-    except BaseException:
-        author_gate.cleanup()
-        raise
-    if result.outcome != "ok" or not isinstance(result.artifact, AuthorReply):
-        author_gate.cleanup()
-        return await failure_decision(checkout, driver, box, message,
-                                      findings_text(result.findings) or result.outcome)
-    reply = result.artifact
-    assert reviewed is not None and reviewed_text is not None and reviewed_state is not None
-    text = reviewed_text
+
+def author_stage(checkout: Checkout, message: Message, render_author=unrendered) -> LlmStage:
+    gate = AuthorGate(checkout, message.message_class)
+    gate.message = message
+    return LlmStage(surface="author", emits=AuthorReply, gates=[gate], render=render_author)
+
+
+def stamped(checkout: Checkout, message: Message, reply: AuthorReply) -> tuple[str, str]:
+    """The candidate ticket text requisition review sees, and its start state."""
+    row = policy_row(message.message_class, message.bug_origin, message.has_repro)
+    provisional = stamp(stamp(reply.ticket, "source", f"box:{message.message_class}"), "state", "draft")
+    parsed = validate_ticket(reply.stem, provisional, checkout.repo)
+    state = start_state(checkout.config, row=row, fence=parsed.scope_fence,
+                        gate_bypass=parsed.frontmatter.gate_bypass, reopen=message.reopen)
+    return stamp(provisional, "state", state), state
+
+
+def discard(checkout: Checkout, stem: str, *, remove=shutil.rmtree) -> None:
+    """Remove a rejected candidate's uncommitted ticket directory (its copied report evidence)."""
+    directory = checkout.repo / "tickets" / stem
+    if directory.exists():
+        remove(directory)
+
+
+async def publish(checkout: Checkout, driver: Driver, box: Box, message: Message, reply: AuthorReply,
+                  text: str, state: str, reviewed: RequisitionVerdict) -> AuthorOutcome:
+    """Ticket-plane commit of an approved candidate, then intake, the verdict, and the message's resolution."""
     path = ticket_path(reply.stem)
+    evidence = checkout.repo / "tickets" / reply.stem / "evidence"
+    copied = sorted(str(p.relative_to(checkout.repo)) for p in evidence.rglob("*") if p.is_file()) \
+        if evidence.is_dir() else []
 
     async def commit() -> str:
-        paths = [path, *author_gate.copied.get(reply.stem, [])]
+        paths = [path, *copied]
         await checkout.git.add(checkout.repo, paths)
         await checkout.git.commit(checkout.repo, f"tempo({reply.stem}): ticket", only=paths)
         return await checkout.git.rev_parse(checkout.repo, "HEAD")
@@ -281,28 +272,19 @@ async def author(checkout: Checkout, driver: Driver, box: Box, message: Message,
     try:
         checkout.fs.write(checkout.repo / path, text.encode())
         sha = await driver.effects.run(commit, key=f"ticket-plane/{reply.stem}/author", ticket=None)
-    except BaseException as exc:
-        if reply.stem in author_gate.copied:
-            paths = [path, *author_gate.copied[reply.stem]]
-            # Restore from HEAD: remove new index entries, but retain a commit
-            # that landed before the Effects completion or SHA read failed.
-            indexed = set(await checkout.git.ls_files(checkout.repo))
-            staged = [p for p in paths if p in indexed]
-            if staged:
-                await checkout.git.restore(checkout.repo, staged, source="HEAD")
-            try:
-                await checkout.git.rev_parse(checkout.repo, f"HEAD:{path}")
-            except GitError:
-                author_gate.cleanup()
-            else:
-                author_gate.copied.clear()
-        if not isinstance(exc, Exception):
-            raise
+    except Exception as exc:  # noqa: BLE001 -- a failed commit becomes the failure decision
+        # Restore from HEAD: remove new index entries, but retain a commit
+        # that landed before the Effects completion or SHA read failed.
+        indexed = set(await checkout.git.ls_files(checkout.repo))
+        if staged := [p for p in (path, *copied) if p in indexed]:
+            await checkout.git.restore(checkout.repo, staged, source="HEAD")
+        try:
+            await checkout.git.rev_parse(checkout.repo, f"HEAD:{path}")
+        except GitError:
+            discard(checkout, reply.stem)
         return await failure_decision(checkout, driver, box, message, f"commit failed: {type(exc).__name__}: {exc}")
-    author_gate.copied.clear()
     checkout.journal.append(EventType.SIGNAL, {"signal": "ticket_intake", "source": f"box:{message.message_class}",
-                                                "state": reviewed_state,
-                                                "new": True, "commit": sha}, ticket=reply.stem)
+                                                "state": state, "new": True, "commit": sha}, ticket=reply.stem)
     checkout.journal.append(EventType.SIGNAL, {"signal": "requisition_verdict", "verdict": "approve",
                                                 "ticket_sha": reviewed.ticket_sha, "provider": reviewed.provider,
                                                 "model": reviewed.model, "spec_version": reviewed.spec_version},

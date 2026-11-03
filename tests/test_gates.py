@@ -260,14 +260,14 @@ def test_core_drift_default_hard(repo):
     from tempo.hostfiles import CoreDriftGate
     from tempo import stages
     from tests.test_stages import evidence, author, STEM
-    from tests.test_merge import context
+    from tests.test_stages import context
     from tempo.tickets import validate_ticket
     artifact = evidence(core_files={'AGENTS.md': None})
     assert 'core_drift' in ENGINE_GATE_CODES and DEFAULT_GATE_SEVERITY['core_drift'] == 'hard'
     gate = CoreDriftGate()
     assert not run_gates([gate], artifact, repo).passed
     author(repo, bypass='gate_bypass:\n  - {code: core_drift, reason: reviewed exception}\n')
-    ctx = context(repo, [])
+    ctx = context(repo)
     ticket = validate_ticket(STEM, (repo / f'tickets/{STEM}/ticket.md').read_text(), repo)
     bypass = stages.check_severity(ctx, ticket)
     result = run_gates([gate], artifact, repo, severity=bypass)

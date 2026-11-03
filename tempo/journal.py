@@ -31,7 +31,7 @@ class EventType(StrEnum):
     CHECKPOINT = "checkpoint"
 
 
-Dispatch = Literal["retry", "escalate", "reject_queue", "park"]
+Dispatch = Literal["retry", "escalate", "reject_queue", "park", "split"]
 
 SIGNAL_NAMES: frozenset[str] = frozenset({
     "author_invoked", "control_decision", "dead_dependency", "draft_confirmed",

@@ -7,8 +7,6 @@ from tempo.__main__ import main
 from tempo.caps import CAPS, IDENTICAL_K, capability, consume, draws, identical, next_rung, remaining, spent, spent_reason
 from tempo.config import Caps, load_config
 from tempo.journal import EventType, Journal
-from tempo.llm import FakeLLM
-from tempo.stages import StagesRun
 from tempo.tickets import validate_ticket
 from tests.test_cli import git_out
 from tests.support import Clock, commit_ticket, confirmed, journal, make_root

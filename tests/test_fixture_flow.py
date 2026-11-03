@@ -1,6 +1,7 @@
-"""A fake-host orchestrator session on the fixture repo (AGENT_PLAN.md P4 steps b-e, P5a): begin_session,
-status, start, requisition, implement, check, review, merge, each failure decision, a resumed session, and
-the handoff, every action fenced by the host's hooks."""
+"""A fake-host orchestrator session on the fixture repo (AGENT_PLAN.md P4 steps b-e, P5a, P5b): begin_session,
+status, start, requisition, implement, check, review, merge, each failure decision, a resumed session, the
+handoff, split, a triage pass that authors a ticket, confirm, and a retro, every action fenced by the host's
+hooks."""
 
 import json
 import subprocess
@@ -241,3 +242,111 @@ def test_a_retry_after_a_review_snag_renders_its_findings_in_the_next_implement_
     prompt = "".join(Path(p).read_text() for p in parts)
     assert PRIOR_ATTEMPTS in prompt and "subtract swaps its operands" in prompt
     assert "the operands were swapped" in prompt  # the retry's lessons, from decisions.md
+
+
+def ticket_text(goal: str, *, depends: str = "none", state: str = "confirmed") -> str:
+    text = (Path(__file__).resolve().parent.parent / "fixture" / "tickets" / STEM / "ticket.md").read_text()
+    text = text.replace("`calc.py` gains `subtract(a, b)`, so the fixture has one small real change to make.", goal)
+    return text.replace("## Depends on\nnone", f"## Depends on\n{depends}").replace("state: confirmed",
+                                                                                      f"state: {state}")
+
+
+def spawn(host: FakeHost, args: dict, reply: str) -> dict:
+    prepared = host.tool("prepare", args)
+    assert prepared["state"] == "pending", prepared
+    host.subagent(prepared, reply)
+    return host.until_done(host.tool("submit", {"call": prepared["call"]}), "submit", {"call": prepared["call"]})
+
+
+def test_split_publishes_reviewed_successors_and_retires_the_original(repo):
+    host = FakeHost("claude", repo)
+    host.tool("begin_session")
+    failed_run(host)
+    tickets = [{"stem": "subtract-core", "ticket": ticket_text("`calc.py` gains `subtract(a, b)`.")},
+               {"stem": "subtract-check", "ticket": ticket_text("`test_calc.py` checks `subtract`.",
+                                                                depends="- subtract-core")}]
+    with pytest.raises(Refusal, match="at least two"):
+        host.tool("split_propose", {"stem": STEM, "tickets": tickets[:1], "lessons": "too big"})
+    proposed = host.tool("split_propose", {"stem": STEM, "tickets": tickets, "lessons": "two pieces"})
+    assert proposed["dispatch"] == "split" and proposed["proposals"] == ["subtract-core", "subtract-check"]
+    assert eligible(host) == [] and host.tool("status")["parked"] == [STEM]
+    review = {"surface": "requisition_review", "stem": STEM}
+    assert spawn(host, {**review, "proposal": "subtract-core"}, APPROVE_TICKET)["outcome"] == "ok"
+    with pytest.raises(Refusal, match="proposal subtract-check has no approve verdict"):
+        host.tool("split_commit", {"stem": STEM})
+    assert spawn(host, {**review, "proposal": "subtract-check"}, RMA_TICKET)["outcome"] == "gate_failed"
+    with pytest.raises(Refusal, match="proposal subtract-check has no approve verdict"):
+        host.tool("split_commit", {"stem": STEM})
+
+    tickets[1]["ticket"] = ticket_text("`test_calc.py` asserts `subtract(5, 3) == 2`.", depends="- subtract-core")
+    assert host.tool("split_propose", {"stem": STEM, "tickets": tickets, "lessons": "clearer check"})["order"] == 2
+    for stem in ("subtract-core", "subtract-check"):
+        assert spawn(host, {**review, "proposal": stem}, APPROVE_TICKET)["outcome"] == "ok"
+    assert host.tool("split_commit", {"stem": STEM})["successors"] == ["subtract-core", "subtract-check"]
+    assert git(repo, "show", "--name-only", "--format=", "HEAD").split() == [
+        "tickets/subtract-check/ticket.md", "tickets/subtract-core/ticket.md"]
+    assert eligible(host) == ["subtract-core"]  # the check depends on the core; the original is superseded
+    assert not (repo / ".tempo" / "worktrees" / f"{STEM}.split").exists()
+    with pytest.raises(Refusal, match="no pending split"):
+        host.tool("split_commit", {"stem": STEM})
+    assert "two pieces" in (repo / "tickets" / STEM / "decisions.md").read_text()
+
+
+def test_a_triage_pass_authors_a_draft_that_confirm_releases(repo):
+    from tempo.box import BOX_DIR, Box
+    from tempo.seams import LocalFileSystem
+
+    host = FakeHost("claude", repo)
+    host.tool("begin_session")
+    box = Box(load_config(None, cwd=repo).state_dir / BOX_DIR, LocalFileSystem())
+    id, _ = box.enqueue(message_class="suggestion", origin="test", summary="calc needs multiply")
+    assert [m["id"] for m in host.tool("read_box")["pending"]] == [id]
+    triage = json.dumps({"verdict": "author", "link": None, "summary": "worth a ticket",
+                         "rationale": "multiply is missing", "evidence": [], "reopen_after_days": None})
+    triaged = spawn(host, {"surface": "triage", "message": id}, triage)
+    assert triaged["outcome"] == "ok" and triaged["next"] == "author"
+    candidate = ticket_text("`calc.py` gains `multiply(a, b)`.").replace("state: confirmed\nsource: human\n", "")
+    authored = spawn(host, {"surface": "author", "message": id},
+                     json.dumps({"stem": "add-multiply", "ticket": candidate}))
+    assert authored["next"] == "requisition_review"
+    snag = json.dumps({"verdict": "snag", "summary": "vague", "findings": [
+        {"code": "ticket", "message": "name the test", "paved_road": "cite test_calc.py", "kind": "authoring_error"}]})
+    reviewed = spawn(host, {"surface": "requisition_review", "message": id}, snag)
+    assert reviewed["next"] == "author" and not (repo / "tickets" / "add-multiply").exists()
+    prepared = host.tool("prepare", {"surface": "author", "message": id})
+    parts = [line.removeprefix("part: ") for line in prepared["spawn_prompt"].splitlines() if line.startswith("part: ")]
+    assert "cite test_calc.py" in "".join(Path(p).read_text() for p in parts)  # the snag re-prompts author
+    host.subagent(prepared, json.dumps({"stem": "add-multiply", "ticket": candidate}))
+    host.until_done(host.tool("submit", {"call": prepared["call"]}), "submit", {"call": prepared["call"]})
+    published = spawn(host, {"surface": "requisition_review", "message": id}, APPROVE_TICKET)
+    assert published["outcome"] == "ok" and published["line"] == f"{id}: ticket -> add-multiply"
+    assert host.tool("read_box")["pending"] == []
+    assert "state: draft" in (repo / "tickets" / "add-multiply" / "ticket.md").read_text()
+    assert "add-multiply" not in eligible(host)
+
+    with pytest.raises(Refusal, match="lessons is blank"):
+        host.tool("confirm", {"stem": "add-multiply", "lessons": ""})
+    assert host.tool("confirm", {"stem": "add-multiply", "lessons": "scope is one function"})["state"] == "confirmed"
+    assert "state: confirmed" in git(repo, "show", "HEAD~1:tickets/add-multiply/ticket.md")
+    assert "add-multiply" in eligible(host)
+    with pytest.raises(Refusal, match="not draft"):
+        host.tool("confirm", {"stem": "add-multiply", "lessons": "again"})
+
+
+def test_retro_runs_when_status_shows_it_due(repo):
+    host = FakeHost("claude", repo)
+    Journal(load_config(None, cwd=repo).state_dir, host.clock).append(
+        EventType.SIGNAL, {"signal": "handoff_written", "number": 0}, ticket=None)
+    host.tool("begin_session")
+    assert host.tool("status")["retro_due"] is False
+    with pytest.raises(Refusal, match="retro is not due"):
+        host.tool("prepare", {"surface": "retro"})
+    host.tool("write_handoff", {"text": "nothing to do"})
+    host.clock.now += timedelta(days=7)
+    host.chat, host.token = "chat-2", None
+    host.tool("begin_session")
+    assert host.tool("status")["retro_due"] is True
+    retro = spawn(host, {"surface": "retro"}, json.dumps({"proposals": []}))
+    assert retro["outcome"] == "ok" and retro["final"]
+    assert (repo / "tickets" / "retro" / "000001.md").read_text().startswith("# Retro receipt")
+    assert host.tool("status")["retro_due"] is False

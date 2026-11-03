@@ -17,7 +17,6 @@ from tempo.config import MechanicalCheck, RegenerateStrategy, UnionStrategy, loa
 from tempo.driver import Driver
 from tempo.git import Git
 from tempo.journal import EventType
-from tempo.llm import FakeLLM
 from tempo.mergequeue import CONFLICT_FACTS, RED_STREAK, TREE_MISMATCH, ConflictHandoff, MergeQueue, TreeMismatch
 from tempo.seams import ExecutableNotFound, LocalFileSystem, SubprocessExec
 from tempo.stages import ApprovedInvoice, CommandResult, StageContext, render_review
@@ -38,9 +37,7 @@ def ctx(tmp_path):
     conduct = adopt_conduct(repo)
     config = load_config(None, cwd=repo)
     exec_ = SubprocessExec()
-    driver = Driver.from_config(config, llm=FakeLLM([]), env=ENV,
-                                clock=lambda: datetime(2026, 10, 6, tzinfo=UTC),
-                                sleep=lambda _: asyncio.Event().wait())
+    driver = Driver.from_config(config, clock=lambda: datetime(2026, 10, 6, tzinfo=UTC))
     context = StageContext(repo, config, ENV, exec_, Git(exec_, env=dict(ENV), timeout=30),
                            LocalFileSystem(), driver, SPECS)
     async def init():
@@ -129,7 +126,7 @@ def scripted(ctx, monkeypatch, results):
 
 def admission_control(ctx, lifecycle="admission-life"):
     return PauseConsumer(journal=ctx.driver.journal, lifecycle_id=lifecycle,
-                         state_dir=ctx.config.state_dir, fs=ctx.fs, sleep=ctx.driver.sleep,
+                         state_dir=ctx.config.state_dir, fs=ctx.fs, sleep=lambda _: asyncio.Event().wait(),
                          files=lambda: (ctx.config.state_dir / "control/inbox").glob("*"),
                          read=Path.read_bytes)
 

@@ -15,7 +15,8 @@ A result with `"ok": false` is a refusal. Do what its `do_instead` says, or end 
 
 ## One ticket, in this order
 
-1. `list_eligible`. Take the first stem. If none is eligible, end the session.
+1. `list_eligible`. Take the first stem. If none is eligible, end the session. Before each ticket, run Box
+   when `read_box` lists a pending message, and Retro when `status` shows `"retro_due": true`.
 2. `start` with `{"stem": "<stem>"}`.
 3. For each surface in this order: `requisition_review`, `implement`, `review`:
    a. `prepare` with `{"stem": "<stem>", "surface": "<surface>"}`.
@@ -42,12 +43,36 @@ one of these with `{"stem": "<stem>", "lessons": "<what this attempt taught, for
 - `escalate`: the attempt fell short of the task; a stronger model is needed.
 - `park`: the ticket itself is wrong or unclear, so no attempt can pass; it waits for a ticket edit.
 - `reject`: the ticket is not worth doing.
+- `split_propose`: the ticket is too big for one attempt. Also pass `"tickets"`: a list of
+  `{"stem": "<new stem>", "ticket": "<the whole ticket.md>"}`, two or more, each keeping the original's
+  `source`, `agent_tier`, and `agent_effort`, with `state: confirmed`. Then, for each stem in
+  `"proposals"`, run the call steps (3a-3d) with `{"stem": "<stem>", "surface": "requisition_review",
+  "proposal": "<proposal>"}`. When every one is `"ok"`, call `split_commit` with `{"stem": "<stem>"}`.
+  When one is not, call `split_propose` again on the same stem with fixed tickets, or `park` it.
 
 A refusal says which of the others to use. Then go to step 1 of One ticket.
 
 `status` lists parked tickets and storm `holds`. Call `reoffer` with `{"stem", "lessons"}` on a parked
 ticket, or `release_hold` with `{"hold_id", "lessons"}` on a hold, only when you can say what changed
 since. Call `file_box` with `{"summary": "<text>"}` for a problem outside the ticket you are on.
+
+## Box
+
+For each message in `read_box`'s `"pending"`, run the call steps (3a-3d) with `{"surface": "triage",
+"message": "<id>"}`, then follow the result's `"next"`:
+
+- `"author"`: the call steps with `{"surface": "author", "message": "<id>"}`.
+- `"requisition_review"`: the call steps with `{"surface": "requisition_review", "message": "<id>"}`.
+- no `"next"`: the message is settled, or stays pending; go to the next message.
+
+A message's `"line"` says how it settled. A new ticket in `state: draft` waits for `confirm` with
+`{"stem": "<stem>", "lessons": "<why it is ready to run>"}`; confirm it only when its findings and
+scope are sound.
+
+## Retro
+
+Run the call steps with `{"surface": "retro"}`. The result commits the retro report, or files a failure
+report in the box.
 
 ## End
 

@@ -145,7 +145,7 @@ def test_tombstone_rereports_reopen_at_threshold(tmp_path, monkeypatch):
     from tempo.journal import EventType, Journal
     from tests.support import Clock, commit_ticket, confirmed
     from tests.test_triage import root_with_box, reply, run
-    from tempo.llm import FakeLLM
+    from tests.support import Script
 
     root, _ = root_with_box(tmp_path)
     clock = Clock()
@@ -155,7 +155,7 @@ def test_tombstone_rereports_reopen_at_threshold(tmp_path, monkeypatch):
     fields = dict(message_class="failure_report", origin="test", summary="observed failure")
     id, _ = box.enqueue(**fields, occurrence_id="original")
     assert box.get(id).reports == 0 and box.get(id).reopen is False
-    assert run(root, monkeypatch, FakeLLM([reply("tombstone", link="known")])) == 0
+    assert run(root, monkeypatch, Script([reply("tombstone", link="known")])) == 0
     box.record_verdict(id, Verdict(verdict="tombstone", produced_by_spec_version="1.0", rationale="prior match"))
     path = root / record_path(f"tombstone-{id}")
     committed_bytes = path.read_bytes()
@@ -165,7 +165,7 @@ def test_tombstone_rereports_reopen_at_threshold(tmp_path, monkeypatch):
     box.enqueue(**fields, occurrence_id="signature-1")
     assert box.get(id).reports == 1 and box.get(id).resolution.kind == "tombstone"
     incoming, _ = box.enqueue(**{**fields, "summary": "semantically the same new evidence"}, occurrence_id="semantic-source")
-    assert run(root, monkeypatch, FakeLLM([reply("tombstone", link=f"tombstone-{id}")])) == 0
+    assert run(root, monkeypatch, Script([reply("tombstone", link=f"tombstone-{id}")])) == 0
     assert box.get(incoming).status == "resolved"
     assert box.get(id).reports == 2 and box.get(id).verdict.verdict == "tombstone"
     observed = []

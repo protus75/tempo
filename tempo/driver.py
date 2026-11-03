@@ -1,32 +1,26 @@
-"""The one LLM-stage driver (TEMPO_PLAN.md section 5 invariant 2, section 6).
+"""The LLM stage contract and the seams every stage shares (TEMPO_PLAN.md section 5 invariant 2, section 6).
 
-render -> spool prompt -> LLM effect (raced against the stuck budget) -> spool output -> unwrap one
-fence -> validate -> gates -> on hard failure re-prompt the SAME workspace with the findings,
-bounded by the retry cap. Stages differ only in spec (render), artifact type, and gate list.
-
-Every model call crosses the LLM effect (tempo/llmeffect.py); the driver never calls the seam directly.
+A stage differs only in spec (render), artifact type, gate list, and review hook. Every model call runs as a host
+subagent through `tempo.call`: `prepare` renders and spools the prompt, `submit` unwraps one fence, validates,
+and runs the gates (`check_reply`) and the review hook.
 """
 
-import asyncio
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from tempo.artifacts import Finding, Outcome, StageResult
+from tempo.artifacts import Finding
 from tempo.config import Config, ConfigSnapshot, Severity
 from tempo.effects import Effects
 from tempo.enginelog import EngineLog
 from tempo.gates import Gate, GateReport, merge_severity, run_gates
-from tempo.journal import Journal, run_seq as journal_run_seq
-from tempo.llm import LLM, AgentEffort, AgentTier, LLMAborted, LLMRequest, LLMResult
-from tempo.llmeffect import llm_call
-from tempo.providers import WRITING_SURFACES, ProviderCallError
+from tempo.journal import Journal
 from tempo.redact import Redactor
-from tempo.seams import Clock, CommandNotifications, FileSystem, LocalFileSystem, Sleep, SubprocessExec
+from tempo.seams import Clock, FileSystem, LocalFileSystem
 
 _FENCE = re.compile(r"\A\s*(`{3,})[\w+-]*[ \t]*\n(.*)\n\1[ \t]*\s*\Z", re.DOTALL)
 
@@ -35,6 +29,10 @@ def unwrap_fence(text: str) -> str:
     """Strip exactly ONE surrounding markdown code fence (optionally language-tagged)."""
     m = _FENCE.match(text)
     return m.group(2) if m else text
+
+
+def unrendered(consumed: Any, findings: list[Finding]) -> str:
+    raise RuntimeError("a stage rebuilt for submit never renders")
 
 
 @dataclass(frozen=True)
@@ -59,357 +57,31 @@ class Spool:
         self._fs.write(self.root / stem / str(attempt) / name, self._redactor.scrub(text).encode())
 
 
-class _StuckBudget(Exception):
-    pass
-
-
-@dataclass
-class _Tally:
-    calls: int = 0
-    last: LLMResult | None = None
-    findings: list[Finding] = field(default_factory=list)
-
-
-@dataclass
-class _Race:
-    call: asyncio.Future
-    timer: asyncio.Future
-    cleanup: asyncio.Task | None = None
-    timer_stopping: bool = False
-
-    def cancel_timer(self) -> None:
-        if not self.timer_stopping:
-            self.timer_stopping = True
-            self.timer.cancel()
-
-
-@dataclass
-class _Invocation:
-    task: asyncio.Task
-    race: _Race | None = None
-    abort: asyncio.Task | None = None
-
-
-async def _observe(task: asyncio.Future) -> Any:
-    # A waiter's repeated cancellation cannot abandon the owned cleanup.
-    cancelled = None
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError as exc:
-            cancelled = exc
-        except BaseException:
-            break
-    result = task.result()
-    if cancelled is not None:
-        raise cancelled
-    return result
-
-
 class Driver:
-    def __init__(
-        self,
-        *,
-        llm: LLM,
-        journal: Journal,
-        redactor: Redactor,
-        spool: Spool,
-        log: EngineLog,
-        clock: Clock,
-        sleep: Sleep,
-        severity: Mapping[str, Severity],
-        retry_cap: int,
-    ) -> None:
-        self.llm = llm
+    """The seams one checkout's stages share: journal, effects, spool, redactor, engine log, clock, severity."""
+
+    def __init__(self, *, journal: Journal, redactor: Redactor, spool: Spool, log: EngineLog, clock: Clock,
+                 severity: Mapping[str, Severity]) -> None:
         self.journal = journal
         self.effects = Effects(journal)
         self.redactor = redactor
         self.spool = spool
         self.log = log
         self.clock = clock
-        self.sleep = sleep
         self.severity = severity
-        self.retry_cap = retry_cap
-        self._active: _Invocation | None = None
-        self._notify_config = None
 
     @classmethod
-    def from_config(
-        cls,
-        config: Config | ConfigSnapshot,
-        *,
-        llm: LLM,
-        env: Mapping[str, str],
-        clock: Clock,
-        sleep: Sleep,
-        fs: FileSystem | None = None,
-    ) -> "Driver":
+    def from_config(cls, config: Config | ConfigSnapshot, *, clock: Clock, fs: FileSystem | None = None) -> "Driver":
         """The production wiring: the redactor exists BEFORE any writer."""
         redactor = Redactor({})
-        driver = cls(
-            llm=llm,
+        return cls(
             journal=Journal(config.state_dir, clock),
             redactor=redactor,
             spool=Spool(config.state_dir / "spools", redactor, fs or LocalFileSystem()),
             log=EngineLog(config.state_dir / "engine.log", redactor, clock),
             clock=clock,
-            sleep=sleep,
             severity=merge_severity(config),
-            retry_cap=config.caps.retry,
         )
-        driver._notify_config = (config, env)
-        return driver
-
-    async def run(
-        self,
-        stage: LlmStage,
-        consumed: Any,
-        *,
-        ticket: str | None,
-        attempt: int,
-        workspace: Path,
-        tier: AgentTier,
-        effort: AgentEffort,
-        stuck_budget: float,
-        run_seq: int | None = None,
-    ) -> StageResult:
-        if self._active is not None:
-            raise ValueError("await the active Driver.run or abort_current before another stage")
-        # Own the stage itself, never the pipeline/worker task that called run.
-        task = asyncio.create_task(self._run(
-            stage, consumed, ticket=ticket, attempt=attempt, workspace=workspace,
-            tier=tier, effort=effort, stuck_budget=stuck_budget, run_seq=run_seq,
-        ))
-        invocation = _Invocation(task)
-        self._active = invocation
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError as exc:
-            if invocation.abort is not None:
-                try:
-                    await _observe(invocation.abort)
-                except Exception:
-                    if task.cancelled():
-                        raise exc
-                    raise
-            elif self._active is invocation:
-                await _observe(self._abort(invocation))
-            raise
-        finally:
-            if self._active is invocation and (invocation.abort is None or invocation.abort.done()):
-                self._active = None
-
-    async def _run(
-        self, stage: LlmStage, consumed: Any, *, ticket: str | None, attempt: int,
-        workspace: Path, tier: AgentTier, effort: AgentEffort, stuck_budget: float,
-        run_seq: int | None,
-    ) -> StageResult:
-        """Run one stage attempt; `attempt` is the run sequence (section 6), stuck_budget in seconds."""
-        stem = ticket or stage.surface  # ticketless surfaces spool and key under their surface name
-        if run_seq is not None and ticket is not None:
-            raise ValueError("run_seq requires ticket=None")
-        seq = run_seq if run_seq is not None else journal_run_seq(self.journal.read(), stem)
-        spool_stem = f"{stem}/{run_seq}" if run_seq is not None else stem
-        started = self.clock()
-        deadline = started.timestamp() + stuck_budget
-        ctx = {"stem": stem, "attempt": attempt, "surface": stage.surface}
-        tally = _Tally()
-        self.log.event("stage_start", **ctx, stuck_budget=stuck_budget)
-
-        def done(outcome: Outcome, artifact: BaseModel | None = None) -> StageResult:
-            self.log.event("stage_end", **ctx, outcome=outcome, calls=tally.calls)
-            last = tally.last
-            provider, model = (last.provider, last.model) if last else (None, None)
-            return StageResult(outcome=outcome, artifact=artifact, findings=tally.findings,
-                               provider=provider, model=model)
-
-        async def failed(exc, call, name):
-            self.spool.write(spool_stem, attempt, f"{name}/error.txt", f"{type(exc).__name__}: {exc}")
-            self.log.event('llm_error', **call, error=f'{type(exc).__name__}: {exc}')
-            tally.findings = await self.provider_failure(exc, owner=stem, ticket=ticket, sequence=seq,
-                                                        surface=stage.surface, workspace=workspace)
-            return done('infra_error')
-
-        outcome: Outcome = "ok"
-        for call_seq in range(1, self.retry_cap + 2):  # the first call plus retry_cap re-prompts
-            call = {**ctx, "call_seq": call_seq}
-            name = f"{stage.surface}/call-{call_seq:02d}"
-            prompt = stage.render(consumed, tally.findings)
-            req = LLMRequest(
-                surface=stage.surface,
-                rendered=prompt,
-                tier=tier,
-                effort=effort,
-                ticket=ticket,
-                worktree=workspace if stage.surface in WRITING_SURFACES else None,
-            )
-            # Before the call: a call that raises or hangs must leave exactly what was sent on disk.
-            self.spool.write(spool_stem, attempt, f"{name}/prompt.md", prompt)
-            self.log.event("llm_call", **call)
-            tally.calls += 1
-            try:
-                recorded = await self.race(
-                    lambda: llm_call(
-                        self.effects, self.llm, req, self.redactor, ticket=ticket,
-                        stem=stem, run_seq=seq, attempt=attempt, call_seq=call_seq,
-                    ),
-                    deadline - self.clock().timestamp(),
-                )
-            except _StuckBudget:
-                self.log.event("stuck_budget_kill", **call)
-                tally.findings = []
-                return done("timeout")
-            except Exception as e:
-                return await failed(e, call, name)
-            result = LLMResult(**recorded)
-            tally.last = result
-            self.spool.write(spool_stem, attempt, f"{name}/output.txt", result.text)
-
-            checked = check_reply(stage, result.text, workspace, self.severity)
-            artifact = checked.artifact
-            if artifact is None:
-                outcome = "invalid_artifact"
-                tally.findings = checked.hard
-                self.log.event("artifact_invalid", **call, errors=checked.errors)
-                continue
-
-            hard_findings = list(checked.hard)
-            if stage.review is not None:
-                try:
-                    review = await self.race(lambda: stage.review(artifact, call_seq),
-                        deadline - self.clock().timestamp())
-                except _StuckBudget:
-                    self.log.event("stuck_budget_kill", **call)
-                    tally.findings = []
-                    return done("timeout")
-                except Exception as e:
-                    return await failed(e, call, name)
-                if review.verdict == "fail":
-                    hard_findings.extend(review.findings)
-            if hard_findings:
-                outcome = "gate_failed"
-                tally.findings = hard_findings
-                self.log.event("gate_failed", **call, codes=[f.code for f in hard_findings])
-                if any(f.code in stage.terminal_findings for f in hard_findings):
-                    return done(outcome)
-                continue
-            tally.findings = checked.soft
-            return done("ok", artifact)
-        return done(outcome)
-
-    async def provider_failure(self, exc, *, owner, ticket, sequence, surface, workspace):
-        """The sole exception-to-Finding mapping, including standalone requisition review."""
-        if not isinstance(exc, ProviderCallError):
-            return []
-        if self._notify_config is not None:
-            config, env = self._notify_config
-            if exc.failure_class == 'quota_exhausted':
-                from tempo.storm import storm_producer
-                from tempo.box import BOX_DIR
-                from tempo.storm import arrival_id
-                storm_producer(root=config.state_dir / BOX_DIR, fs=self.spool._fs,
-                    journal=self.journal, clock=self.clock).enqueue(message_class='failure_report',
-                        origin=owner, stage=surface, outcome='infra_error', summary=f'{exc}; {exc.paved_road}',
-                        occurrence_id=arrival_id('provider-quota', owner, sequence, surface, 'infra_error'))
-            elif exc.failure_class == 'auth_error':
-                from tempo.notify import send
-                from tempo.seams import NotificationFailed
-                notice = watchdog_notifications(config, env, self.effects, self.log,
-                    redactor=self.redactor, cwd=workspace, owner=owner, ticket=ticket,
-                    identity=exc.provider)
-                if config.notify:
-                    try:
-                        await send(self.effects, notice.notifications, config.notify, owner=owner,
-                            escalation='auth_error', identity=exc.provider, ticket=ticket,
-                            message=f'{exc}; {exc.paved_road}')
-                    except NotificationFailed as error:
-                        self.log.event('notify_failed', error=str(error))
-                else:
-                    self.log.event('auth_alert', message=f'{exc}; {exc.paved_road}')
-        return ([Finding(code=exc.failure_class, message=str(exc), paved_road=exc.paved_road)]
-                if exc.failure_class and exc.paved_road else [])
-
-    async def abort_current(self) -> None:
-        """Stop and observe only the currently owned stage; runs only when explicitly invoked."""
-        invocation = self._active
-        if invocation is not None:
-            await _observe(self._abort(invocation))
-
-    def _abort(self, invocation: _Invocation) -> asyncio.Task:
-        if invocation.abort is None:
-            async def abort() -> None:
-                try:
-                    cleanup = None
-                    if not invocation.task.done():
-                        if invocation.race is not None:
-                            cleanup = self._kill(invocation.race)
-                        else:
-                            self.llm.abort_current()
-                            cleanup = None
-                        invocation.task.cancel()
-                    # Even a cleanup failure must not skip observation of the stage.
-                    owned = [invocation.task] if cleanup is None else [cleanup, invocation.task]
-                    results = await asyncio.gather(*owned, return_exceptions=True)
-                    for result in results:
-                        if isinstance(result, BaseException) and not isinstance(
-                            result, (asyncio.CancelledError, LLMAborted)
-                        ):
-                            raise result
-                finally:
-                    if invocation.task.done() and self._active is invocation:
-                        self._active = None
-            invocation.abort = asyncio.create_task(abort())
-        return invocation.abort
-
-    async def race(self, start: Callable[[], Awaitable[Any]], remaining: float) -> Any:
-        if remaining <= 0:
-            raise _StuckBudget
-        timer = self.sleep(remaining)
-        race = _Race(asyncio.ensure_future(start()), asyncio.ensure_future(timer))
-        invocation = self._active
-        if invocation is not None and invocation.task is asyncio.current_task():
-            invocation.race = race
-        try:
-            try:
-                await asyncio.wait({race.call, race.timer}, return_when=asyncio.FIRST_COMPLETED)
-                if race.call.done():
-                    race.cancel_timer()
-                    await _observe(asyncio.gather(race.timer, return_exceptions=True))
-            except BaseException as exc:
-                try:
-                    await _observe(self._kill(race))
-                except Exception:
-                    if (isinstance(exc, asyncio.CancelledError) and invocation is not None
-                            and invocation.abort is not None):
-                        # The abort owner reports cleanup failure; the killed stage stays cancelled.
-                        raise exc
-                    raise
-                raise
-            if race.call.done():
-                return race.call.result()
-            await _observe(self._kill(race))
-            raise _StuckBudget
-        finally:
-            if invocation is not None and invocation.race is race:
-                invocation.race = None
-
-    def _kill(self, race: _Race) -> asyncio.Task:
-        if race.cleanup is None:
-            # Stop the external writer before any cancellation, including stage cancellation.
-            self.llm.abort_current()
-            race.cancel_timer()
-            race.call.cancel()
-
-            async def cleanup() -> None:
-                results = await asyncio.gather(race.call, race.timer, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, BaseException) and not isinstance(
-                        result, (asyncio.CancelledError, LLMAborted)
-                    ):
-                        raise result
-
-            race.cleanup = asyncio.create_task(cleanup())
-        return race.cleanup
 
 
 @dataclass(frozen=True)
@@ -423,7 +95,7 @@ class Checked:
 
 
 def check_reply(stage: LlmStage, text: str, workspace: Path, severity: Mapping[str, Severity]) -> Checked:
-    """Unwrap one fence, validate against `emits`, run the gates; shared by `Driver._run` and `submit`."""
+    """Unwrap one fence, validate against `emits`, run the gates; used by `submit`."""
     try:
         artifact = stage.emits.model_validate_json(unwrap_fence(text))
     except ValidationError as e:
@@ -439,12 +111,3 @@ def _invalid(stage: LlmStage, e: ValidationError) -> Finding:
         message=f"output is not a valid {stage.emits.__name__}: {detail}",
         paved_road=f"reply with ONLY one JSON object matching the {stage.emits.__name__} schema, no prose",
     )
-
-
-def watchdog_notifications(config, env, effects, log, *, redactor, cwd, **context):
-    from tempo.notify import NOTIFY_TIMEOUT_S, WatchdogNotifications
-
-    return WatchdogNotifications(effects=effects,
-        notifications=CommandNotifications(SubprocessExec(), cwd=cwd,
-            env=dict(env), timeout=NOTIFY_TIMEOUT_S,
-            scrub=redactor.scrub), argv=config.notify, log=log, **context)

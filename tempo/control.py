@@ -311,7 +311,6 @@ class PauseConsumer:
         self._advertised: tuple[str, str | None] | None = None
         self._stop: asyncio.Task | None = None
         self.admission: str | None = None
-        self.author_driver = None
         self.inbox = control_inbox(journal=journal, lifecycle_id=lifecycle_id,
                                    holds=self._holds,
                                    apply=self._apply, files=files, read=read)

@@ -1,4 +1,4 @@
-"""Production CLI composition with a scripted provider and a real ticket-plane checkout."""
+"""The box flow through the tools, with scripted subagents and a real ticket-plane checkout."""
 
 import json
 import asyncio
@@ -9,15 +9,16 @@ import pytest
 from tempo.__main__ import main
 from tempo.box import Box, DecisionRecord, Resolution, Verdict, parse_record, record_path, render_record
 from tempo.journal import EventType, Journal
-from tempo.llm import FakeLLM
 from tempo.lockfile import Lockfile
 from tempo.seams import LocalFileSystem
 from tests.test_cli import ENV, git_out
-from tests.support import Clock, commit_ticket, confirmed, make_root, triage
+from tests.support import Clock, Script, commit_ticket, confirmed, make_root, render_root, triage
+from tests.support import triage as run_pass
 
 
 def root_with_box(tmp_path: Path) -> tuple[Path, Box]:
     root = make_root(tmp_path)
+    render_root(root)
     return root, Box(root / ".tempo" / "state" / "box", LocalFileSystem())
 
 
@@ -73,7 +74,7 @@ def requisition_reply(verdict: str, findings: list | None = None) -> str:
     return json.dumps({"verdict": verdict, "summary": "reviewed", "findings": findings or []})
 
 
-def run(root: Path, monkeypatch, llm: FakeLLM) -> int:
+def run(root: Path, monkeypatch, llm: Script) -> int:
     return triage(root, llm)
 
 
@@ -91,7 +92,7 @@ def test_three_verdicts_and_second_pass_and_stale_author(tmp_path, monkeypatch, 
     marker = "RAW-SUMMARY-UNIQUE-987"
     ids = [enqueue(box, marker), enqueue(box, "another concern"), enqueue(box, "third concern")]
     messages = [box.get(id) for id in ids]
-    llm = FakeLLM([reply("tombstone", link="existing", days=7), reply("decision", days=14),
+    llm = Script([reply("tombstone", link="existing", days=7), reply("decision", days=14),
                    reply("author"), author_reply("authored"), requisition_reply("approve")])
     before = subjects(root)
     assert run(root, monkeypatch, llm) == 0
@@ -110,14 +111,11 @@ def test_three_verdicts_and_second_pass_and_stale_author(tmp_path, monkeypatch, 
     assert box.get(ids[2]).resolution == Resolution(kind="ticket", link="authored")
     assert box.get(ids[2]).verdict.produced_by_spec_version == "1.1"
     assert len(llm.requests) == 5
-    assert [(r.surface, r.tier, r.ticket) for r in llm.requests] == [
-        ("triage", "medium", None), ("triage", "medium", None), ("triage", "medium", None),
-        ("author", "medium", None), ("requisition_review", "medium", None),
-    ]
+    assert [r.surface for r in llm.requests] == ["triage", "triage", "triage", "author", "requisition_review"]
     keys = {e.key for e in events(root) if e.type == EventType.EFFECT_COMPLETION and e.key.startswith("llm/")}
     assert keys == {f"llm/triage/{m.seq}/triage/0/1" for m in messages} | {
         f"llm/author/0/author/{messages[2].seq}/1",
-        f"llm/author/0/requisition_review/{messages[2].seq}/1"}
+        f"llm/author.{messages[2].seq}/0/requisition_review/1/1"}
     for m in messages:
         spool = root / ".tempo" / "state" / "spools" / "triage" / str(m.seq) / "0" / "triage" / "call-01"
         assert (spool / "prompt.md").exists() and (spool / "output.txt").exists()
@@ -134,7 +132,7 @@ def test_three_verdicts_and_second_pass_and_stale_author(tmp_path, monkeypatch, 
 def test_bad_tombstone_link_becomes_decision(tmp_path, monkeypatch):
     root, box = root_with_box(tmp_path)
     id = enqueue(box, "bad reference")
-    llm = FakeLLM([reply("tombstone", link="missing")])
+    llm = Script([reply("tombstone", link="missing")])
     assert run(root, monkeypatch, llm) == 0
     record, body = parse_record((root / record_path(f"decision-{id}")).read_text())
     assert record.kind == "decision" and record.link == id and "missing" in body
@@ -145,7 +143,7 @@ def test_model_echo_of_raw_summary_is_removed_from_record(tmp_path, monkeypatch)
     root, box = root_with_box(tmp_path)
     marker = "RAW-SUMMARY-PRIVATE-123"
     id = enqueue(box, marker)
-    llm = FakeLLM([reply("decision", summary=marker, evidence=[f"report said {marker}"])])
+    llm = Script([reply("decision", summary=marker, evidence=[f"report said {marker}"])])
     assert run(root, monkeypatch, llm) == 0
     committed = git_out(root, "show", f"HEAD:{record_path(f'decision-{id}')}")
     assert marker not in committed
@@ -160,7 +158,7 @@ def test_precommitted_record_resolves_without_call(tmp_path, monkeypatch):
                                                        link=id, reopen_after_days=8), "Prior classification\n"))
     git_out(root, "add", str(path))
     git_out(root, "commit", "-m", f"tempo(decisions): decision-{id}", "--only", "--", str(path))
-    llm = FakeLLM([])
+    llm = Script([])
     assert run(root, monkeypatch, llm) == 0
     assert box.get(id).resolution == Resolution(kind="decision", link=f"decision-{id}")
     assert llm.requests == []
@@ -173,7 +171,7 @@ def test_uncommitted_record_is_committed_before_resolution(tmp_path, monkeypatch
     (root / path).parent.mkdir(parents=True)
     (root / path).write_text(render_record(DecisionRecord(id=f"decision-{id}", kind="decision",
                                                        link=id, reopen_after_days=8), "Recover me\n"))
-    llm = FakeLLM([])
+    llm = Script([])
     assert run(root, monkeypatch, llm) == 0
     assert llm.requests == []
     assert subjects(root)[0] == f"tempo(decisions): decision-{id}"
@@ -189,7 +187,7 @@ def test_uncommitted_registry_target_is_not_valid_tombstone_link(tmp_path, monke
     (root / path).parent.mkdir(parents=True)
     (root / path).write_text(render_record(DecisionRecord(id=target, kind="decision", link="other",
                                                        reopen_after_days=8), "Uncommitted\n"))
-    llm = FakeLLM([reply("tombstone", link=target)])
+    llm = Script([reply("tombstone", link=target)])
     assert run(root, monkeypatch, llm) == 0
     assert parse_record((root / record_path(f"decision-{id}")).read_text())[0].kind == "decision"
     assert box.get(id).status == "resolved"
@@ -199,7 +197,7 @@ def test_invalid_replies_leave_pending_without_commit(tmp_path, monkeypatch):
     root, box = root_with_box(tmp_path)
     id = enqueue(box, "invalid reply")
     before = subjects(root)
-    llm = FakeLLM(["{}"] * 7)
+    llm = Script(["{}"] * 7)
     assert run(root, monkeypatch, llm) == 0
     assert box.get(id).status == "pending" and box.get(id).verdict is None
     assert subjects(root) == before
@@ -225,7 +223,7 @@ def test_report_ingested_before_pending_scan(tmp_path, monkeypatch):
         assert "excerpt truncated" in request.rendered
         assert (box.root / message.report.custody.replay).read_bytes() == replay.read_bytes()
         return reply("decision")
-    llm = FakeLLM([classify])
+    llm = Script([classify])
     assert run(root, monkeypatch, llm) == 0
     assert len(llm.requests) == 1 and box.pending() == []
     assert source.exists()
@@ -233,7 +231,7 @@ def test_report_ingested_before_pending_scan(tmp_path, monkeypatch):
     def forbidden(path):
         pytest.fail("absent report inbox must not read report sources")
     monkeypatch.setattr(inbox, "validate_report", forbidden)
-    assert run(root, monkeypatch, FakeLLM([])) == 0
+    assert run(root, monkeypatch, Script([])) == 0
 
 
 def test_report_author_failure_is_decision(tmp_path, monkeypatch):
@@ -242,7 +240,7 @@ def test_report_author_failure_is_decision(tmp_path, monkeypatch):
     arrival(root)
     config = root / "config.yaml"
     config.write_text(config.read_text() + "report_inbox: inbox\n")
-    llm = FakeLLM([reply("author"), *[json.dumps({"stem": "broken", "ticket": "bad"})] * 7])
+    llm = Script([reply("author"), *[json.dumps({"stem": "broken", "ticket": "bad"})] * 7])
     assert run(root, monkeypatch, llm) == 0
     message, = box.messages()
     assert message.resolution == Resolution(kind="decision", link=f"decision-{message.id}")
@@ -250,24 +248,26 @@ def test_report_author_failure_is_decision(tmp_path, monkeypatch):
     assert len([r for r in llm.requests if r.surface == "author"]) == 7
     assert not (root / "tickets/broken").exists()
     assert "tickets/broken" not in git_out(root, "status", "--porcelain")
-    assert run(root, monkeypatch, FakeLLM([])) == 0
+    assert run(root, monkeypatch, Script([])) == 0
     # A later arrival has its own allowance and can reuse the rejected stem.
     from tests.test_author import bug_reply
     source = root / "inbox/a.json"
     source.rename(source.with_name("b.json"))
-    assert run(root, monkeypatch, FakeLLM([reply("author"), bug_reply("broken"),
+    assert run(root, monkeypatch, Script([reply("author"), bug_reply("broken"),
                                           requisition_reply("approve")])) == 0
     assert (root / "tickets/broken/ticket.md").is_file()
 
 
-def test_lock_contention_exits_two_without_pass(tmp_path, monkeypatch):
+def test_lock_contention_refuses_without_pass(tmp_path, monkeypatch):
+    from tempo.checkout import Refusal
     root, box = root_with_box(tmp_path)
     enqueue(box, "locked")
     holder = Lockfile(root / ".tempo" / "state", instance_id="other", clock=Clock())
     holder.acquire()
-    llm = FakeLLM([])
+    llm = Script([])
     try:
-        assert run(root, monkeypatch, llm) == 2
+        with pytest.raises(Refusal, match="writer lock"):
+            run(root, monkeypatch, llm)
     finally:
         holder.release()
     assert llm.requests == []
@@ -278,13 +278,12 @@ def test_lock_contention_exits_two_without_pass(tmp_path, monkeypatch):
     (True, None), (False, "own-record"), (False, "known"),
 ])
 def test_reopened_message_bypasses_its_tombstone(tmp_path, monkeypatch, recorded_verdict, tombstone_link):
-    from tempo import triage
     from tempo.box import RereportJournal
     root, source = root_with_box(tmp_path)
     box = Box(source.root, source.fs, rereport=RereportJournal(Journal(root / ".tempo/state", Clock())))
     commit_ticket(root, "known", confirmed())
     id = enqueue(box, "reopened concern")
-    assert run(root, monkeypatch, FakeLLM([reply("tombstone", link="known")])) == 0
+    assert run(root, monkeypatch, Script([reply("tombstone", link="known")])) == 0
     path = root / record_path(f"tombstone-{id}")
     before = path.read_bytes()
     head = git_out(root, "rev-parse", "HEAD").strip()
@@ -292,7 +291,15 @@ def test_reopened_message_bypasses_its_tombstone(tmp_path, monkeypatch, recorded
     for n in range(3):
         box.record_rereport(id, occurrence_id=f"distinct/{n}")
     assert box.get(id).reopen and box.get(id).verdict is None
-    script = [author_reply("reconsidered"), requisition_reply("approve")]
+    calls = []
+
+    def authored(request):
+        assert path.read_bytes() == before
+        assert git_out(root, "rev-parse", "HEAD").strip() == head
+        assert git_out(root, "show", f"HEAD:{record_path(f'tombstone-{id}')}").encode() == before
+        calls.append(id)
+        return author_reply("reconsidered")
+    script = [authored, requisition_reply("approve")]
     if recorded_verdict:
         box.record_verdict(id, Verdict(verdict="author", produced_by_spec_version="1.1", rationale="new evidence"))
     else:
@@ -301,16 +308,7 @@ def test_reopened_message_bypasses_its_tombstone(tmp_path, monkeypatch, recorded
             assert '"reopen": true' in request.rendered
             return reply("tombstone", link=f"tombstone-{id}" if tombstone_link == "own-record" else tombstone_link)
         script.insert(0, classify)
-    author = triage.author
-    calls = []
-    async def author_with_preserved_registry(*args):
-        assert path.read_bytes() == before
-        assert git_out(root, "rev-parse", "HEAD").strip() == head
-        assert git_out(root, "show", f"HEAD:{record_path(f'tombstone-{id}')}").encode() == before
-        calls.append(id)
-        return await author(*args)
-    monkeypatch.setattr(triage, "author", author_with_preserved_registry)
-    llm = FakeLLM(script)
+    llm = Script(script)
     assert run(root, monkeypatch, llm) == 0
     assert calls == [id]
     assert box.get(id).resolution == Resolution(kind="ticket", link="reconsidered")
@@ -327,15 +325,16 @@ async def escape_rig(tmp_path):
     from tempo.merge import merge
     from tempo.tickets import validate_ticket
     from tests.support import checkout_at, stage_context
-    from tests.test_stages import implement_reply
+    from tests.test_stages import Run, implement_reply, implemented, reviewed
     root, box = root_with_box(tmp_path)
     c = checkout_at(root)
-    ctx = stage_context(c, FakeLLM([implement_reply()]))
+    ctx = stage_context(c)
+    run = Run(attempt=0)
     text = confirmed().replace("uv run pytest", "true").replace("kind: feature",
         "kind: feature\ngate_bypass:\n  - {code: scope_fence, reason: witnessed fixture}")
     commit_ticket(root, "candidate", text)
     ticket = validate_ticket("candidate", text, root)
-    slip = (await stages.implement(ctx, ticket, attempt=0)).artifact
+    slip = (await implemented(ctx, ticket, [implement_reply()], run)).artifact
     wt = ctx.worktree(ticket.stem)
     for path in ("tempo/thing.py", "outside.py"):
         c.fs.write(wt / path, b"changed\n")
@@ -343,8 +342,7 @@ async def escape_rig(tmp_path):
     await c.git.commit(wt, "code")
     checked = (await stages.check(ctx, ticket, slip, attempt=0)).artifact
     assert checked.passed and "scope_fence" in checked.bypassed
-    ctx.driver.llm = FakeLLM([requisition_reply("approve")])
-    review = (await stages.review(ctx, ticket, checked, attempt=0)).artifact
+    review = (await reviewed(ctx, ticket, checked, [requisition_reply("approve")], run)).artifact
     # A process commit forces the production admission's clean-rebase approval carry.
     c.fs.write(root / "tickets/process/note.md", b"process\n")
     await c.git.add(root, ["tickets/process/note.md"])
@@ -356,7 +354,6 @@ async def escape_rig(tmp_path):
 
 
 async def escape_report(c, *, commit, paths=(), stem="repair"):
-    from tempo import triage
     from dataclasses import replace
     from tests.test_inbox import arrival
     from tests.test_author import bug_reply
@@ -365,8 +362,8 @@ async def escape_report(c, *, commit, paths=(), stem="repair"):
     config.write_text(config.read_text() + "report_inbox: inbox\n")
     from tempo.config import load_config
     c = replace(c, config=load_config(None, cwd=c.repo))
-    llm = FakeLLM([reply("author"), bug_reply(stem), requisition_reply("approve")])
-    await triage.triage_pass(c, llm)
+    llm = Script([reply("author"), bug_reply(stem), requisition_reply("approve")])
+    assert await asyncio.to_thread(run_pass, c.repo, llm) == 0
     box = Box(c.config.state_dir / "box", c.fs)
     [message] = box.messages()
     assert message.resolution == Resolution(kind="ticket", link=stem)
@@ -443,40 +440,38 @@ def test_resolved_bug_escape_attribution(tmp_path):
 
 
 def test_escape_attribution_retry(tmp_path, monkeypatch):
-    from tempo import triage
-    from tempo.effects import Effects
-    from tempo.git import GitError
+    from tempo.git import Git, GitError
     async def scenario():
         c, ctx, box, checked, admitted = await escape_rig(tmp_path)
-        original = c.git.first_parent_squashes
+        original = Git.first_parent_squashes
         async def failure(*args):
             raise GitError(["git"], 1, "", "unreadable repository")
         with monkeypatch.context() as patch:
-            patch.setattr(c.git, "first_parent_squashes", failure)
+            patch.setattr(Git, "first_parent_squashes", failure)
             c, message, llm = await escape_report(c, commit=admitted.commit)
         assert attribution(c) == []
         assert any(e.type == EventType.EFFECT_INTENT and e.key == f"escape-attribution/{message.id}"
                    for e in c.journal.read())
         diagnostic = (c.config.state_dir / "engine.log").read_text()
         assert "escape_attribution_incomplete" in diagnostic and "repair repository/evidence access" in diagnostic
-        assert c.git.first_parent_squashes == original
+        assert Git.first_parent_squashes == original
         class Crash(BaseException):
             pass
-        append = c.journal.append
-        def crash(type_, body, **kwargs):
+        append = Journal.append
+        def crash(self, type_, body, **kwargs):
             if type_ == EventType.EFFECT_COMPLETION and (kwargs.get("key") or "").startswith("escape-attribution/"):
                 raise Crash()
-            return append(type_, body, **kwargs)
+            return append(self, type_, body, **kwargs)
         with monkeypatch.context() as patch:
-            patch.setattr(c.journal, "append", crash)
+            patch.setattr(Journal, "append", crash)
             with pytest.raises(Crash):
-                await triage.triage_pass(c, FakeLLM([]))
+                await asyncio.to_thread(run_pass, c.repo, Script([]))
         assert attribution(c) == []
-        await triage.triage_pass(c, FakeLLM([]))
+        await asyncio.to_thread(run_pass, c.repo, Script([]))
         [completed] = attribution(c)
         with monkeypatch.context() as patch:
-            patch.setattr(c.git, "first_parent_squashes", failure)
-            await triage.triage_pass(c, FakeLLM([]))
+            patch.setattr(Git, "first_parent_squashes", failure)
+            await asyncio.to_thread(run_pass, c.repo, Script([]))
         assert attribution(c) == [completed]
         assert len(llm.requests) == 3
         assert len([e for e in c.journal.read() if e.body.get("signal") == "author_invoked"]) == 1
@@ -510,6 +505,6 @@ def test_escape_unattributed_reports(tmp_path):
         box.resolve(id, Resolution(kind="ticket", link="repair"))
         id, _ = box.enqueue(message_class="bug_report", origin="pending", summary="pending bug",
                             bug_origin="player", has_repro=False)
-        await triage.triage_pass(c, FakeLLM(["{}"] * 7))
+        assert await asyncio.to_thread(run_pass, c.repo, Script(["{}"] * 7)) == 0
         assert box.get(id).status == "pending" and len(attribution(c)) == before
     asyncio.run(scenario())

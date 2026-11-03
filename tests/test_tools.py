@@ -83,10 +83,10 @@ def test_session_limits(repo):
     assert host.tool("write_handoff", {"text": "out of time"})["number"] == 1  # still served
 
 
-def test_prepare_refuses_a_surface_outside_the_p4_flow_and_an_unstarted_ticket(repo):
+def test_prepare_refuses_arguments_outside_its_rows_and_an_unstarted_ticket(repo):
     host = FakeHost("claude", repo)
     host.tool("begin_session")
-    with pytest.raises(Refusal, match="no tool in P4"):
+    with pytest.raises(Refusal, match="prepare has no 'triage' call for these arguments"):
         host.tool("prepare", {"stem": STEM, "surface": "triage"})
     with pytest.raises(Refusal, match="is not running"):
         host.tool("prepare", {"stem": STEM, "surface": "implement"})

@@ -10,7 +10,6 @@ from tempo import __main__ as cli, control, journal as journal_module
 from tempo.box import Box, BoxError, Resolution, Verdict
 from tempo.effects import Effects
 from tempo.journal import EventType, Journal, JournalCorruption
-from tempo.llm import FakeLLM
 from tempo.seams import LocalFileSystem
 from tempo.storm import StormLedger
 from tests.test_journal import FakeClock, T0

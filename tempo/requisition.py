@@ -6,14 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from tempo.artifacts import Artifact, Finding, NonBlank
-from tempo.driver import Driver, LlmStage, _StuckBudget, unwrap_fence
+from tempo.driver import LlmStage
 from tempo.gates import GateReport
-from tempo.llm import AgentTier, LLMRequest, LLMResult
-from tempo.llmeffect import llm_call
-from tempo.providers import ProviderCallError
 from tempo.specs import REQ_RENDER_HEADROOM, RENDER_BOUND_CHARS, RenderOverBound, Spec, load_spec, render
 from tempo.stages import findings_text, implement_inputs
 from tempo.tickets import Ticket, validate_ticket
@@ -103,9 +100,6 @@ class Requisition:
         return LlmStage(surface="requisition_review", emits=RequisitionReply, gates=[],
                         render=lambda _, findings: self.render(findings))
 
-    def over_bound(self, exc: RenderOverBound) -> RequisitionVerdict:
-        return self.snag(str(exc), "review render over bound", road="shrink or split the ticket at authoring")
-
     def verdict(self, reply: RequisitionReply, provider: str | None, model: str | None) -> RequisitionVerdict:
         return RequisitionVerdict(**self.common, verdict=reply.verdict, summary=reply.summary,
                                   findings=reply.findings, mechanical=None, provider=provider, model=model)
@@ -133,46 +127,6 @@ def requisition(repo: Path, stem: str, text: str, specs_dir: Path) -> Requisitio
                   produced_at_sha=sha, stem=stem, ticket_sha=sha, render_chars=chars,
                   spec_version=spec.meta.version)
     return Requisition(spec=spec, text=text, base=base, common=common)
-
-
-async def review_ticket(driver: Driver, *, repo: Path, stem: str, text: str,
-                        specs_dir: Path, tier: AgentTier, stem_slot: str, run_seq: int,
-                        attempt: int, call_seq: int) -> RequisitionVerdict:
-    req = requisition(repo, stem, text, specs_dir)
-    if (snag := req.precheck()) is not None:
-        return snag
-    try:
-        prompt = req.render([])
-    except RenderOverBound as exc:
-        return req.over_bound(exc)
-
-    name = f"requisition_review/call-{call_seq:02d}"
-    spool_stem = f"{stem_slot}/{run_seq}"
-    driver.spool.write(spool_stem, attempt, f"{name}/prompt.md", prompt)
-    req_ = LLMRequest(surface="requisition_review", rendered=prompt, tier=tier,
-                      effort=req.spec.meta.effort, ticket=None, worktree=None)
-    try:
-        recorded = await driver.race(
-            lambda: llm_call(driver.effects, driver.llm, req_, driver.redactor, ticket=stem,
-                             stem=stem_slot, run_seq=run_seq, attempt=attempt, call_seq=call_seq),
-            REQUISITION_STUCK_S,
-        )
-    except _StuckBudget:
-        return req.snag("requisition review timed out", "timeout", road="retry the authoring review")
-    except ProviderCallError:
-        raise
-    except Exception as exc:
-        message = f"requisition review provider failed: {type(exc).__name__}: {exc}"
-        driver.spool.write(spool_stem, attempt, f"{name}/error.txt", message)
-        return req.snag(message, "provider error", road="repair the provider and retry the authoring review")
-    result = LLMResult(**recorded)
-    driver.spool.write(spool_stem, attempt, f"{name}/output.txt", result.text)
-    try:
-        reply = RequisitionReply.model_validate_json(unwrap_fence(result.text))
-    except ValidationError as exc:
-        return req.invalid(f"invalid requisition review reply: {exc.error_count()} schema error(s)",
-                           result.provider, result.model)
-    return req.verdict(reply, result.provider, result.model)
 
 
 class RequisitionGate:

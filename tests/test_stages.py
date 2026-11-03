@@ -1,19 +1,22 @@
-"""Implement -> Check -> Review stage transitions with the scripted fake (TEMPO_PLAN.md sections 4, 5, 19.P1)."""
+"""Implement -> Check -> Review stage transitions with scripted replies (TEMPO_PLAN.md sections 4, 5, 19.P1)."""
 
 import asyncio
 import json
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 import pytest
 
 from tempo.config import load_config
 from tempo.box import BOX_DIR, Box
-from tempo.driver import Driver
+from tempo.artifacts import StageResult
+from tempo.driver import Driver, check_reply
 from tempo.git import Git
-from tempo.llm import FakeLLM, LLMRequest
+from tempo.journal import run_seq
+from tempo.llmeffect import llm_key
 from tempo.seams import LocalFileSystem, SubprocessExec
 from tempo.stages import (
     DIFF_BUDGET_FILES,
@@ -26,25 +29,16 @@ from tempo.stages import (
     SnagList,
     StageContext,
     _prior_findings,
+    check,
+    finish_implement,
+    finish_review,
+    implement_stage,
+    prepare_worktree,
     read_review,
-    run_stages,
+    review_stage,
 )
+from tempo.specs import RenderOverBound
 from tempo.tickets import validate_ticket
-
-
-def test_retro_driver_access_is_public_and_read_only(repo):
-    from tempo.retro import Retro, RetroConstructionError
-    from tests.support import Pipeline, checkout_at
-    checkout = checkout_at(repo)
-    writer = Pipeline(checkout, FakeLLM([]))
-    driver = writer.stages.driver
-    assert Retro(checkout, writer).driver() is driver
-    with pytest.raises(AttributeError):
-        writer.stages.driver = None
-    with pytest.raises(AttributeError):
-        del writer.stages.driver
-    with pytest.raises(RetroConstructionError, match="construct the pipeline with its shared Driver.*Pipeline.stages.driver"):
-        Retro(checkout, SimpleNamespace()).driver()
 
 
 SPECS = Path(__file__).resolve().parent.parent / "specs"
@@ -162,7 +156,7 @@ def implement_reply(outcome: str = "ok", findings: list | None = None) -> str:
 def agent(files: dict[str, str], outcome: str = "ok"):
     """A scripted implementer: edits the worktree, commits on the branch, replies."""
 
-    def act(req: LLMRequest) -> str:
+    def act(req: Request) -> str:
         assert req.worktree is not None
         for rel, text in files.items():
             (req.worktree / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -182,21 +176,101 @@ def verdict(v: str = "approve", findings: list | None = None) -> str:
 SNAG = {"code": "logic", "path": "tempo/thing.py", "line": 1, "message": "wrong word", "paved_road": "write ok"}
 
 
+@dataclass(frozen=True)
+class Request:
+    """What a scripted reply sees: the surface, its rendered prompt, and the worktree implement may write."""
+
+    surface: str
+    rendered: str
+    worktree: Path | None
+
+
+@dataclass
+class Run:
+    attempt: int
+    results: dict[str, StageResult] = field(default_factory=dict)
+    requests: list[Request] = field(default_factory=list)
+
+    @property
+    def last(self):
+        return list(self.results.items())[-1]
+
+
+def context(repo: Path) -> StageContext:
+    config = load_config(None, cwd=repo)
+    exec_ = SubprocessExec()
+    driver = Driver.from_config(config, clock=lambda: datetime(2026, 10, 5, tzinfo=UTC))
+    return StageContext(repo=repo, config=config, env=ENV, exec_=exec_, git=Git(exec_, env=ENV, timeout=30.0),
+                        fs=LocalFileSystem(), driver=driver, specs_dir=SPECS)
+
+
+async def reply(ctx: StageContext, stage, consumed, workspace: Path, script: list, run: Run, stem: str) -> StageResult:
+    """One stage's calls as `prepare`/`submit` make them: render, reply, journal the effect, check, and re-prompt
+    up to caps.retry."""
+    findings: list = []
+    outcome = "ok"
+    seq = run_seq(ctx.driver.journal.read(), stem)
+    for call_seq in range(1, ctx.config.caps.retry + 2):
+        request = Request(stage.surface, stage.render(consumed, findings),
+                          workspace if stage.surface == "implement" else None)
+        run.requests.append(request)
+        item = script.pop(0)
+        text = item(request) if callable(item) else item
+        key = llm_key(stem, seq, stage.surface, run.attempt, call_seq)
+        ctx.driver.effects.begin(key, ticket=stem)
+        ctx.driver.effects.complete(key, {"text": text, "provider": "fake", "model": "fake"}, ticket=stem)
+        checked = check_reply(stage, text, workspace, ctx.driver.severity)
+        if checked.artifact is None:
+            outcome, findings = "invalid_artifact", checked.hard
+            continue
+        if checked.hard:
+            outcome, findings = "gate_failed", checked.hard
+            continue
+        return StageResult(outcome="ok", artifact=checked.artifact, findings=checked.soft,
+                           provider="fake", model="fake")
+    return StageResult(outcome=outcome, artifact=None, findings=findings, provider="fake", model="fake")
+
+
+async def implemented(ctx: StageContext, ticket, script: list, run: Run) -> StageResult:
+    """Implement in a fresh worktree, then the run record and packing slip, as `submit` finishes it."""
+    worktree = await prepare_worktree(ctx, ticket.stem)
+    stage, spec = implement_stage(ctx, ticket, worktree)
+    try:
+        result = await reply(ctx, stage, ticket, worktree, script, run, ticket.stem)
+    except RenderOverBound as e:
+        return StageResult(outcome="premise_failed", artifact=None, findings=[e.finding])
+    return await finish_implement(ctx, ticket, spec, result, attempt=run.attempt)
+
+
+async def reviewed(ctx: StageContext, ticket, invoice, script: list, run: Run) -> StageResult:
+    """Review `git diff main...<stem>`, then `review.md`, as `submit` finishes it."""
+    stem = ticket.stem
+    sha = await ctx.git.rev_parse(ctx.repo, stem)
+    stage, spec = review_stage(ctx, (ctx.repo / "tickets" / stem / "ticket.md").read_text(),
+                               await ctx.git.diff(ctx.repo, "main", stem))
+    result = await reply(ctx, stage, invoice, ctx.worktree(stem), script, run, stem)
+    return await finish_review(ctx, ticket, spec, result, sha, attempt=run.attempt)
+
+
+async def drive(ctx: StageContext, ticket, script: list) -> Run:
+    """Implement -> Check -> Review on the kept stage functions, stopping at the first stage not ok."""
+    run = Run(attempt=run_seq(ctx.driver.journal.read(), ticket.stem))
+    run.results["implement"] = result = await implemented(ctx, ticket, script, run)
+    if result.outcome != "ok":
+        return run
+    run.results["check"] = result = await check(ctx, ticket, result.artifact, attempt=run.attempt)
+    if result.outcome != "ok":
+        return run
+    run.results["review"] = await reviewed(ctx, ticket, result.artifact, script, run)
+    return run
+
+
 def run(repo: Path, script: list, bypass: str = ""):
     author(repo, bypass)
-    config = load_config(None, cwd=repo)
-    llm = FakeLLM(script)
-    clock = lambda: datetime(2026, 10, 5, tzinfo=UTC)  # noqa: E731
-
-    async def never(seconds: float) -> None:
-        await asyncio.Event().wait()
-
-    exec_ = SubprocessExec()
-    driver = Driver.from_config(config, llm=llm, env=ENV, clock=clock, sleep=never)
-    ctx = StageContext(repo=repo, config=config, env=ENV, exec_=exec_, git=Git(exec_, env=ENV, timeout=30.0),
-                       fs=LocalFileSystem(), driver=driver, specs_dir=SPECS)
+    ctx = context(repo)
     ticket = validate_ticket(STEM, (repo / "tickets" / STEM / "ticket.md").read_text(), repo)
-    return asyncio.run(run_stages(ctx, ticket)), llm, config
+    result = asyncio.run(drive(ctx, ticket, list(script)))
+    return result, SimpleNamespace(requests=result.requests), ctx.config
 
 
 def subjects(repo: Path) -> list[str]:
@@ -243,7 +317,7 @@ def test_implement_check_review_all_ok_with_artifacts_and_provenance(repo):
 
 
 def test_an_untracked_foreign_ticket_is_ignored(repo):
-    def act(req: LLMRequest) -> str:
+    def act(req: Request) -> str:
         assert req.worktree is not None
         (req.worktree / "tempo/thing.py").write_text("ok\n")
         git(req.worktree, "add", "tempo/thing.py")
@@ -412,9 +486,8 @@ def test_run_record_gate_requires_every_section_and_a_closed_outcome(tmp_path):
 def test_gather_safety_evidence_runs_no_verification(repo, monkeypatch):
     import dataclasses
     from tempo import stages
-    from tests.test_merge import context
     author(repo)
-    ctx = context(repo, [])
+    ctx = context(repo)
     ticket = validate_ticket(STEM, (repo / "tickets" / STEM / "ticket.md").read_text(), repo)
     ticket = dataclasses.replace(ticket, scope_fence=("tempo/thing.py",))
 
@@ -442,9 +515,8 @@ def test_gather_safety_evidence_runs_no_verification(repo, monkeypatch):
 
 def test_full_gather_evidence_reuses_safety_gatherer(repo, monkeypatch):
     from tempo import stages
-    from tests.test_merge import context
     author(repo)
-    ctx = context(repo, [])
+    ctx = context(repo)
     ticket = validate_ticket(STEM, (repo / "tickets" / STEM / "ticket.md").read_text(), repo)
     original = stages.gather_safety_evidence
     gathered = []

@@ -3,25 +3,24 @@
 import asyncio
 import json
 from dataclasses import FrozenInstanceError
+from datetime import timedelta
 
 import pytest
 
-from tempo.artifacts import ReviewVerdict
-from tempo.driver import LlmStage
-from tempo.journal import EventType
-from tempo.llm import FakeLLM
+from tempo.journal import EventType, run_seq
+from tempo.llmeffect import llm_key
 from tempo.lockfile import Lockfile
 from tempo.mergequeue import MergeQueue
 from tempo.retro import RetroArtifact, measurements, production_evidence, project_window, render_report
 from tempo.scorecard import project_scorecard
-from tempo.stages import PackingSlip, check, implement
+from tempo.stages import PackingSlip, check
 from tempo.tickets import validate_ticket
 from tests.support import confirmed
 from tests.test_retro import completed, merged, rig
-from tests.test_stages import implement_reply
+from tests.test_stages import Run, implement_reply, implemented
 
 
-async def invoice(c, writer, stem, *, bypass=False, attempt=0):
+async def invoice(c, ctx, stem, *, bypass=False, attempt=0):
     text = confirmed().replace("uv run pytest", "true")
     if bypass:
         text = text.replace("kind: feature", "kind: feature\ngate_bypass:\n"
@@ -31,25 +30,24 @@ async def invoice(c, writer, stem, *, bypass=False, attempt=0):
     await c.git.add(c.repo, [path])
     await c.git.commit(c.repo, "ticket", only=[path])
     ticket = validate_ticket(stem, text, c.repo)
-    writer.stages.driver.llm = FakeLLM([implement_reply()])
-    slip = (await implement(writer.ctx, ticket, attempt=attempt)).artifact
-    worktree = writer.ctx.worktree(stem)
+    slip = (await implemented(ctx, ticket, [implement_reply()], Run(attempt=attempt))).artifact
+    worktree = ctx.worktree(stem)
     changed = f"outside-{stem}.py"
     c.fs.write(worktree / changed, b"outside = True\n")
     await c.git.add(worktree, [changed])
     await c.git.commit(worktree, "outside scope", only=[changed])
-    return (await check(writer.ctx, ticket, slip, attempt=attempt)).artifact
+    return (await check(ctx, ticket, slip, attempt=attempt)).artifact
 
 
-async def review(c, writer, stem, verdict, *, attempt=0):
+async def review(c, ctx, stem, verdict, *, attempt=0):
+    """One completed review call, journaled as `submit` journals it."""
     code = "ticket" if verdict == "rma" else "logic"
     findings = [] if verdict == "approve" else [{"code": code, "message": "finding",
                                                 "paved_road": "repair or retire"}]
     text = json.dumps({"verdict": verdict, "summary": "reviewed", "findings": findings})
-    writer.stages.driver.llm = FakeLLM([text])
-    stage = LlmStage(surface="review", emits=ReviewVerdict, gates=[], render=lambda *_: "review")
-    return await writer.stages.driver.run(stage, None, ticket=stem, attempt=attempt,
-        workspace=c.repo, tier="medium", effort="low", stuck_budget=600)
+    key = llm_key(stem, run_seq(ctx.driver.journal.read(), stem), "review", attempt, 1)
+    ctx.driver.effects.begin(key, ticket=stem)
+    ctx.driver.effects.complete(key, {"text": text, "provider": "fake", "model": "fake"}, ticket=stem)
 
 
 def rows(card):
@@ -142,7 +140,7 @@ def test_scorecard_catches_resolved_and_upheld_findings(tmp_path):
     c, writer, _, _ = rig(tmp_path)
     asyncio.run(invoice(c, writer, "resolved"))
     async def resolve_gate():
-        worktree = writer.ctx.worktree("resolved")
+        worktree = writer.worktree("resolved")
         (worktree / "outside-resolved.py").unlink()
         c.fs.write(worktree / "tempo/thing.py", b"ok\n")
         paths = ["outside-resolved.py", "tempo/thing.py"]
@@ -152,7 +150,7 @@ def test_scorecard_catches_resolved_and_upheld_findings(tmp_path):
         slip = PackingSlip(produced_by_spec_version=1,
             produced_at_sha=await c.git.rev_parse(worktree, "HEAD"), stem="resolved", branch="resolved",
             outcome="ok", summary="resolved", run_record="tickets/resolved/run.md")
-        return await check(writer.ctx, ticket, slip, attempt=1)
+        return await check(writer, ticket, slip, attempt=1)
     assert asyncio.run(resolve_gate()).artifact.passed
     asyncio.run(review(c, writer, "resolved", "snag"))
     asyncio.run(review(c, writer, "resolved", "approve", attempt=1))
@@ -232,7 +230,7 @@ def test_scorecard_totals_and_rendering(tmp_path, monkeypatch):
     merged(c.journal, "one", head)
     merged(c.journal, "one", head)
     c.journal.append(EventType.SIGNAL, {"signal": "rework_order", "attempt": 1}, ticket="one")
-    MergeQueue(writer.ctx, escalate=lambda event: None, control=None)._facts("one", set(), set(), red=["red.py"])
+    MergeQueue(writer, escalate=lambda event: None, control=None)._facts("one", set(), set(), red=["red.py"])
     c.journal.append(EventType.STATE_TRANSITION, {"to": "gate_failed"}, ticket="other")
     window = project_window(c.journal.read())
     evidence = asyncio.run(production_evidence(window, c))
@@ -241,7 +239,6 @@ def test_scorecard_totals_and_rendering(tmp_path, monkeypatch):
         patch.setattr(c.fs, "write", lambda *_: pytest.fail("projection wrote"))
         patch.setattr(c.journal, "append", lambda *_a, **_k: pytest.fail("projection journaled"))
         patch.setattr(c.git, "_run", lambda *_: pytest.fail("projection read Git"))
-        patch.setattr(writer.stages.driver.llm, "call", lambda *_: pytest.fail("projection called model"))
         card = project_scorecard(window)
         text = render_report(window, evidence, {"head": head}, [], RetroArtifact(proposals=[]))
         assert text == render_report(window, evidence, {"head": head}, [], RetroArtifact(proposals=[]))
@@ -255,11 +252,12 @@ def test_scorecard_totals_and_rendering(tmp_path, monkeypatch):
     assert empty_text.endswith("| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n")
     assert project_scorecard(empty).merged_ticket_count == 0
     assert all(count == 0 for count in project_scorecard(empty).signal_counts.values())
-    writer.stages.driver.llm = FakeLLM(['{"proposals": []}'])
+    hook.script.append('{"proposals": []}')
+    c.clock.now += timedelta(days=7)
     lock = Lockfile(c.config.state_dir, instance_id="scorecard-test", clock=c.clock)
     lock.acquire()
     try:
-        result = asyncio.run(hook(forced=True))
+        result = asyncio.run(hook())
     finally:
         lock.release()
     receipt = asyncio.run(c.git._run(c.repo, "show", f"{result['commit']}:tickets/retro/000001.md"))

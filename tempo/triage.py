@@ -1,24 +1,23 @@
-"""One operator-triggered, sequential Suggestion Box pass (plan section 12)."""
+"""Suggestion Box triage, one message per call (plan section 12; AGENT_PLAN.md section 4.1)."""
 
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 import yaml
 
-from tempo.box import BOX_DIR, Box, DecisionRecord, RereportJournal, Resolution, Verdict, read_registry, record_path, render_record
-from tempo.author import author, failure_decision, recover_retro_ticket
-from tempo.driver import Driver, LlmStage
-from tempo.effects import Effects
+from tempo.box import (BOX_DIR, Box, DecisionRecord, Message, RereportJournal, Resolution, Verdict, read_registry,
+                       record_path, render_record)
+from tempo.author import recover_retro_ticket
+from tempo.driver import Driver, LlmStage, unrendered
 from tempo.git import GitError
 from tempo.journal import EventType
 from tempo.inbox import ingest, report_data
-from tempo.llm import LLM
 from tempo.checkout import SPECS_DIR, Checkout
-from tempo.seams import ExecutableNotFound
-from tempo.specs import load_spec, render
+from tempo.specs import Spec, load_spec, render
 from tempo.stages import findings_text
 from tempo.status import last_states
 
@@ -91,37 +90,6 @@ async def _record(
 def _goal(text: str) -> str:
     after = text.partition("## Goal / Why\n")[2]
     return next((line.strip() for line in after.splitlines() if line.strip()), "")
-
-
-async def triage_pass(checkout: Checkout, llm: LLM) -> list[tuple[str, str]]:
-    """Journal one pass, then settle each pending message in sequence order."""
-    history = checkout.journal.read()
-    pass_no = sum(e.type == EventType.SIGNAL and e.body.get("signal") == "triage_pass" for e in history)
-    checkout.journal.append(EventType.SIGNAL, {"signal": "triage_pass", "pass": pass_no})
-    box = report_intake(checkout)
-    spec = load_spec((SPECS_DIR / "triage.md").read_text())
-    driver = Driver.from_config(checkout.config, llm=llm, env=checkout.env, clock=checkout.clock,
-                                sleep=checkout.sleep, fs=checkout.fs)
-    driver.journal = checkout.journal
-    driver.effects = Effects(checkout.journal)
-    if checkout.control is not None:
-        checkout.control.author_driver = driver
-    try:
-        lines = await _settle_pass(checkout, driver, box, spec, history, pass_no)
-        for message in box.messages():
-            if (message.message_class == "bug_report" and message.resolution is not None
-                    and message.resolution.kind == "ticket"):
-                try:
-                    await attribute_escape(checkout, driver, message)
-                except (GitError, OSError, ExecutableNotFound, ValueError, KeyError, yaml.YAMLError) as exc:
-                    driver.log.event("escape_attribution_incomplete", box_id=message.id,
-                        error=str(exc), paved_road="repair repository/evidence access and retry triage")
-                    lines.append((message.id, f"{message.id}: attribution incomplete; "
-                        "repair repository/evidence access and retry triage"))
-        return lines
-    finally:
-        if checkout.control is not None:
-            checkout.control.author_driver = None
 
 
 async def _passed_surfaces(checkout, candidate, history):
@@ -220,113 +188,111 @@ async def attribute_escape(checkout, driver, message):
     return await driver.effects.run(collect, key=f"{ESCAPE_ATTRIBUTION}/{message.id}", ticket=stem)
 
 
-async def _settle_pass(checkout, driver, box, spec, history, pass_no):
-    states = last_states(history)
-    merged = sorted(stem for stem, state in states.items() if state == "merged")
-    lines: list[tuple[str, str]] = []
-    for message in box.pending():
-        if recovered := await recover_retro_ticket(checkout, box, message):
-            lines.append((message.id, f"{message.id}: ticket -> {recovered.stem}"))
-            continue
-        registry = read_registry(checkout.repo)
-        if message.reopen:
-            registry = [(r, body) for r, body in registry if r.id != f"tombstone-{message.id}"]
-        existing = next((r for r, _ in registry if r.id in
-                         {f"decision-{message.id}", f"tombstone-{message.id}"}), None)
-        if existing is not None:
-            if not await _committed(checkout, record_path(existing.id)):
-                await _commit_record(checkout, driver, existing.id)
-            box.resolve(message.id, Resolution(kind=existing.kind, link=existing.id))
-            lines.append((message.id, f"{message.id}: {existing.kind} -> {existing.id}"))
-            continue
+def triage_spec() -> Spec:
+    return load_spec((SPECS_DIR / "triage.md").read_text())
 
-        if message.verdict is not None and message.verdict.verdict == "author":
-            if message.verdict.produced_by_spec_version != spec.meta.version:
-                reply = TriageReply(
-                    verdict="decision", link=None, summary="Recorded author verdict superseded",
-                    rationale="The triage policy changed before the Author stage handled this message.",
-                    evidence=[f"recorded version: {message.verdict.produced_by_spec_version}",
-                              f"current version: {spec.meta.version}"], reopen_after_days=30,
-                )
-                line = await _record(checkout, driver, box, message.id, "decision", message.id, reply,
-                                     message.summary)
-            else:
-                invoked = any(event.type == EventType.SIGNAL and event.body.get("signal") == "author_invoked"
-                              and event.body.get("message") == message.id for event in checkout.journal.read())
-                outcome = (await failure_decision(checkout, driver, box, message, "previous Author invocation did not settle")
-                           if invoked else await author(checkout, driver, box, message, pass_no))
-                line = f"{message.id}: " + (f"ticket -> {outcome.stem}" if outcome.stem else f"decision -> {outcome.decision}")
-            lines.append((message.id, line))
-            continue
 
-        open_tickets = []
-        for path in sorted((checkout.repo / "tickets").glob("*/ticket.md")):
-            stem = path.parent.name
-            if stem not in merged and await _committed(checkout, path.relative_to(checkout.repo)):
-                open_tickets.append(f"{stem}: {_goal(path.read_text())}")
-        inputs = {
-            "message": json.dumps({"class": message.message_class, "summary": message.summary,
-                                   "origin": message.origin, "stage": message.stage,
-                                   "outcome": message.outcome, "retro_report_key": message.retro_report_key,
-                                   "fixed_failure": message.fixed_failure,
-                                   "overcorrection_risk": message.overcorrection_risk,
-                                   "proposed_spec_paths": message.proposed_spec_paths, "reopen": message.reopen,
-                                   "report": report_data(message.report, box.root) if message.report else None}),
-            "open_tickets": "\n".join(open_tickets),
-            "merged": "\n".join(merged),
-            "decisions": "\n".join(f"{r.id}: {r.kind}, link={r.link}, {body.splitlines()[0] if body else ''}"
-                                     for r, body in registry),
-        }
+async def settle_ready(checkout: Checkout, driver: Driver, box: Box, message: Message, spec: Spec) -> str | None:
+    """Settle a message that needs no triage call; None when it does, or when it waits on author."""
+    if recovered := await recover_retro_ticket(checkout, box, message):
+        return f"{message.id}: ticket -> {recovered.stem}"
+    registry = _registry(checkout, message)
+    existing = next((r for r, _ in registry if r.id in
+                     {f"decision-{message.id}", f"tombstone-{message.id}"}), None)
+    if existing is not None:
+        if not await _committed(checkout, record_path(existing.id)):
+            await _commit_record(checkout, driver, existing.id)
+        box.resolve(message.id, Resolution(kind=existing.kind, link=existing.id))
+        return f"{message.id}: {existing.kind} -> {existing.id}"
+    if (message.verdict is not None and message.verdict.verdict == "author"
+            and message.verdict.produced_by_spec_version != spec.meta.version):
+        reply = TriageReply(
+            verdict="decision", link=None, summary="Recorded author verdict superseded",
+            rationale="The triage policy changed before the Author stage handled this message.",
+            evidence=[f"recorded version: {message.verdict.produced_by_spec_version}",
+                      f"current version: {spec.meta.version}"], reopen_after_days=30,
+        )
+        return await _record(checkout, driver, box, message.id, "decision", message.id, reply, message.summary)
+    return None
 
-        def render_message(_consumed: object, findings: list) -> str:
-            return render(spec, {**inputs, "retry_findings": findings_text(findings)})
 
-        result = await driver.run(
-            LlmStage(surface="triage", emits=TriageReply, gates=[], render=render_message), message,
-            ticket=None, run_seq=message.seq, attempt=pass_no, workspace=checkout.repo,
-            tier=spec.meta.tier, effort=spec.meta.effort, stuck_budget=TRIAGE_STUCK_S)
-        if result.outcome != "ok":
-            line = f"{message.id}: {result.outcome}; remains pending"
+def _registry(checkout: Checkout, message: Message):
+    registry = read_registry(checkout.repo)
+    if message.reopen:
+        registry = [(r, body) for r, body in registry if r.id != f"tombstone-{message.id}"]
+    return registry
+
+
+def _merged(checkout: Checkout) -> list[str]:
+    return sorted(stem for stem, state in last_states(checkout.journal.read()).items() if state == "merged")
+
+
+async def triage_render(checkout: Checkout, box: Box, message: Message, spec: Spec) -> Callable[[object, list], str]:
+    merged = _merged(checkout)
+    open_tickets = []
+    for path in sorted((checkout.repo / "tickets").glob("*/ticket.md")):
+        stem = path.parent.name
+        if stem not in merged and await _committed(checkout, path.relative_to(checkout.repo)):
+            open_tickets.append(f"{stem}: {_goal(path.read_text())}")
+    inputs = {
+        "message": json.dumps({"class": message.message_class, "summary": message.summary,
+                               "origin": message.origin, "stage": message.stage,
+                               "outcome": message.outcome, "retro_report_key": message.retro_report_key,
+                               "fixed_failure": message.fixed_failure,
+                               "overcorrection_risk": message.overcorrection_risk,
+                               "proposed_spec_paths": message.proposed_spec_paths, "reopen": message.reopen,
+                               "report": report_data(message.report, box.root) if message.report else None}),
+        "open_tickets": "\n".join(open_tickets),
+        "merged": "\n".join(merged),
+        "decisions": "\n".join(f"{r.id}: {r.kind}, link={r.link}, {body.splitlines()[0] if body else ''}"
+                                 for r, body in _registry(checkout, message)),
+    }
+
+    def render_message(_consumed: object, findings: list) -> str:
+        return render(spec, {**inputs, "retry_findings": findings_text(findings)})
+    return render_message
+
+
+def triage_stage(render_message=unrendered) -> LlmStage:
+    return LlmStage(surface="triage", emits=TriageReply, gates=[], render=render_message)
+
+
+async def settle(checkout: Checkout, driver: Driver, box: Box, message: Message, reply: TriageReply,
+                 spec: Spec) -> str | None:
+    """Record a final triage reply: a decision or tombstone record, or the author verdict (None)."""
+    # Every tombstone verdict would reuse the committed record's id, even
+    # when it names another link. Reopening preserves that record's bytes.
+    if message.reopen and reply.verdict == "tombstone":
+        reply = reply.model_copy(update={"verdict": "author", "link": None, "reopen_after_days": None})
+    if reply.verdict == "author":
+        box.record_verdict(message.id, Verdict(verdict="author", produced_by_spec_version=spec.meta.version,
+                                              rationale=reply.rationale))
+        return None
+    merged = _merged(checkout)
+    kind = reply.verdict
+    if kind == "tombstone":
+        assert reply.link is not None
+        target = (reply.link in merged or
+                  await _committed(checkout, Path("tickets") / reply.link / "ticket.md"))
+        if not target:
+            for record, _ in _registry(checkout, message):
+                if record.id == reply.link and await _committed(checkout, record_path(record.id)):
+                    target = True
+                    break
+        if not target:
+            reply = reply.model_copy(update={
+                "verdict": "decision", "link": None,
+                "evidence": [*reply.evidence, f"unresolvable link: {reply.link}"],
+            })
+            kind = "decision"
         else:
-            reply = result.artifact
-            assert isinstance(reply, TriageReply)
-            # Every tombstone verdict would reuse the committed record's id, even
-            # when it names another link. Reopening preserves that record's bytes.
-            if message.reopen and reply.verdict == "tombstone":
-                reply = reply.model_copy(update={"verdict": "author", "link": None, "reopen_after_days": None})
-            if reply.verdict == "author":
-                box.record_verdict(message.id, Verdict(verdict="author", produced_by_spec_version=spec.meta.version,
-                                                      rationale=reply.rationale))
-                outcome = await author(checkout, driver, box, box.get(message.id), pass_no)
-                line = f"{message.id}: " + (f"ticket -> {outcome.stem}" if outcome.stem else f"decision -> {outcome.decision}")
-            else:
-                kind = reply.verdict
-                if kind == "tombstone":
-                    assert reply.link is not None
-                    target = (reply.link in merged or
-                              await _committed(checkout, Path("tickets") / reply.link / "ticket.md"))
-                    if not target:
-                        for record, _ in registry:
-                            if record.id == reply.link and await _committed(checkout, record_path(record.id)):
-                                target = True
-                                break
-                    if not target:
-                        reply = reply.model_copy(update={
-                            "verdict": "decision", "link": None,
-                            "evidence": [*reply.evidence, f"unresolvable link: {reply.link}"],
-                        })
-                        kind = "decision"
-                    else:
-                        for prior in box.messages():
-                            if (prior.id != message.id and prior.resolution is not None
-                                    and prior.resolution.kind == "tombstone"
-                                    and prior.resolution.link == reply.link):
-                                box.record_rereport(prior.id, occurrence_id=f"semantic/{message.id}")
-                line = await _record(checkout, driver, box, message.id, kind,
-                                     reply.link if kind == "tombstone" else message.id, reply,
-                                     message.summary)
-        lines.append((message.id, line))
-    return lines
+            for prior in box.messages():
+                if (prior.id != message.id and prior.resolution is not None
+                        and prior.resolution.kind == "tombstone"
+                        and prior.resolution.link == reply.link):
+                    box.record_rereport(prior.id, occurrence_id=f"semantic/{message.id}")
+    return await _record(checkout, driver, box, message.id, kind,
+                         reply.link if kind == "tombstone" else message.id, reply, message.summary)
 
 
 def report_intake(checkout: Checkout) -> Box:

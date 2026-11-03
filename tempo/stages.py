@@ -8,11 +8,10 @@ lift moves it to the canonical tickets dir as ONE ticket-plane commit `tempo(<st
 The run's terminal `state_transition` is not written here: that is the runner's (section 11.2).
 """
 
-import asyncio
 import json
 import re
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 from typing import Annotated, Literal
@@ -23,14 +22,13 @@ from tempo.artifacts import OUTCOMES, Artifact, Finding, Harvest, NonBlank, Outc
 from tempo.box import BOX_DIR
 from tempo.storm import arrival_id
 from tempo.config import Config, ConfigSnapshot, Severity
-from tempo.control import protected_cleanup
 from tempo.driver import Driver, LlmStage
 from tempo.gates import BugEvidence, GateReport, RegressionRun, run_gates
 from tempo.git import Git, GitError
 from tempo.hostfiles import CORE_TEMPLATE, CoreDriftGate, committed_core
-from tempo.journal import EventType, run_seq
+from tempo.journal import EventType
 from tempo.seams import ExecutableNotFound, FileSystem, ProcessExec
-from tempo.specs import RenderOverBound, Spec, load_spec, render
+from tempo.specs import Spec, load_spec, render
 from tempo.tickets import _HEADING, TICKET_FILE, TICKETS_DIR, Ticket, ticket_path
 
 MAIN = "main"
@@ -152,17 +150,6 @@ def read_review(text: str) -> ApprovedInvoice | SnagList | Rma:
 # --- context ------------------------------------------------------------------------------------
 
 
-@dataclass
-class StageBoundary:
-    """Memory-only selection supplied by the lifetime; the CLI run path has no suspension policy."""
-
-    select: Callable[[Ticket, StageName], bool] | None = None
-    run: "StagesRun | None" = None
-    ticket: Ticket | None = None
-    next_stage: StageName | None = None
-    active: asyncio.Task | None = None
-
-
 @dataclass(frozen=True)
 class StageContext:
     """The seams one ticket run's stages share. `env` is the parent env; children get it minus secrets."""
@@ -175,35 +162,10 @@ class StageContext:
     fs: FileSystem
     driver: Driver
     specs_dir: Path
-    boundary: StageBoundary = field(default_factory=StageBoundary, init=False, compare=False)
 
     def worktree(self, stem: str) -> Path:
         assert self.config.worktree_root is not None  # resolved at config load
         return self.config.worktree_root / stem
-
-    async def abort_current(self) -> None:
-        try:
-            await self.driver.abort_current()
-        finally:
-            task = self.boundary.active
-            if task is not None:
-                if not task.done() and not task.cancelling():
-                    task.cancel()
-                cleanup = asyncio.gather(task, return_exceptions=True)
-                await protected_cleanup(cleanup)
-                [result] = cleanup.result()
-                if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
-                    raise result
-
-
-class Stages:
-    """Public access to the Driver already owned by the stage composition."""
-    def __init__(self, ctx: StageContext):
-        self._ctx = ctx
-
-    @property
-    def driver(self) -> Driver:
-        return self._ctx.driver
 
 
 def _lift_files(ctx: StageContext, stem: str, kind: str, only: str | None = None) -> list[Path]:
@@ -396,22 +358,6 @@ def run_record(reply: ImplementReply | None, result: StageResult, spec: Spec, se
                                  f"- spec: {spec.meta.llm_surface} {spec.meta.version}",
     }
     return "".join(f"## {name}\n\n{(fields[name].strip() or 'none')}\n\n" for name in RUN_RECORD_SECTIONS)
-
-
-async def implement(ctx: StageContext, ticket: Ticket, *, attempt: int) -> StageResult:
-    """Teardown-and-create the worktree, run the implement spec in it, and write + lift the run record."""
-    stem = ticket.stem
-    worktree = await prepare_worktree(ctx, stem)
-    stage, spec = implement_stage(ctx, ticket, worktree)
-    try:
-        result = await ctx.driver.run(
-            stage, ticket, ticket=stem, attempt=attempt, workspace=worktree,
-            tier=ticket.frontmatter.agent_tier, effort=ticket.frontmatter.agent_effort,
-            stuck_budget=ticket.stuck_minutes * 60.0)
-    except RenderOverBound as e:
-        # The pre-call short-circuit: ticket-text arithmetic, parked like premise_failed (section 8).
-        return StageResult(outcome="premise_failed", artifact=None, findings=[e.finding])
-    return await finish_implement(ctx, ticket, spec, result, attempt=attempt)
 
 
 async def finish_implement(ctx: StageContext, ticket: Ticket, spec: Spec, result: StageResult, *,
@@ -861,27 +807,6 @@ def review_stage(ctx: StageContext, ticket_text: str, diff: str) -> tuple[LlmSta
     return LlmStage(surface="review", emits=ReviewVerdict, gates=[], render=render_diff), spec
 
 
-async def review(ctx: StageContext, ticket: Ticket, invoice: Invoice, *, attempt: int) -> StageResult:
-    """Inspect: one separate-session review of `git diff main...<stem>`, pinned to the reviewed SHA.
-
-    approve -> ok; snag and rma -> gate_failed (the review surface is a gate, section 11); the
-    verdict-keyed artifact lands in `review.md` either way.
-    """
-    stem = ticket.stem
-    reviewed = await ctx.git.rev_parse(ctx.repo, stem)
-    diff = await ctx.git.diff(ctx.repo, MAIN, stem)
-    stage, spec = review_stage(ctx, (ctx.repo / ticket_path(stem)).read_text(), diff)
-    try:
-        # The effective ticket capability applies to every call in this attempt.
-        result = await ctx.driver.run(
-            stage, invoice, ticket=stem, attempt=attempt, workspace=ctx.worktree(stem),
-            tier=ticket.frontmatter.agent_tier, effort=ticket.frontmatter.agent_effort,
-            stuck_budget=ticket.stuck_minutes * 60.0)
-    except RenderOverBound as e:
-        return StageResult(outcome="premise_failed", artifact=None, findings=[e.finding])
-    return await finish_review(ctx, ticket, spec, result, reviewed, attempt=attempt)
-
-
 async def finish_review(ctx: StageContext, ticket: Ticket, spec: Spec, result: StageResult, reviewed: str, *,
                         attempt: int) -> StageResult:
     """After the call: the verdict-keyed artifact, pinned to the reviewed SHA, lands in `review.md`."""
@@ -901,72 +826,6 @@ async def finish_review(ctx: StageContext, ticket: Ticket, spec: Spec, result: S
         return _short(result, "ok", [], artifact)
     return _short(result, "gate_failed", list(verdict.findings), artifact)
 
-
-# --- composition --------------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class StagesRun:
-    """Every stage result of one run, in order; the run stops at the first stage not `ok`."""
-
-    attempt: int
-    results: dict[StageName, StageResult] = field(default_factory=dict)
-
-    @property
-    def last(self) -> tuple[StageName, StageResult]:
-        return list(self.results.items())[-1]
-
-
-async def run_stages(ctx: StageContext, ticket: Ticket) -> StagesRun:
-    """Implement -> Check -> Review for one ticket, single worker, in the process holding the lock.
-
-    `already_satisfied`, proven by Check's green verification on an empty diff, stops before Review:
-    there is no diff to review and the ticket settles as a no-op (section 5 invariant 4).
-    """
-    boundary = ctx.boundary
-    run = boundary.run or StagesRun(attempt=run_seq(ctx.driver.journal.read(), ticket.stem))
-    boundary.ticket, boundary.next_stage = ticket, None
-    for stage in ("implement", "check", "review"):
-        if stage in run.results:
-            if run.results[stage].outcome != "ok":
-                return run
-            continue
-        if boundary.select is not None and not boundary.select(ticket, stage):
-            boundary.run, boundary.next_stage = run, stage
-            return run
-        if stage == "implement":
-            operation = implement(ctx, ticket, attempt=run.attempt)
-        elif stage == "check":
-            slip = run.results["implement"].artifact
-            assert isinstance(slip, PackingSlip)
-            operation = check(ctx, ticket, slip, attempt=run.attempt)
-        else:
-            invoice = run.results["check"].artifact
-            assert isinstance(invoice, Invoice)
-            operation = review(ctx, ticket, invoice, attempt=run.attempt)
-        try:
-            if boundary.select is None:
-                result = await operation
-            else:
-                boundary.active = asyncio.create_task(operation)
-                try:
-                    result = await asyncio.shield(boundary.active)
-                except asyncio.CancelledError:
-                    await ctx.abort_current()
-                    raise
-                finally:
-                    boundary.active = None
-        except Exception as exc:
-            from tempo.providers import ProviderCallError
-            if not isinstance(exc, ProviderCallError):
-                raise
-            findings = await ctx.driver.provider_failure(exc, owner=ticket.stem, ticket=ticket.stem,
-                sequence=run.attempt, surface='requisition_review', workspace=ctx.worktree(ticket.stem))
-            result = StageResult(outcome='infra_error', artifact=None, findings=findings)
-        run.results[stage] = result
-        if result.outcome != "ok":
-            break
-    return run
 
 HARVEST_TAIL_CHARS = 4_000
 

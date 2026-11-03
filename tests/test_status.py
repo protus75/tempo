@@ -11,7 +11,6 @@ from tempo.box import Box, Resolution
 from tempo.storm import storm_producer
 from tempo.git import Git
 from tempo.journal import EventType, Journal
-from tempo.llm import FakeLLM
 from tempo.lockfile import Lockfile
 from tempo.mergequeue import MergeQueue
 from tempo.retro import Retro, RetroArtifact, measurements, production_evidence, project_window, render_report
@@ -91,7 +90,7 @@ def test_status_current_window_scorecard(tmp_path):
     merged(c.journal, "current-24", head)
     merged(c.journal, "current-24", head)
     c.journal.append(EventType.SIGNAL, {"signal": "rework_order", "attempt": 1}, ticket="current-24")
-    MergeQueue(writer.ctx, escalate=lambda event: None, control=None)._facts("current-24", set(), set(), red=["red.py"])
+    MergeQueue(writer, escalate=lambda event: None, control=None)._facts("current-24", set(), set(), red=["red.py"])
     c.journal.append(EventType.STATE_TRANSITION, {"to": "gate_failed", "reason": "diff_budget"}, ticket="failed")
     c.journal.append(EventType.EFFECT_INTENT, {}, key="retro/2")
     status = asyncio.run(_status(c))
@@ -187,9 +186,9 @@ def test_status_preserves_sections_and_is_write_free(tmp_path, monkeypatch, caps
     monkeypatch.setattr(Journal, "append", forbidden)
     monkeypatch.setattr(Lockfile, "acquire", forbidden)
     monkeypatch.setattr(Effects, "run", forbidden)
-    monkeypatch.setattr(FakeLLM, "call", forbidden)
     monkeypatch.setattr(CommandNotifications, "notify", forbidden)
-    monkeypatch.setattr(Retro, "__call__", forbidden)
+    monkeypatch.setattr(Retro, "begin", forbidden)
+    monkeypatch.setattr(Retro, "finish", forbidden)
     for name in ("enqueue", "record_rereport", "record_verdict", "resolve", "recover"):
         monkeypatch.setattr(Box, name, forbidden)
     git_run = Git._run

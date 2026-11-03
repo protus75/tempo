@@ -4,24 +4,17 @@ from tests.test_stages import adopt_conduct
 
 import asyncio
 import dataclasses
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from tempo.config import load_config
 from tempo.box import BOX_DIR, Box
-from tempo.driver import Driver
-from tempo.git import Git
 from tempo.journal import EventType
-from tempo.llm import FakeLLM
 from tempo.merge import Admission, AdmissionBoundary, Candidate, PostRebaseGate, merge
-from tempo.mergequeue import CONFLICT_FACTS, MergeQueue
-from tempo.seams import LocalFileSystem, SubprocessExec
-from tempo.stages import StageContext, run_stages
+from tempo.mergequeue import MergeQueue
 from tempo.tickets import validate_ticket
-from tests.test_stages import ENV, SNAG, SPECS, STEM, agent, author, git, verdict
-from tempo.checkout import Checkout, Refusal
+from tests.test_stages import SNAG, STEM, agent, author, context, drive, git, verdict
+from tempo.checkout import Refusal
 
 GOAL = "`thing.py` holds the word ok."
 
@@ -42,26 +35,13 @@ def repo(tmp_path: Path) -> Path:
     return root
 
 
-def context(repo: Path, script: list) -> StageContext:
-    config = load_config(None, cwd=repo)
-    clock = lambda: datetime(2026, 10, 5, tzinfo=UTC)  # noqa: E731
-
-    async def never(seconds: float) -> None:
-        await asyncio.Event().wait()
-
-    exec_ = SubprocessExec()
-    driver = Driver.from_config(config, llm=FakeLLM(script), env=ENV, clock=clock, sleep=never)
-    return StageContext(repo=repo, config=config, env=ENV, exec_=exec_, git=Git(exec_, env=ENV, timeout=30.0),
-                        fs=LocalFileSystem(), driver=driver, specs_dir=SPECS)
-
-
 def reviewed(repo: Path, script: list, *, approve: bool = True, authored: bool = False):
     """Author the ticket and run Implement -> Check -> Review; return what merge needs."""
     if not authored:
         author(repo)
-    ctx = context(repo, script)
+    ctx = context(repo)
     ticket = validate_ticket(STEM, (repo / "tickets" / STEM / "ticket.md").read_text(), repo)
-    run = asyncio.run(run_stages(ctx, ticket))
+    run = asyncio.run(drive(ctx, ticket, list(script)))
     assert run.last == ("review", run.results["review"])
     assert (run.results["review"].outcome == "ok") is approve
     return ctx, ticket, run.attempt
@@ -299,9 +279,8 @@ async def test_retro_prompt_spec_merge_requires_unique_bridge(repo, monkeypatch,
     from tempo.effects import Effects
     from tempo.merge import write_squash
     from tempo.mergequeue import TreeMismatch
-    from tests.test_stages import implement_reply
     author(repo)
-    ctx = context(repo, [implement_reply(), verdict()])
+    ctx = context(repo)
     path = repo / f"tickets/{STEM}/ticket.md"
     source = "human" if case == "unrelated" else "box:retro_finding"
     ctx.fs.write(path, path.read_text().replace("source: human", f"source: {source}").replace(
@@ -311,19 +290,10 @@ async def test_retro_prompt_spec_merge_requires_unique_bridge(repo, monkeypatch,
     await ctx.git.add(repo, [str(path.relative_to(repo)), "specs/z.md", "specs/a.md", "specs/readme.txt"])
     await ctx.git.commit(repo, "retro admission fixture")
     ticket = validate_ticket(STEM, path.read_text(), repo)
-    call = ctx.driver.llm.call
-    async def implement(request):
-        if request.surface == "implement":
-            changes = {"tempo/thing.py": "ok\n"}
-            if case != "no-spec":
-                changes.update({"specs/z.md": "fixed\n", "specs/a.md": "fixed\n", "specs/readme.txt": "fixed\n"})
-            for rel, text in changes.items():
-                ctx.fs.write(request.worktree / rel, text.encode())
-            await ctx.git.add(request.worktree, list(changes))
-            await ctx.git.commit(request.worktree, "repair")
-        return await call(request)
-    monkeypatch.setattr(ctx.driver.llm, "call", implement)
-    run = await run_stages(ctx, ticket)
+    changes = {"tempo/thing.py": "ok\n"}
+    if case != "no-spec":
+        changes.update({"specs/z.md": "fixed\n", "specs/a.md": "fixed\n", "specs/readme.txt": "fixed\n"})
+    run = await drive(ctx, ticket, [agent(changes), verdict()])
     assert run.results["review"].outcome == "ok"
     body = {"kind": "retro_ticket_authored", "box_id": "box-000001-1234abcd",
             "retro_report_key": "retro/1", "ticket_stem": STEM}
@@ -457,7 +427,7 @@ def test_core_drift_candidate_template(repo, mode):
 @pytest.mark.parametrize('mode', ['inline', 'queue'])
 @pytest.mark.parametrize('omitted', [None, 'CLAUDE.md', 'AGENTS.md'])
 def test_core_activation_first_adoption_merge(repo, mode, omitted):
-    from tempo import hostfiles, stages
+    from tempo import hostfiles
     from tests.test_cli import core_config
     from tests.test_mergequeue import approve
     core_config(repo, ['claude', 'codex'])
@@ -474,10 +444,10 @@ def test_core_activation_first_adoption_merge(repo, mode, omitted):
     git(repo, 'commit', '-m', 'activation fixture fence')
     changes = {name: hostfiles.render(data).decode() for name, data in original.items() if name != omitted}
     changes['tempo/thing.py'] = 'ok adopted\n'
-    ctx = context(repo, [agent(changes), verdict()])
+    ctx = context(repo)
     ticket = validate_ticket(STEM, path.read_text(), repo)
     async def scenario():
-        run = await run_stages(ctx, ticket)
+        run = await drive(ctx, ticket, [agent(changes), verdict()])
         assert run.results['check'].outcome == ('ok' if omitted is None else 'gate_failed')
         if omitted is not None:
             assert any(f.path == omitted and f.code == 'core_drift' for f in run.results['check'].findings)
@@ -497,8 +467,8 @@ def test_core_activation_first_adoption_merge(repo, mode, omitted):
         for name, data in original.items():
             assert (repo / name).read_bytes() == hostfiles.render(data)
         # Next ordinary candidate inherits both files and needs no operator repair.
-        local = context(repo, [agent({'tempo/thing.py': 'ok ordinary\n'}), verdict()])
-        next_run = await run_stages(local, ticket)
+        local = context(repo)
+        next_run = await drive(local, ticket, [agent({'tempo/thing.py': 'ok ordinary\n'}), verdict()])
         assert next_run.results['check'].outcome == 'ok'
         result = await admission(local, next_run.attempt)
         assert result.outcome == 'ok', result.findings

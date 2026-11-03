@@ -28,8 +28,8 @@ SUPERSEDES = "supersedes"
 
 
 def parked(events: Iterable[Event], stem: str, ticket_sha: str) -> bool:
-    """The park (section 18): the stem's last run ended `premise_failed`, or the orchestrator parked it, against
-    this same `ticket.md`, and no `reoffer` released it since."""
+    """The park (section 18): the stem's last run ended `premise_failed`, or the orchestrator parked or split it,
+    against this same `ticket.md`, and no `reoffer` released it since."""
     last: dict | None = None
     ran_sha: str | None = None
     released = False
@@ -42,7 +42,7 @@ def parked(events: Iterable[Event], stem: str, ticket_sha: str) -> bool:
                 ran_sha = last.get("ticket_sha")
         elif e.type == EventType.SIGNAL and e.body.get("signal") == REOFFERED:
             released = e.body.get("ticket_sha") == ticket_sha
-    return (last is not None and (last.get("to") == PREMISE or last.get("dispatch") == "park")
+    return (last is not None and (last.get("to") == PREMISE or last.get("dispatch") in ("park", "split"))
             and ran_sha == ticket_sha and not released)
 
 

@@ -1,9 +1,8 @@
 """One model call run by a host subagent (AGENT_PLAN.md section 3.1).
 
-`Driver._run` split where the child process ran: `prepare` renders, spools the prompt in parts,
-snapshots the trees, and journals the effect intent; the host spawns the named subagent, which
-writes `output.txt`; `submit` checks confinement and the deadline, classifies `stop.txt`, runs
-steps 5-8 (`check_reply` plus the review hook), and journals the completion.
+`prepare` renders, spools the prompt in parts, snapshots the trees, and journals the effect intent; the host
+spawns the named subagent, which writes `output.txt`; `submit` checks confinement and the deadline, classifies
+`stop.txt`, runs steps 5-8 (`check_reply` plus the review hook), and journals the completion.
 
 A charged outcome completes the effect, so the next `prepare` opens the next call_seq with its
 findings. An uncharged one (infra_error, provider_drought) and a timeout are journaled as a
@@ -90,6 +89,9 @@ class CallSpec:
     effort: AgentEffort
     stuck_budget: float
     run_seq: int | None = None
+    slot: str | None = None  # the key's stem when it is neither the ticket nor the surface
+    findings: tuple[Finding, ...] | None = None  # re-prompt past a final reply with these findings
+    context: Mapping[str, Any] | None = None  # what `submit` needs to finish a call outside the ticket flow
 
 
 @dataclass(frozen=True)
@@ -178,7 +180,7 @@ class Calls:
         stage = spec.stage
         if stage.surface not in SURFACES:
             raise Refusal(f"surface {stage.surface!r} does not run as a subagent", f"use one of {SURFACES}")
-        stem = spec.ticket or stage.surface
+        stem = spec.slot or spec.ticket or stage.surface
         if spec.run_seq is not None and spec.ticket is not None:
             raise ValueError("run_seq requires ticket=None")
         history = self.journal.read()
@@ -199,10 +201,11 @@ class Calls:
         call_seq = 1
         if completions:
             last = completions[-1].body["call"]
-            if last["final"]:
+            if last["final"] and spec.findings is None:
                 return Prepared(call=last["call_id"], state="completed")
             call_seq = int(completions[-1].key.rsplit("/", 1)[1]) + 1
-            findings = [Finding.model_validate(f) for f in last["findings"]]
+            findings = (list(spec.findings) if last["final"] else
+                        [Finding.model_validate(f) for f in last["findings"]])
 
         call_id = self.new_id()
         key = llm_key(stem, seq, stage.surface, spec.attempt, call_seq)
@@ -235,6 +238,7 @@ class Calls:
             "host_reported_model": None, "surface": stage.surface, "key": key, "ticket": spec.ticket,
             "attempt": spec.attempt, "call_seq": call_seq, "spool_stem": spool_stem, "read_root": str(root),
             "deadline": deadline, "parts": parts, "reply": reply, "spawn_prompt": spawn, "snapshot": snapshot,
+            "context": dict(spec.context or {}),
         }
         self.fs.write(call_dir / "call.json", (json.dumps(record, indent=2) + "\n").encode())
         return Prepared(call=call_id, state="pending", agent=agent, spawn_prompt=spawn,

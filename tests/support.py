@@ -2,10 +2,11 @@
 tests (test_drain, test_terminal, test_scheduler, test_retro_box) when P5a deleted them."""
 
 import ast
+import secrets
 import asyncio
-import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,10 +15,8 @@ from tempo.driver import Driver
 from tempo.effects import Effects
 from tempo.git import Git
 from tempo.journal import Journal
-from tempo.lockfile import LockHeld, Lockfile
 from tempo.seams import LocalFileSystem, SubprocessExec
-from tempo.stages import StageContext, Stages
-from tempo.timers import Timers
+from tempo.stages import StageContext
 from tests.test_cli import CONFIG, ENV, TICKET as CLI_TICKET, git_out, ticket, write
 from tests.test_stages import CONFIG as STAGES_CONFIG, STEM, TICKET, adopt_conduct, git
 
@@ -160,46 +159,76 @@ PROPOSAL = {"fixed_failure": "Observed café failure", "overcorrection_risk": "R
             "proposed_spec_paths": ["specs/review.md", "specs/author.md"]}
 
 
-def stage_context(checkout: Checkout, llm) -> StageContext:
-    """The stage composition `runner.bind` built, on a fake model: what triage, author, and retro run on until
-    P5b moves them to prepare and submit."""
-    driver = Driver.from_config(checkout.config, llm=llm, env=checkout.env, clock=checkout.clock,
-                                sleep=checkout.sleep, fs=checkout.fs)
+def stage_context(checkout: Checkout) -> StageContext:
+    """The stage composition the tools build, on this checkout's journal."""
+    driver = Driver.from_config(checkout.config, clock=checkout.clock, fs=checkout.fs)
     driver.journal = checkout.journal
     driver.effects = Effects(checkout.journal)
     return StageContext(repo=checkout.repo, config=checkout.config, env=checkout.env, exec_=checkout.exec_,
                         git=checkout.git, fs=checkout.fs, driver=driver, specs_dir=SPECS_DIR)
 
 
-class Pipeline:
-    """The `stages.driver` handle Retro reads, as `runner.bind` exposed it."""
-
-    def __init__(self, checkout: Checkout, llm) -> None:
-        self.ctx = stage_context(checkout, llm)
-        self.stages = Stages(self.ctx)
+# --- the box flow, as the orchestrator runs it through the tools (AGENT_PLAN.md section 4.1, P5b) -----------
 
 
-def triage(root: Path, llm) -> int:
-    """One triage pass under the writer lock, as the `tempo triage` verb ran it before P5a removed it."""
-    from tempo.triage import triage_pass
+class Script:
+    """Scripted subagent replies in call order; records each call's surface and whole prompt."""
 
-    checkout = checkout_at(root)
+    def __init__(self, replies) -> None:
+        self.replies = list(replies)
+        self.requests: list[SimpleNamespace] = []
 
-    async def one_pass():
-        lock = Lockfile(checkout.config.state_dir, instance_id="test", clock=checkout.clock)
-        lock.acquire()
-        try:
-            timers = Timers(journal=checkout.journal, clock=checkout.clock, sleep=checkout.sleep)
-            timers.reconstruct()
-            timers.fire_due()
-            return await triage_pass(checkout, llm)
-        finally:
-            lock.release()
 
+def render_root(root: Path) -> None:
+    """Write and commit the host files the tools and hooks need (`tempo render`)."""
+    from tempo import render
+    from tempo.config import load_config
+
+    render.write(root, load_config(None, cwd=root), LocalFileSystem())
+    git_out(root, "add", "-A")
+    git_out(root, "commit", "-m", "render")
+
+
+def call(host, args: dict, script: Script) -> dict:
+    """prepare, spawn the scripted subagent, and submit until the stage is final or nothing is left to spawn."""
+    while True:
+        prepared = host.tool("prepare", args)
+        if prepared["state"] != "pending":
+            return prepared
+        parts = [line.removeprefix("part: ") for line in prepared["spawn_prompt"].splitlines()
+                 if line.startswith("part: ")]
+        request = SimpleNamespace(surface=args["surface"], agent=prepared["agent"],
+                                  rendered="".join(Path(p).read_text() for p in parts))
+        script.requests.append(request)
+        reply = script.replies.pop(0)
+        host.subagent(prepared, reply(request) if callable(reply) else reply)
+        result = host.until_done(host.tool("submit", {"call": prepared["call"]}), "submit",
+                                 {"call": prepared["call"]})
+        if result.get("final"):
+            return result
+
+
+def box_message(host, id: str, script: Script) -> str:
+    """One pending message through triage and, when it says so, author and the candidate's review."""
+    surface = "triage"
+    while True:
+        result = call(host, {"surface": surface, "message": id}, script)
+        if result.get("next") is None:
+            return result.get("line") or f"{id}: {result.get('outcome')}"
+        surface = result["next"]
+
+
+def triage(root: Path, script: Script) -> int:
+    """One session's box pass: every pending message, then the session ends without a handoff commit."""
+    from tempo.lockfile import Sessions
+    from tests.hostfakes import FakeHost
+
+    host = FakeHost("claude", root)
+    host.ids = (secrets.token_hex(16) for _ in iter(int, 1))  # unique across this root's sessions
+    host.tool("begin_session")
     try:
-        lines = asyncio.run(one_pass())
-    except LockHeld as e:
-        print(f"tempo triage: {e}", file=sys.stderr)
-        return 2
-    print("\n".join(line for _, line in lines) if lines else "no pending suggestions")
+        lines = [box_message(host, m["id"], script) for m in host.tool("read_box")["pending"]]
+    finally:
+        Sessions(root / ".tempo" / "state", clock=host.clock, fs=LocalFileSystem()).end(host.token)
+    print("\n".join(lines) if lines else "no pending suggestions")
     return 0

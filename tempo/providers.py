@@ -17,24 +17,3 @@ FAILURE_MARKERS: tuple[tuple[FailureClass, tuple[str, ...]], ...] = (
     ("outage", ("service unavailable", "internal server error", "stream disconnected", "at capacity")),
     ("model_error", ("model unavailable", "model not found", "model is not supported")),
 )
-
-
-class ProviderCallError(Exception):
-    """A model call failed with a classified failure. `stderr_tail` is scrubbed."""
-
-    def __init__(
-        self,
-        provider: str,
-        message: str,
-        *,
-        rc: int,
-        stderr_tail: str,
-        failure_class: str | None = None,
-        paved_road: str | None = None,
-    ) -> None:
-        super().__init__(f"{provider}: {message} (exit {rc}); stderr tail: {stderr_tail!r}")
-        self.provider = provider
-        self.rc = rc
-        self.stderr_tail = stderr_tail
-        self.failure_class = failure_class
-        self.paved_road = paved_road

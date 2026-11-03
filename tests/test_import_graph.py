@@ -1,12 +1,11 @@
-"""The kept set, `__main__` included since P5a, never imports what is left of the scripted layer (AGENT_PLAN.md
-P3, P5a), counting every import statement: module-level, function-level, and TYPE_CHECKING alike, followed
-transitively. `rework` stays, unused, until P5b."""
+"""The scripted layer is gone (AGENT_PLAN.md P3, P5a, P5b): none of its modules exists, and nothing imports one,
+counting every import statement: module-level, function-level, and TYPE_CHECKING alike, followed transitively."""
 
 import ast
 from pathlib import Path
 
 PACKAGE = Path(__file__).resolve().parent.parent / "tempo"
-EXCLUDED = frozenset({"rework"})
+EXCLUDED = frozenset({"drain", "runner", "daemon", "serve", "rework"})
 
 
 def _edges(package: Path = PACKAGE) -> dict[str, set[str]]:
@@ -41,6 +40,10 @@ def _path_to_excluded(start: str, edges: dict[str, set[str]]) -> list[str] | Non
                 seen.add(target)
                 stack.append(path + [target])
     return None
+
+
+def test_the_scripted_layer_is_gone():
+    assert not [name for name in sorted(EXCLUDED) if (PACKAGE / f"{name}.py").exists()]
 
 
 def test_kept_set_never_reaches_the_scripted_layer():

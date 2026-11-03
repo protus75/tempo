@@ -69,7 +69,7 @@ def test_session_and_tool_constants():
     assert tools.STAGE_FAILED == 'stage_failed'
     assert tools.DECISIONS == 'decisions.md'
     assert tools.FLOW_SURFACES == ('requisition_review', 'implement', 'review')
-    assert tuple(tools.TOOLS) == ('begin_session', 'status', 'list_eligible', 'read_ticket', 'read_attempts', 'read_box', 'start', 'prepare', 'submit', 'check', 'merge', 'job', 'write_handoff', 'retry', 'escalate', 'reject', 'park', 'reoffer', 'release_hold', 'file_box', 'notify')
+    assert tuple(tools.TOOLS) == ('begin_session', 'status', 'list_eligible', 'read_ticket', 'read_attempts', 'read_box', 'start', 'prepare', 'submit', 'check', 'merge', 'job', 'write_handoff', 'retry', 'escalate', 'reject', 'park', 'reoffer', 'release_hold', 'split_propose', 'split_commit', 'confirm', 'file_box', 'notify')
     assert jobs.KINDS == ('check', 'merge', 'submit')
     assert jobs.FINISHED == frozenset({'done', 'lost'})
     assert hosts.HOSTS == ('claude', 'copilot', 'codex')
@@ -111,7 +111,7 @@ def test_inbox_closed_sets_and_constants():
     assert dict(inbox.CAPS) == {'log': 65536, 'replay': 1048576}
 
 def test_journal_closed_sets_and_constants():
-    assert set(get_args_deep(journal.Dispatch)) == {'escalate', 'park', 'reject_queue', 'retry'}
+    assert set(get_args_deep(journal.Dispatch)) == {'escalate', 'park', 'reject_queue', 'retry', 'split'}
     assert dict(journal.EVENT_VERSIONS) == {'cap_consumed': 1, 'checkpoint': 1, 'effect_completion': 1, 'effect_intent': 1, 'signal': 1, 'state_transition': 1, 'timer_armed': 1, 'timer_fired': 1}
     assert {e.value for e in journal.EventType} == {'cap_consumed', 'checkpoint', 'effect_completion', 'effect_intent', 'signal', 'state_transition', 'timer_armed', 'timer_fired'}
     assert journal.ROLL_BYTES == 67108864
@@ -146,7 +146,7 @@ def test_entry_closed_sets_and_constants():
     assert stages.HARVEST_TAIL_CHARS == 4000
 
 def test_specs_closed_sets_and_constants():
-    assert specs.ENGINE_LLM_SURFACES == frozenset({'author', 'implement', 'requisition_review', 'retro', 'review', 'rework', 'triage'})
+    assert specs.ENGINE_LLM_SURFACES == frozenset({'author', 'implement', 'requisition_review', 'retro', 'review', 'triage'})
     assert specs.RENDER_BOUND_CHARS == 400000
     assert specs.REQ_RENDER_HEADROOM == 0.75
     assert specs.SPEC_MAX_LINES == 200

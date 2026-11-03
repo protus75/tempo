@@ -11,19 +11,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from tempo.artifacts import NonBlank
 from tempo.box import BOX_DIR, Box, RereportJournal, read_registry
-from tempo.driver import LlmStage
+from tempo.driver import LlmStage, unrendered
 from tempo.git import GitError
 from tempo.journal import Event, EventType
 from tempo.specs import RENDER_BOUND_CHARS, REQ_RENDER_HEADROOM, RenderOverBound, load_spec, render
 
 RETRO_FAILED = "retro_failed"
 _REPORT = re.compile(r"retro/([0-9]+)\Z")
-
-
-class RetroConstructionError(ValueError):
-    def __init__(self):
-        super().__init__("retro has no shared Driver; construct the pipeline with its shared Driver "
-                         "exposed through Pipeline.stages.driver")
 
 
 class RetroProposal(BaseModel):
@@ -105,9 +99,7 @@ def measurements(window: Window) -> dict:
                                  "actual_seconds": durations[tuple(row["identity"])]} for row in unique]}
 
 
-def select_trigger(window: Window, evidence: dict, now: datetime, *, forced: bool) -> str | None:
-    if forced:
-        return "forced" if evidence["merged_count"] else None
+def select_trigger(window: Window, evidence: dict, now: datetime) -> str | None:
     if evidence["merged_count"] >= 25:
         return "merges"
     if window.started_at is not None and now - datetime.fromisoformat(window.started_at) >= timedelta(days=7):
@@ -174,23 +166,12 @@ def render_report(window: Window, evidence: dict, provenance: dict, tombstones: 
 
 
 class Retro:
-    """Invoked only by the lock holder; constructing this hook performs no effects."""
-    def __init__(self, checkout, pipeline):
-        self.checkout, self.pipeline = checkout, pipeline
+    """Run by the writer-lock holder, one call through `prepare` and `submit`; constructing it has no effects."""
 
-    def driver(self):
-        stages = getattr(self.pipeline, "stages", None)
-        driver = getattr(stages, "driver", None)
-        if driver is None:
-            raise RetroConstructionError()
-        return driver
+    def __init__(self, checkout, driver):
+        self.checkout, self.driver = checkout, driver
 
-    async def abort_current(self):
-        driver = getattr(getattr(self.pipeline, "stages", None), "driver", None)
-        if driver is not None:
-            await driver.abort_current()
-
-    async def commit_report(self, driver, window, text):
+    async def commit_report(self, window, text):
         path = f"tickets/retro/{window.sequence:06d}.md"
         unfinished = any(e.type == EventType.EFFECT_INTENT and e.key == f"retro/{window.sequence}"
                          for e in self.checkout.journal.read())
@@ -200,14 +181,13 @@ class Retro:
             recorded = await self.committed_report(window) if unfinished else None
             if recorded is not None:
                 return recorded
-            driver.spool._fs.write(self.checkout.repo / path, driver.redactor.scrub(text).encode())
+            self.checkout.fs.write(self.checkout.repo / path, self.driver.redactor.scrub(text).encode())
             await self.checkout.git.add(self.checkout.repo, [path])
             await self.checkout.git.commit(self.checkout.repo, f"tempo: retro {window.sequence:06d}", only=[path])
             return {"commit": await self.checkout.git.rev_parse(self.checkout.repo, "HEAD")}
-        result = await driver.effects.run(commit, key=f"retro/{window.sequence}", ticket=None)
+        result = await self.driver.effects.run(commit, key=f"retro/{window.sequence}", ticket=None)
         await self.emit_proposals(f"retro/{window.sequence}")
         return result
-
     async def emit_proposals(self, report_key):
         """Only the completed effect's committed receipt can supply proposal evidence."""
         c = self.checkout
@@ -274,65 +254,75 @@ class Retro:
                     "and complete a report through the lock-held retro hook to release this window",
             reason=identity, occurrence_id=identity)
 
-    async def __call__(self, *, forced=False):
+    async def due(self, events=None):
+        """The window, its evidence, and the trigger when retro is due; None otherwise. Read-only."""
+        window = project_window(self.checkout.journal.read() if events is None else events)
+        evidence = await production_evidence(window, self.checkout)
+        trigger = select_trigger(window, evidence, self.checkout.clock())
+        return None if trigger is None else (window, evidence, trigger)
+
+    async def begin(self):
+        """Before the call: a line when nothing needs a call, else (stage, consumed, context)."""
         c = self.checkout
         for event in c.journal.read():
             if event.type == EventType.EFFECT_COMPLETION and _REPORT.fullmatch(event.key or ""):
                 await self.emit_proposals(event.key)
-        window = project_window(c.journal.read())
-        # No selection means no failure capture or writer construction.
-        evidence = await production_evidence(window, c)
-        trigger = select_trigger(window, evidence, c.clock(), forced=forced)
-        if trigger is None:
+        journal_len = len(c.journal.read())
+        due = await self.due()
+        if due is None:
             return None
-        failure = suppressing_failure(window)
-        if failure is not None:
+        window, evidence, trigger = due
+        if (failure := suppressing_failure(window)) is not None:
             self.failure_report(failure.key)
-            return None
-        driver = self.driver()
-        try:
-            if any(e.type == EventType.EFFECT_INTENT and e.key == f"retro/{window.sequence}"
-                   for e in window.events) and await self.committed_report(window) is not None:
-                return await self.commit_report(driver, window, "")
-            from tempo.checkout import SPECS_DIR, call_timeout
-            spec = load_spec((SPECS_DIR / "retro.md").read_text())
-            head = await c.git.rev_parse(c.repo, "HEAD")
-            provenance = {"head": head, "spec_version": spec.meta.version, "at": c.clock().isoformat()}
-            consumed = {"events": [asdict(e) for e in window.events], "measurements": evidence,
-                        "provenance": provenance}
-            call_seq = 0
-            def render_input(material, findings):
-                nonlocal call_seq
-                call_seq += 1
-                retries = json.dumps([f.model_dump() for f in findings])
-                try:
-                    prompt = render(spec, {"window": json.dumps(material, sort_keys=True),
-                                           "retry_findings": retries})
-                    if len(prompt) <= RENDER_BOUND_CHARS * REQ_RENDER_HEADROOM:
-                        return prompt
-                except RenderOverBound:
-                    pass
-                name = f"retro/call-{call_seq:02d}/window.jsonl"
-                stem = f"retro/{window.sequence}"
-                driver.spool.write(stem, 1, name,
-                    "".join(json.dumps(event, sort_keys=True) + "\n" for event in material["events"]))
-                on_demand = {"events_path": str((driver.spool.root / stem / "1" / name).resolve()),
-                             "measurements": material["measurements"], "provenance": material["provenance"]}
-                return render(spec, {"window": json.dumps(on_demand, sort_keys=True),
-                                     "retry_findings": retries})
-            stage = LlmStage(surface="retro", emits=RetroArtifact, gates=[], render=render_input)
-            result = await driver.run(stage, consumed, ticket=None, run_seq=window.sequence, attempt=1,
-                workspace=c.repo, tier=spec.meta.tier, effort=spec.meta.effort,
-                stuck_budget=call_timeout(c.config))
-            if result.outcome != "ok":
-                raise ValueError(result.outcome)
-            tombstones = self.tombstones()
-            text = render_report(window, evidence, provenance, tombstones, result.artifact)
-            return await self.commit_report(driver, window, text)
-        except Exception as exc:
-            identity = f"retro-failed/{window.boundary}/{trigger}"
-            c.journal.append(EventType.SIGNAL, {"kind": RETRO_FAILED, "window_boundary": window.boundary,
-                "trigger": trigger, "error_code": type(exc).__name__}, ticket=None, key=identity)
-            driver.log.event(RETRO_FAILED, error=str(exc), window_boundary=window.boundary, trigger=trigger)
-            self.failure_report(identity)
-            return None
+            return f"suppressed until {failure.key} is repaired"
+        if any(e.type == EventType.EFFECT_INTENT and e.key == f"retro/{window.sequence}"
+               for e in window.events) and await self.committed_report(window) is not None:
+            await self.commit_report(window, "")
+            return f"retro/{window.sequence} committed"
+        from tempo.checkout import SPECS_DIR
+        spec = load_spec((SPECS_DIR / "retro.md").read_text())
+        head = await c.git.rev_parse(c.repo, "HEAD")
+        provenance = {"head": head, "spec_version": spec.meta.version, "at": c.clock().isoformat()}
+        consumed = {"events": [asdict(e) for e in window.events], "measurements": evidence,
+                    "provenance": provenance}
+        driver = self.driver
+
+        def render_input(material, findings):
+            retries = json.dumps([f.model_dump() for f in findings])
+            try:
+                prompt = render(spec, {"window": json.dumps(material, sort_keys=True),
+                                       "retry_findings": retries})
+                if len(prompt) <= RENDER_BOUND_CHARS * REQ_RENDER_HEADROOM:
+                    return prompt
+            except RenderOverBound:
+                pass
+            name = "retro/window.jsonl"
+            stem = f"retro/{window.sequence}"
+            driver.spool.write(stem, 1, name,
+                "".join(json.dumps(event, sort_keys=True) + "\n" for event in material["events"]))
+            on_demand = {"events_path": str((driver.spool.root / stem / "1" / name).resolve()),
+                         "measurements": material["measurements"], "provenance": material["provenance"]}
+            return render(spec, {"window": json.dumps(on_demand, sort_keys=True),
+                                 "retry_findings": retries})
+        context = {"kind": "retro", "journal": journal_len, "sequence": window.sequence, "trigger": trigger,
+                   "evidence": evidence, "provenance": provenance, "tier": spec.meta.tier,
+                   "effort": spec.meta.effort}
+        return retro_stage(render_input), consumed, context
+
+    async def finish(self, context, outcome, artifact):
+        """After the final reply: the committed receipt and its proposals, or the failure report."""
+        c = self.checkout
+        window = project_window(c.journal.read()[:context["journal"]])
+        await production_evidence(window, c)  # the window's completed checks, which the scorecard reads
+        if outcome == "ok":
+            text = render_report(window, context["evidence"], context["provenance"], self.tombstones(), artifact)
+            return await self.commit_report(window, text)
+        identity = f"retro-failed/{window.boundary}/{context['trigger']}"
+        c.journal.append(EventType.SIGNAL, {"kind": RETRO_FAILED, "window_boundary": window.boundary,
+            "trigger": context["trigger"], "error_code": outcome}, ticket=None, key=identity)
+        self.failure_report(identity)
+        return None
+
+
+def retro_stage(render_input=unrendered) -> LlmStage:
+    return LlmStage(surface="retro", emits=RetroArtifact, gates=[], render=render_input)
