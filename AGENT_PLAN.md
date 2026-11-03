@@ -525,6 +525,45 @@ and remove the worktree.
 | `reoffer` | releases a park or a `premise_failed` park at the same `ticket.md` | stem not parked; caps spent |
 | `release_hold` | journals the accepted `resume` control decision that releases a storm hold; `list_eligible` skips storm-held stems | hold not live |
 
+**Box, split, confirm, and retro (P5b).** `prepare` takes the surface plus what it works on:
+
+| Arguments | Call |
+|---|---|
+| `{surface: requisition_review \| implement \| review, stem}` | the ticket flow, unchanged |
+| `{surface: triage, message}` | triage of one pending box message |
+| `{surface: author, message}` | the ticket for a message triage sent to author |
+| `{surface: requisition_review, message}` | review of the author's candidate ticket |
+| `{surface: requisition_review, stem, proposal}` | review of one proposed split ticket |
+| `{surface: retro}` | one retro |
+
+- **Triage.** The orchestrator triages each pending message whenever `read_box` shows one. The first
+  triage `prepare` in a session journals `triage_pass`. Work that needs no model happens in `prepare`,
+  which returns `completed` with nothing to spawn: a retro ticket recovery, an existing record, a
+  superseded author verdict, an author run that never settled. A final ok `submit` does what
+  `triage_pass` did after the call: it commits a decision or tombstone record and resolves the message,
+  or records the `author` verdict and returns `next: author`.
+- **Author.** `submit` runs `AuthorGate`; a final ok reply becomes the candidate and returns
+  `next: requisition_review`. The review's `submit`: approve commits the ticket, journals
+  `ticket_intake` and `requisition_verdict`, and resolves the message; snag returns findings, and the
+  next author `prepare` re-prompts with them up to `caps.retry`; rma or the cap spent writes the failure
+  decision record.
+- **Split** replaces rework. The orchestrator writes the proposals itself; there is no rework subagent.
+  - `split_propose {stem, tickets: [{stem, ticket}], lessons}` is a Decide tool on a failed run. It runs
+    rework's proposal checks (at least two fresh stems, valid tickets, `source`, `state`, `agent_tier`,
+    and `agent_effort` kept, no successor depending on the original), journals `rework_order`, then
+    harvests, draws caps, writes lessons, and journals the terminal with dispatch `split`.
+    `list_eligible` skips a stem whose split is pending.
+  - Each proposal gets a requisition review through `prepare` and `submit`.
+  - `split_commit {stem}` commits every proposal and records `supersedes`. It refuses unless every
+    proposal has an approve verdict for its exact text.
+  - Rework's `update` action goes (writing an existing `ticket.md` is refused); its `escalate` is the
+    `escalate` tool.
+- **Confirm.** `confirm {stem, lessons}` wraps `backlog.confirm_draft`: draft to confirmed.
+- **Retro.** `status` returns `retro_due` from `select_trigger`; the orchestrator runs retro when it is
+  true. `prepare retro` refuses when retro is not due, and handles a suppressing failure or an
+  already-committed report itself, returning `completed`. A final ok `submit` commits the report and
+  files its proposals in the box; a final failure journals `retro_failed` and files a failure report.
+
 **Refusals, enforced in the tool:**
 - caps spent
 - bad or missing session token
@@ -1149,12 +1188,18 @@ Triage, author, retro, and rework each make their model calls inside one process
 and rework run requisition review on each proposal). Each becomes separate prepare/submit calls.
 
 **Work:**
-- `split_propose` / `split_commit` and `confirm` (§4.1).
-- `prepare` serves `triage`, `author`, and `retro`.
+- `split_propose` / `split_commit` and `confirm` (§4.1, "Box, split, confirm, and retro").
+- `prepare` serves `triage`, `author`, and `retro`; each one-pass function splits into the work before
+  the call and the work after it.
 - `rework` keeps only its proposal checks and `record_supersedes`, renamed in place to `split`;
   `specs/rework.md` goes with the rest of `rework`.
 - Remove the old `Driver._run` path (§3.1). The CLI adapters went in P4a. `FAILURE_MARKERS` stay, for
-  `stop.txt`.
+  `stop.txt`. `Driver` keeps its name as the holder of journal, effects, spool, redactor, log, clock,
+  and severity; `llm`, `run`, `race`, the abort machinery, and `provider_failure` go, with the model
+  types in `llm.py` (`AgentTier` and `AgentEffort` stay), `llm_call` (`llm_key` stays),
+  `requisition.review_ticket`, `stages.implement` / `review` / `run_stages` / `StageBoundary` /
+  `Stages`, `ProviderCallError`, and `PauseConsumer.author_driver`. Their tests go with them.
+- `TEMPO_PLAN.md` §9 and §11-§14 changes (§10).
 
 **Exit:**
 - A fake-host session runs split, confirm, a triage pass, and a retro.
