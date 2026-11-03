@@ -101,4 +101,11 @@ Run 2026-11-03 in `~/livegate/p7b`, Manual mode, after the three fixes. No permi
   orchestrator parked the ticket with the right repair.
 - All four calls wrote their reply to `output.txt`.
 - `read_attempts`, called before the decision, returned `"text": null`. It now returns the pending
-  failure; this is covered by a test, not yet live.
+  failure; see P7c.
+
+### P7c live check
+
+Run 2026-11-03 in `~/livegate/p7c` (the same `fence-wall` ticket alone), Manual mode, no prompts.
+`read_attempts`, called before the decision, returned `"failure"` with stage `requisition_review`
+and Opus's `fence_wall` finding, and `"text": null` (no decided attempts yet). The harvest was
+written (no `harvest_failed`), and the orchestrator parked the ticket.
