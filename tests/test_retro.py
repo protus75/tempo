@@ -316,7 +316,7 @@ def test_receipt_uses_engine_provenance_and_tombstones(tmp_path):
     assert asyncio.run(hook())["commit"] != head
     report = (c.repo / "tickets/retro/000001.md").read_text()
     data = json.loads(report.split("```json\n")[1].split("\n```")[0])
-    assert data["provenance"] == {"head": head, "spec_version": "1.2", "at": c.clock().isoformat()}
+    assert data["provenance"] == {"head": head, "spec_version": "1.3", "at": c.clock().isoformat()}
     assert data["measurements"]["merged_count"] == 1
     assert data["measurements"]["elapsed_seconds"] == [{"ticket": "one", "commit": head, "actual_seconds": 120.0}]
     assert data["tombstone_digest"] == [{**record.model_dump(), "body": "Evidence digest\n"}]

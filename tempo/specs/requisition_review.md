@@ -5,7 +5,7 @@ emits: {approve: requisition-approval, snag: requisition-snag, rma: requisition-
 tier: high
 effort: high
 gates: [requisition_review]
-version: "2.3"
+version: "2.4"
 ---
 ## Role
 
@@ -58,7 +58,8 @@ Findings against your previous reply (`none` on the first call):
 
 ## Output format
 
-Reply with ONLY one JSON object, no prose before or after:
+Your final message is not read.
+Write ONLY one JSON object to the `reply:` file, no prose before or after:
 
 {"verdict": "approve" | "snag" | "rma",
  "summary": "<non-blank sentence>",

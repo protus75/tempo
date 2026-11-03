@@ -5,7 +5,7 @@ emits: ticket
 tier: medium
 effort: medium
 gates: [ticket_schema]
-version: "1.0"
+version: "1.1"
 ---
 ## Role
 
@@ -41,7 +41,8 @@ Findings against the previous reply:
 
 ## Output format
 
-Reply with ONLY one JSON object: `{"stem": "<new stem>", "ticket": "<the full ticket.md text>"}`.
+Your final message is not read.
+Write ONLY one JSON object to the `reply:` file: `{"stem": "<new stem>", "ticket": "<the full ticket.md text>"}`.
 
 ## On-failure
 

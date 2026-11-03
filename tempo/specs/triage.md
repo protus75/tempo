@@ -5,7 +5,7 @@ emits: triage-verdict
 tier: medium
 effort: medium
 gates: []
-version: "1.1"
+version: "1.2"
 ---
 ## Role
 
@@ -58,7 +58,8 @@ Findings against the previous reply:
 
 ## Output format
 
-Reply with ONLY one JSON object with fields `verdict` (`author`, `tombstone`, or `decision`), `link` (string for tombstone, null otherwise), `summary` (your own non-blank summary), `rationale` (non-blank), `evidence` (list of strings), and `reopen_after_days` (integer at least 1 for tombstone or decision, null for author). Add no other keys.
+Your final message is not read.
+Write ONLY one JSON object to the `reply:` file with fields `verdict` (`author`, `tombstone`, or `decision`), `link` (string for tombstone, null otherwise), `summary` (your own non-blank summary), `rationale` (non-blank), `evidence` (list of strings), and `reopen_after_days` (integer at least 1 for tombstone or decision, null for author). Add no other keys.
 
 ## On-failure
 

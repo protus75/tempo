@@ -31,10 +31,20 @@ def test_implement_spec_defines_both_premise_kinds():
 
 def test_spec_lint_accepts_the_implement_and_requisition_specs():
     specs = Path(__file__).resolve().parent.parent / "tempo" / "specs"
-    for name, version in (("implement", "1.7"), ("requisition_review", "2.3")):
+    for name, version in (("implement", "1.8"), ("requisition_review", "2.4")):
         text = (specs / f"{name}.md").read_text()
         assert lint_spec(text) == []
         assert load_spec(text).meta.version == version
+
+
+
+def test_every_spec_has_the_model_write_its_reply_file():
+    """P7: a spec that said "reply with" its JSON drew the verdict into the final message, which is never read."""
+    specs = Path(__file__).resolve().parent.parent / "tempo" / "specs"
+    for path in sorted(specs.glob("*.md")):
+        text = path.read_text()
+        assert "reply with only" not in text.lower(), path.name
+        assert "Your final message is not read." in text and "to the `reply:` file" in text, path.name
 
 
 FRONT = """---

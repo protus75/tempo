@@ -5,7 +5,7 @@ emits: {approve: approved-invoice, snag: snag-list, rma: rma}
 tier: high
 effort: high
 gates: [correctness_review]
-version: "1.1"
+version: "1.2"
 ---
 ## Role
 
@@ -67,7 +67,8 @@ Findings against your previous reply in this session (`none` on the first call):
 
 ## Output format
 
-Reply with ONLY one JSON object, no prose before or after:
+Your final message is not read.
+Write ONLY one JSON object to the `reply:` file, no prose before or after:
 
 {"verdict": "approve" | "snag" | "rma",
  "summary": "<one sentence>",

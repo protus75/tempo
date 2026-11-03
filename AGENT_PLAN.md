@@ -1259,6 +1259,15 @@ Only Claude passed the live gate, so P7 runs Claude.
 - **Checked after the run:** the journal, merge commits, `decisions.md`, each spawn's
   `resolvedModel`, no permission prompt, and the 20-part prompt's round trip.
 - **Results** go in a P7 section of `docs/livegate/claude.md`.
+- **Fix from the run: one reply channel in the wording.** A Sonnet requisition_review put its verdict
+  in its final message and left `output.txt` empty, so the call failed and was re-prompted. The spec
+  said "Reply with ONLY one JSON object" while `tempo/rules/agent.md` says to write the reply file and
+  that the final message is ignored; the model followed the spec. Every spec's Output format lead-in
+  (author, implement, requisition_review, retro, review, triage) opens with "Your final message is not
+  read." and says "Write ONLY one JSON object to the `reply:` file" where it said "Reply with", each spec's minor
+  `version` goes up by one, and a test pins that no spec tells the model to "reply with" its JSON.
+  `submit` keeps reading only `output.txt`: a fallback to the final message would be a second reply
+  channel.
 
 **Exit:**
 - Each host completes a ticket end to end with verified artifacts.

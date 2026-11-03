@@ -5,7 +5,7 @@ emits: packing-slip
 tier: medium
 effort: medium
 gates: []
-version: "1.7"
+version: "1.8"
 ---
 ## Role
 
@@ -63,7 +63,8 @@ Findings against your previous reply in this session (`none` on the first call):
 
 ## Output format
 
-When your work is done, reply with ONLY one JSON object, no prose before or after:
+Your final message is not read.
+When your work is done, write ONLY one JSON object to the `reply:` file, no prose before or after:
 
 {"outcome": "ok" | "already_satisfied" | "premise_failed",
  "summary": "<one sentence: what changed, or why nothing did>",

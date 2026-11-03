@@ -109,7 +109,7 @@ def test_three_verdicts_and_second_pass_and_stale_author(tmp_path, monkeypatch, 
         assert box.get(id).status == "resolved"
         assert git_out(root, "rev-parse", f"HEAD:{path}").strip()
     assert box.get(ids[2]).resolution == Resolution(kind="ticket", link="authored")
-    assert box.get(ids[2]).verdict.produced_by_spec_version == "1.1"
+    assert box.get(ids[2]).verdict.produced_by_spec_version == "1.2"
     assert len(llm.requests) == 5
     assert [r.surface for r in llm.requests] == ["triage", "triage", "triage", "author", "requisition_review"]
     keys = {e.key for e in events(root) if e.type == EventType.EFFECT_COMPLETION and e.key.startswith("llm/")}
@@ -126,7 +126,7 @@ def test_three_verdicts_and_second_pass_and_stale_author(tmp_path, monkeypatch, 
     assert box.get(stale_id).status == "resolved"
     assert subjects(root)[0] == f"tempo(decisions): decision-{stale_id}"
     stale, body = parse_record((root / record_path(f"decision-{stale_id}")).read_text())
-    assert stale.kind == "decision" and "0.9" in body and "1.1" in body
+    assert stale.kind == "decision" and "0.9" in body and "1.2" in body
 
 
 def test_bad_tombstone_link_becomes_decision(tmp_path, monkeypatch):
@@ -301,7 +301,7 @@ def test_reopened_message_bypasses_its_tombstone(tmp_path, monkeypatch, recorded
         return author_reply("reconsidered")
     script = [authored, requisition_reply("approve")]
     if recorded_verdict:
-        box.record_verdict(id, Verdict(verdict="author", produced_by_spec_version="1.1", rationale="new evidence"))
+        box.record_verdict(id, Verdict(verdict="author", produced_by_spec_version="1.2", rationale="new evidence"))
     else:
         def classify(request):
             assert f"tombstone-{id}: tombstone" not in request.rendered
