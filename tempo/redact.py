@@ -5,7 +5,7 @@ Writer-site checklist (extend in the same change that adds a writer of a capture
 - engine-log writer: tempo/enginelog.py `EngineLog`
 - attempt-spool writer: tempo/call.py `Calls._complete` (the subagent's reply)
 - journal writer: tempo/journal.py -- NOT YET WIRED; its one secret-bearing producer, the LLM effect
-  result, is scrubbed before it becomes the completion record (tempo/llmeffect.py `llm_call`)
+  result, is scrubbed before it becomes the completion record (tempo/call.py `Calls._complete`)
 """
 
 from collections.abc import Mapping
