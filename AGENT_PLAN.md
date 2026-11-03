@@ -1125,9 +1125,10 @@ gate:
   - `runner`, `daemon`, and `serve` together, because each imports the others: this takes `runner`
     dispatch, its ladder and rework routing, and diagnose's only caller
   - `stages.diagnose` + `specs/diagnose.md`
-  - code the removed layer left uncalled in kept modules: `mergequeue`'s queue, `merge`'s
-    `compose_pipeline` and daemon admission mode, `notify.NotificationReconciler`, `control`'s pause and
-    kill inbox, `reconcile`, and the unread `caps.poison`
+  - code the removed layer left uncalled in kept modules: `notify.NotificationReconciler`, `reconcile`,
+    and the unread `caps.poison`. `mergequeue` stays, uncalled, with `merge`'s `compose_pipeline` and
+    daemon admission mode and `control`'s pause inbox: its integration checks, conflict strategies,
+    conflict hand-off, and red-streak hold may be wired into the `merge` tool later (decided 2026-11-03)
 - Each removal also deletes its CLI command. At the end of P5a, `__main__` joins the kept set and the
   import-graph test covers it.
 - Removed with the daemon, because only the daemon or `serve` called them: `restart`, `watcher`,
