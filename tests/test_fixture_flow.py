@@ -9,10 +9,12 @@ from pathlib import Path
 
 import pytest
 
+from tempo.audit import audit_journal
 from tempo.checkout import Refusal
 from tempo.config import load_config
 from tempo.journal import EventType, Journal
 from tempo.lockfile import LOCK_STALE_S
+from tempo.stages import PRIOR_ATTEMPTS
 from tests.fixturerepo import STEM, materialize
 from tests.hostfakes import FakeHost
 
@@ -73,6 +75,7 @@ def test_a_ticket_runs_from_intake_to_merge(repo, name):
     assert "subtract" in (repo / "calc.py").read_text()
     events = Journal(load_config(None, cwd=repo).state_dir, host.clock).read()
     assert [e.body["to"] for e in events if e.type == EventType.STATE_TRANSITION] == ["running", "merged"]
+    assert audit_journal(Journal(load_config(None, cwd=repo).state_dir, host.clock)) == []
 
     assert host.tool("list_eligible")["eligible"] == []
     host.tool("write_handoff", {"text": "merged add-subtract; queue empty"})
@@ -181,6 +184,7 @@ def test_reject_retires_the_ticket(repo):
     assert host.tool("reject", {"stem": STEM, "lessons": "not worth doing"})["to"] == "rejected"
     assert "state: rejected" in (repo / "tickets" / STEM / "ticket.md").read_text()
     assert [t["to"] for t in terminals(host)] == ["gate_failed", "rejected"]
+    assert audit_journal(Journal(load_config(None, cwd=repo).state_dir, host.clock)) == []
     assert eligible(host) == []
 
 
@@ -215,3 +219,24 @@ def test_a_session_killed_mid_ticket_resumes_from_status(repo):
     call(host, "review", APPROVE_DIFF)
     job = host.tool("merge", {"stem": STEM})
     assert host.tool("job", {"id": job["id"]})["result"]["outcome"] == "ok"
+
+
+def test_a_retry_after_a_review_snag_renders_its_findings_in_the_next_implement_prompt(repo):
+    host = FakeHost("claude", repo)
+    host.tool("begin_session")
+    host.tool("start", {"stem": STEM})
+    call(host, "requisition_review", APPROVE_TICKET)
+    call(host, "implement", IMPLEMENTED, edits={"calc.py": SUBTRACT, "test_calc.py": TEST})
+    host.tool("check", {"stem": STEM})
+    snag = json.dumps({"verdict": "snag", "summary": "off by one", "findings": [
+        {"code": "logic", "message": "subtract swaps its operands", "paved_road": "return a - b"}]})
+    reviewed = call(host, "review", snag)
+    while not reviewed["final"]:
+        reviewed = call(host, "review", snag)
+    host.tool("retry", {"stem": STEM, "lessons": "the operands were swapped"})
+    host.tool("start", {"stem": STEM})
+    call(host, "requisition_review", APPROVE_TICKET)
+    prepared = host.tool("prepare", {"stem": STEM, "surface": "implement"})
+    parts = [line.removeprefix("part: ") for line in prepared["spawn_prompt"].splitlines() if line.startswith("part: ")]
+    prompt = "".join(Path(p).read_text() for p in parts)
+    assert PRIOR_ATTEMPTS in prompt and "subtract swaps its operands" in prompt

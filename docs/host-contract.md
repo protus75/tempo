@@ -57,7 +57,6 @@ Config:
     scheduler: {max_unmerged: 2}
     caps: {decisions: 6, retry: 6, premise_bounce: 2, infra: 6, quarantine: 5, poison: 2}
     circuit_breaker: {k: 3, cooldown_minutes: 10}
-    drain: {max_runtime_hours: 12}
     tickets: {max_minutes: 90}
     box_policy: {failure_report: confirmed, retro_finding: confirmed, override_report: draft, suggestion: draft, bug_report_self_diagnosed: confirmed, bug_report_player_repro: confirmed, bug_report_player_no_repro: draft}
     notify: unset
@@ -102,9 +101,6 @@ Caps:
 CircuitBreaker:
   required: []
   defaults: {k: 3, cooldown_minutes: 10}
-Drain:
-  required: []
-  defaults: {max_runtime_hours: 12}
 Tickets:
   required: []
   defaults: {max_minutes: 90}

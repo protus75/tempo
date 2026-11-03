@@ -112,7 +112,7 @@ def test_every_engine_signal_name_is_listed():
 
 @pytest.mark.parametrize("body", [
     {"signal": "spec_gap_hold"}, {},
-    {"signal": "drain_halted", "kind": "drain_halted"},
+    {"signal": "handoff_written", "kind": "handoff_written"},
     {"kind": "other"}, {"signal": None}, {"kind": []},
 ])
 def test_unknown_signal_name_is_refused_at_append(tmp_path, body):
@@ -121,7 +121,7 @@ def test_unknown_signal_name_is_refused_at_append(tmp_path, body):
         journal.append(EventType.SIGNAL, body)
     assert not journal.dir.exists()
     assert journal.read() == []
-    journal.append(EventType.SIGNAL, {"signal": "drain_halted"})
+    journal.append(EventType.SIGNAL, {"signal": "handoff_written"})
     before = {p: p.read_bytes() for p in journal.dir.iterdir()}
     with pytest.raises(ValueError, match="SIGNAL_NAMES"):
         journal.append(EventType.SIGNAL, body)

@@ -12,7 +12,7 @@ from tempo.journal import EventType, run_seq
 from tempo.llm import FakeLLM
 from tempo.reconcile import RECOVERY_ALERT, orphans, reconcile
 from tests.test_cli import ENV, Clock, Stages, root, ticket, write
-from tests.test_daemon_composition import CoreRig, LiveDrain, assert_core_wiring
+from tests.test_daemon_composition import CoreRig, assert_core_wiring
 from tests.test_driver import ECHO, Stub, build
 from tests.test_kill_executor_abort import Writer, Timer, invoke, cancelled, turn
 from tests.test_kill_signal_journal import Rig, decision
@@ -337,7 +337,7 @@ async def test_kill_suppression_preserves_run_and_abort_failures(admission_conte
     assert harvest_path.read_bytes() == harvest
 
 
-@pytest.mark.parametrize("verb", ["run", "drain"])
+@pytest.mark.parametrize("verb", ["run"])
 def test_kill_failure_suppression_is_dormant(root, tmp_path, monkeypatch, verb):
     async def probe(*args, **kwargs):
         raise AssertionError("suppression wired")
@@ -389,10 +389,6 @@ def test_kill_failure_suppression_is_dormant(root, tmp_path, monkeypatch, verb):
         rig.core.admission._dispatch = original
         await rig.drain()
         assert asyncio.all_tasks() == baseline
-        with monkeypatch.context() as patch:
-            live = LiveDrain(root, patch, pause=False)
-            assert (await live.run()).merged == []
-            assert asyncio.all_tasks() == baseline
     asyncio.run(production())
 
 

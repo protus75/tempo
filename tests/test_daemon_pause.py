@@ -12,7 +12,7 @@ from tests.test_cli import CONFIG, ENV, Clock, root, ticket, write
 from tests.test_control import Rig
 from tests.test_daemon_admission import assert_idle, tickets, turn
 from tests.test_daemon_composition import CoreRig, assert_core_wiring, assert_startup_pause_wiring
-from tests.test_drain import Script, journal
+from tests.support import journal
 
 
 @pytest.mark.asyncio
@@ -174,36 +174,3 @@ async def test_checkpoint_failure_and_cancellation_leave_no_dispatch(tickets):
     assert calls == [tickets[1]]
 
 
-def test_dispatch_pause_boundary_is_active(root, tmp_path, monkeypatch):
-    def forbidden(*args, **kwargs):
-        raise AssertionError("control consumption touched")
-
-    write(root, "work", ticket())
-    script = Script()
-    with monkeypatch.context() as patch:
-        patch.setattr(control.ControlInbox, "consume", forbidden)
-        with pytest.raises(AssertionError, match="control consumption"):
-            main(["drain"], cwd=root, env=ENV, clock=Clock(), pipeline=script)
-    assert script.calls == []
-    assert main(["drain"], cwd=root, env=ENV, clock=Clock(), pipeline=script) == 0
-    assert script.calls == ["work"]
-
-    async def composition():
-        directory = tmp_path / "composition"
-        directory.mkdir()
-        async def prepare(checkout):
-            async def dispatch(ticket):
-                return "merged"
-            return dispatch
-        rig = CoreRig(directory, prepare=prepare)
-        assert_core_wiring(rig)
-        candidate = await rig.add("work")
-        assert_startup_pause_wiring(rig.core)
-        with monkeypatch.context() as patch:
-            patch.setattr(control.ControlInbox, "consume", forbidden)
-            with pytest.raises(AssertionError, match="control consumption"):
-                await rig.core.admission.dispatch(candidate)
-            assert rig.exec.calls == [] and rig.fs.files == {}
-        assert await rig.core.admission.dispatch(candidate) == "merged"
-        assert not any(e.body.get("kind") == control.CONTROL_DECISION for e in rig.journal.read())
-    asyncio.run(composition())

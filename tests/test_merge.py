@@ -111,7 +111,7 @@ def test_a_passing_ticket_squash_merges_with_trailers_and_journals_merged(repo):
     assert git(repo, "status", "--porcelain") == ""
 
 
-@pytest.mark.parametrize("verb", ["bind", "run", "drain"])
+@pytest.mark.parametrize("verb", ["bind", "run"])
 def test_bootstrap_pipeline_keeps_inline_admission(repo, monkeypatch, verb):
     author(repo)
     source = context(repo, [])
@@ -144,7 +144,7 @@ def test_bootstrap_pipeline_keeps_inline_admission(repo, monkeypatch, verb):
         assert asyncio.run(pipeline(checkout)(ticket)) == "merged"
     else:
         from tempo.__main__ import main
-        assert main(["run", STEM] if verb == "run" else ["drain"], cwd=repo, env=ENV,
+        assert main(["run", STEM], cwd=repo, env=ENV,
                     clock=checkout.clock, pipeline=pipeline) == 0
     [(ctx, original_ticket, attempt)] = calls
     assert original_ticket.stem == ticket.stem and attempt == 0

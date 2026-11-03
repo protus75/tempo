@@ -14,7 +14,7 @@ from tempo.llm import FakeLLM
 from tempo.status import reject_queue
 from tempo.stages import StagesRun
 from tests.test_cli import ENV, git_out
-from tests.test_drain import Clock, Script, commit_ticket, confirmed, drain, journal, make_root
+from tests.support import Clock, commit_ticket, confirmed, journal, make_root
 from tests.test_terminal import author, clock, diagnosis_reply, implement_reply, repo
 from tests.test_stages import STEM
 from tempo import backlog
@@ -95,26 +95,6 @@ def test_keep_bounds_all_caps_but_machine_keep_does_not(tmp_path, capsys):
     assert main(["confirm", "held"], cwd=root, env=ENV, clock=Clock()) == 0
 
 
-def test_drain_skips_queue_and_marks_legacy_once(tmp_path, capsys):
-    root = make_root(tmp_path, "caps: {retry: 1}\n")
-    commit_ticket(root, "held", confirmed())
-    _queued(root, "held")
-    script = Script()
-    assert drain(root, script) == 0
-    assert script.calls == []
-    out = capsys.readouterr().out
-    assert "retry cap spent (1/1)" in out
-    assert "confirm held" in out and "reject held" in out
-    commit_ticket(root, "legacy", confirmed())
-    j = journal(root)
-    j.append(EventType.STATE_TRANSITION, {"to": "gate_failed", "stage": "check"}, ticket="legacy")
-    j.append(EventType.CAP_CONSUMED, {"cap": "retry"}, ticket="legacy")
-    assert drain(root, script) == 0
-    assert drain(root, script) == 0
-    assert sum(e.body.get("signal") == "reject_arrival" for e in _events(root, "legacy")) == 1
-    assert main(["confirm", "legacy"], cwd=root, env=ENV, clock=Clock()) == 0
-
-
 def test_reject_stamps_notifies_dependents_and_is_idempotent(tmp_path, capsys):
     root = make_root(tmp_path)
     commit_ticket(root, "parent", confirmed())
@@ -139,18 +119,6 @@ def test_reject_stamps_notifies_dependents_and_is_idempotent(tmp_path, capsys):
     assert git_out(root, "rev-parse", "HEAD") == before
     journal(root).append(EventType.STATE_TRANSITION, {"to": "merged"}, ticket="done")
     assert main(["reject", "done"], cwd=root, env=ENV, clock=Clock()) == 2
-
-
-def test_draft_confirm_commits_and_next_drain_dispatches(tmp_path):
-    root = make_root(tmp_path)
-    commit_ticket(root, "rough", confirmed().replace("state: confirmed", "state: draft", 1))
-    assert main(["confirm", "rough"], cwd=root, env=ENV, clock=Clock()) == 0
-    assert "state: confirmed" in git_out(root, "show", "HEAD:tickets/rough/ticket.md")
-    assert git_out(root, "log", "-1", "--format=%s").strip() == "tempo(rough): confirmed"
-    assert any(e.body.get("signal") == "draft_confirmed" for e in _events(root, "rough"))
-    script = Script()
-    assert drain(root, script) == 0
-    assert script.calls == ["rough"]
 
 
 def test_dirless_ghost_can_be_kept(tmp_path):

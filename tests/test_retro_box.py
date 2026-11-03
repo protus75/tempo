@@ -19,7 +19,7 @@ from tempo.merge import write_squash
 from tempo.retro import Retro, project_window
 from tempo.storm import arrival_id
 from tempo.tickets import validate_ticket
-from tests.test_drain import pause_checkout
+from tests.support import pause_checkout
 from tests.test_stages import implement_reply, verdict
 from tests.test_triage import author_reply, requisition_reply, reply, root_with_box
 

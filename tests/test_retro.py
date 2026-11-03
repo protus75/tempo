@@ -17,7 +17,7 @@ from tempo.llm import FakeLLM
 from tempo.retro import (Retro, RetroArtifact, measurements, production_evidence, project_window,
                          render_report, select_trigger)
 from tempo.specs import RENDER_BOUND_CHARS, REQ_RENDER_HEADROOM, data_open, data_close
-from tests.test_drain import Clock, make_root, pause_checkout, confirmed, commit_ticket
+from tests.support import Clock, make_root, pause_checkout, confirmed, commit_ticket
 
 
 def rig(tmp_path, script=()):
@@ -59,7 +59,7 @@ def test_window_uses_completed_report_boundary(tmp_path):
     completed(j, 1)
     older = merged(j, "older")
     completed(j, 2)
-    last = j.append(EventType.SIGNAL, {"kind": "drain_halted"}, ticket=None)
+    last = j.append(EventType.SIGNAL, {"kind": "handoff_written"}, ticket=None)
     j.append(EventType.EFFECT_INTENT, {}, key="retro/3")
     window = project_window(j.read())
     assert window.boundary == "retro/2" and window.sequence == 3
@@ -71,7 +71,7 @@ def test_window_uses_completed_report_boundary(tmp_path):
 def test_window_over_headroom_is_read_on_demand(tmp_path, monkeypatch, size):
     c, writer, hook, llm = rig(tmp_path, ['{"proposals": []}'])
     merged(c.journal)
-    c.journal.append(EventType.SIGNAL, {"kind": "drain_halted", "payload": "x" * size}, key="large")
+    c.journal.append(EventType.SIGNAL, {"kind": "handoff_written", "payload": "x" * size}, key="large")
     # Preserve multiplicity, null tickets, and journal order rather than sorting timestamps.
     event = c.journal.read()[-1]
     c.journal.append(event.type, event.body, ticket=event.ticket, key=event.key)

@@ -20,7 +20,7 @@ from tests.test_cli import ENV
 from tempo.seams import LocalFileSystem
 from tempo.storm import STORM_THRESHOLD, STORM_TRIP, STORM_WINDOW, StormLedger
 from tests.test_daemon_composition import CoreRig
-from tests.test_drain import Script, commit_ticket, confirmed, make_root
+from tests.support import commit_ticket, confirmed, make_root
 from tests.test_journal import FakeClock, T0
 from tests.test_mergequeue import ctx as admission_context, ready, scripted
 from tests.test_stages import STEM, agent
@@ -216,7 +216,7 @@ def test_storm_trip_evidence_fails_closed(tmp_path, damage):
     else:
         field = {"id": "trip_id", "stage": "emitting_stage", "origin": "emitting_origin",
                  "first": "first_occurrence_id", "crossing": "crossing_occurrence_id"}.get(damage, damage)
-        body[field] = "drain_halted" if field == "kind" else "wrong"
+        body[field] = "handoff_written" if field == "kind" else "wrong"
     journal.append(type, body, key=key, ticket=ticket)
     before = snapshot(tmp_path)
     for operation in (box.recover, lambda: box.enqueue(**ARRIVAL, occurrence_id="new")):
@@ -239,53 +239,6 @@ def test_storm_report_cannot_recurse(tmp_path):
         occurrence_id="storm-report/" + tid, emitting_stage=None, emitting_origin="storm-breaker/" + tid)
     assert box.publish_storm_report(trips(journal)[0].body, 999) == (report.id, False)
     assert box.get(report.id) == report and len(occurrences(journal, report.signature)) == 1
-
-
-@pytest.mark.parametrize("verb", ["run", "drain"])
-def test_storm_activation_does_not_hold_dispatch_or_notify(tmp_path, monkeypatch, verb):
-    """Drain waits for the emitting ticket's resume; explicit run remains operator-invoked."""
-    root = make_root(tmp_path)
-    commit_ticket(root, "one", confirmed())
-    commit_ticket(root, "unrelated", confirmed())
-    script = Script()
-    clock = FakeClock(T0)
-    journal = Journal(root / ".tempo/state", clock)
-    box = storm.storm_producer(root=root / ".tempo/state/box", fs=LocalFileSystem(),
-                                journal=journal, clock=clock)
-    six(box)
-    def forbidden(*args, **kwargs):
-        pytest.fail("storm invoked external notification")
-    from tempo.effects import Effects
-    effect = Effects.run
-    async def allowed(self, action, **kwargs):
-        if kwargs['key'].startswith('notify/'):
-            forbidden()
-        return await effect(self, action, **kwargs)
-    monkeypatch.setattr("tempo.effects.Effects.run", allowed)
-    monkeypatch.setattr("tempo.triage.triage_pass", forbidden)
-    if verb == "drain":
-        original = cli.build_control
-        def build(checkout):
-            consumer = original(checkout)
-            async def sleep(_):
-                # Only the emitting ticket remains; the lifecycle and lock are live.
-                assert script.calls == ["unrelated"]
-                hold, = consumer.storm_holds()
-                assert json.loads((checkout.config.state_dir / "control/active.json").read_bytes())["hold_id"] == hold
-                await cli._control(checkout, "resume")
-            consumer.sleep = sleep
-            return consumer
-        monkeypatch.setattr(cli, "build_control", build)
-    assert cli.main([verb, "one"] if verb == "run" else [verb], cwd=root, env=ENV,
-                    clock=clock, pipeline=script) == 0
-    assert script.calls == (["one"] if verb == "run" else ["unrelated", "one"])
-    assert script.lock_held == [True] * len(script.calls)
-    assert len(trips(journal)) == 1
-    if verb == "drain":
-        assert StormLedger(journal=journal, clock=clock).holds() == {}
-        decisions = [e for e in journal.read() if e.body.get("kind") == "control_decision"]
-        assert [e.body["decision"] for e in decisions] == ["accepted"]
-    assert all(m.status == "pending" for m in box.messages())
 
 
 SITES = ("implement", "fallback-raises", "fallback-absent", "dependency", "base", "flake")
@@ -537,40 +490,6 @@ async def test_storm_leaves_daemon_selection_and_accounting_unchanged(admission_
     assert hold in core.control.projection.released_hold_ids
     assert not any(e.type == EventType.CAP_CONSUMED for e in ctx.driver.journal.read())
     assert len(trips(ctx.driver.journal)) == 1
-
-
-@pytest.mark.parametrize("startup", ["run", "drain", "daemon"])
-def test_production_startup_recovers_without_new_arrival(admission_context, startup):
-    ctx = admission_context
-    clock = FakeClock(T0)
-    journal = Journal(ctx.config.state_dir, clock)
-    ledger = StormLedger(journal=journal, clock=clock)
-    for n in range(6):
-        ledger.record(signature=SIG, occurrence_id=f"arrival/{n}",
-                      emitting_stage="implement", emitting_origin="one")
-    clock.advance(7200)
-    if startup == "daemon":
-        journal = Journal(ctx.config.state_dir, clock)
-        checkout = Checkout(ctx.repo, ctx.config, ctx.env, ctx.exec_, ctx.git, journal, ctx.fs, clock)
-        async def prepare(local):
-            pytest.fail("startup prepared a dispatch")
-        core = cli.build_daemon_core(checkout, read=lambda _: None, debounce=0,
-            quarantined=lambda: set(), drought_parked=lambda: set(), completed_unmerged=lambda: 0,
-            prepare=prepare)
-        before = snapshot(ctx.config.state_dir)
-        assert len(trips(journal)) == 0
-        assert snapshot(ctx.config.state_dir) == before
-        asyncio.run(core.startup())
-    else:
-        if startup == "run":
-            asyncio.run(ready(ctx, "one"))
-        assert cli.main([startup, "one"] if startup == "run" else [startup], cwd=ctx.repo, env=ctx.env,
-                        clock=clock, pipeline=Script()) == 0
-        journal = Journal(ctx.config.state_dir, clock)
-    assert len(trips(journal)) == 1
-    reports = Box(ctx.config.state_dir / "box", ctx.fs).messages()
-    assert len(reports) == 1 and reports[0].origin.startswith("storm-breaker/")
-    assert len(occurrences(journal, SIG)) == 6
 
 
 def test_future_occurrences_do_not_trip_before_their_time(tmp_path):

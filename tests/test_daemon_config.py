@@ -351,7 +351,7 @@ async def test_snapshot_dispatch_unwinds_failures_and_cancellation(tmp_path, tic
     assert await admission.dispatch(tickets[0]) == "merged"
 
 
-@pytest.mark.parametrize("verb", ["run", "drain"])
+@pytest.mark.parametrize("verb", ["run"])
 @pytest.mark.parametrize("operation", ["snapshot_config", "snapshot_dispatch"])
 def test_config_snapshot_is_dormant(root, monkeypatch, verb, operation):
     calls = []

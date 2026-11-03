@@ -158,7 +158,7 @@ def test_invalid_arrivals_and_callback_failures_do_not_publish(tmp_path, monkeyp
         journal.append(EventType.SIGNAL, dict(kind="storm_occurrence"))
         expected = ValueError
     elif damage == "journal":
-        journal.append(EventType.SIGNAL, dict(kind="drain_halted"))
+        journal.append(EventType.SIGNAL, dict(kind="handoff_written"))
         next(journal.dir.glob("*.jsonl")).write_bytes(b"{}\n")
         expected = JournalCorruption
     else:
@@ -241,7 +241,7 @@ def assert_production_reachable(tmp_path, monkeypatch):
     return hook
 
 
-@pytest.mark.parametrize("verb", ["run", "drain"])
+@pytest.mark.parametrize("verb", ["run"])
 def test_storm_producer_hook_is_active(tmp_path, monkeypatch, admission_context, verb):
     composition = tmp_path / "composition"
     composition.mkdir()

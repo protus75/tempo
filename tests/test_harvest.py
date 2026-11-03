@@ -131,21 +131,3 @@ def test_merged_run_has_no_attempts_dir(repo):
     assert not (repo / "tickets" / STEM / "attempts").exists()
 
 
-def test_drain_reentry_quotes_prior_harvest_and_summarizes_older(repo):
-    author(repo)
-    first = "first dead end"
-    second = "second dead end"
-    code, llm = run(repo, [RuntimeError(first), diagnosis_reply(), RuntimeError(second), diagnosis_reply(),
-                           agent({"tempo/thing.py": "ok\n"}), verdict()], verb="drain")
-    assert code == 0
-    renders = [criteria(r.rendered) for r in llm.requests if r.surface == "implement"]
-    assert len(renders) == 3
-    assert PRIOR_ATTEMPTS not in renders[0]
-    assert f"tickets/{STEM}/attempts/0/" in renders[1]
-    assert "> Apply the terminal findings." in renders[1]
-    assert "> Apply the terminal findings." in renders[2]
-    assert first not in renders[2]
-    assert "- older attempt 0: `infra_error` at implement:" in renders[2]
-    for line in renders[2].splitlines():
-        if first in line or second in line:
-            assert line.startswith("> ")

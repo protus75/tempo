@@ -5,14 +5,14 @@ import pytest
 from tempo import runner
 from tempo.artifacts import StageResult
 from tempo.__main__ import main
-from tempo.caps import CAPS, capability, consume, draws, remaining, spent, spent_reason
-from tempo.config import Caps
+from tempo.caps import CAPS, IDENTICAL_K, capability, consume, draws, identical, next_rung, remaining, spent, spent_reason
+from tempo.config import Caps, load_config
 from tempo.journal import EventType, Journal
 from tempo.llm import FakeLLM
 from tempo.stages import StagesRun
 from tempo.tickets import validate_ticket
 from tests.test_cli import git_out
-from tests.test_drain import Clock, Script, commit_ticket, confirmed, drain, journal, make_root
+from tests.support import Clock, commit_ticket, confirmed, journal, make_root
 from tests.test_terminal import ENV, STEM, author, clock, diagnosis_reply, repo
 
 
@@ -114,17 +114,36 @@ def test_other_terminals_draw_only_when_infra(repo, monkeypatch, outcome, expect
         assert next(e.body for e in events if e.type == EventType.CAP_CONSUMED) == {"cap": "infra", "ticket_sha": sha}
 
 
-@pytest.mark.parametrize("cap", ["infra", "decisions"])
-def test_spent_cap_parks_even_with_retry_remaining(tmp_path, capsys, cap):
-    retry_limit = 1 if cap == "decisions" else 3
-    root = make_root(tmp_path, f"caps: {{{cap}: 2, retry: {retry_limit}}}\n")
-    commit_ticket(root, "red", confirmed())
-    j = journal(root)
-    j.append(EventType.STATE_TRANSITION, {"to": "gate_failed", "stage": "check"}, ticket="red")
-    for sha in ("old", "new"):
-        consume(j, "red", cap, sha)
-    script = Script()
-    assert drain(root, script, Clock()) == 0
-    assert script.calls == []
-    assert f"red: gate_failed at check; {cap} cap spent (2/2)" in capsys.readouterr().out
-    assert draws(j.read(), "red", "retry") == 0
+
+
+ROUTING = """schema_version: 1
+state_dir: .tempo/state
+review: {}
+merge: {}
+hosts:
+  codex:
+    models_by_tier: {low: A, medium: A, high: B, max: B}
+    pins: {review: C}
+orchestrator:
+  models: {codex: C}
+engine_plane_safety_inventory: [config.yaml]
+"""
+
+
+def test_next_rung_skips_the_same_host_model(tmp_path):
+    (tmp_path / "config.yaml").write_text(ROUTING)
+    config = load_config(None, cwd=tmp_path)
+    assert next_rung(config, "codex", "low", "medium") == {"tier": "high", "effort": "medium"}
+    assert next_rung(config, "codex", "high", "medium") == {"tier": "high", "effort": "high"}
+    assert next_rung(config, "codex", "high", "max") is None
+
+
+def test_identical_counts_the_last_k_minus_one_terminal_reasons(tmp_path):
+    j = Journal(tmp_path, clock)
+    for reason in ("logic", "scope", "scope"):
+        j.append(EventType.STATE_TRANSITION, {"to": "gate_failed", "reason": reason}, ticket="red")
+    j.append(EventType.STATE_TRANSITION, {"to": "gate_failed", "reason": "scope"}, ticket="other")
+    events = j.read()
+    assert IDENTICAL_K == 3
+    assert identical(events, "red", "scope") and not identical(events, "red", "logic")
+    assert not identical(events, "other", "scope")

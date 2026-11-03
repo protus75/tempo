@@ -1,19 +1,22 @@
 """Tool refusals and the session token (AGENT_PLAN.md sections 4.1, 4.6)."""
 
 import json
+import subprocess
 from datetime import timedelta
 
 import pytest
 
+from tempo import caps
 from tempo.__main__ import _tool
 from tempo.box import BOX_DIR
 from tempo.checkout import Refusal
 from tempo.config import load_config
-from tempo.journal import Journal
+from tempo.journal import EventType, Journal
 from tempo.lockfile import LOCK_STALE_S
 from tempo.seams import LocalFileSystem
 from tempo.storm import STORM_THRESHOLD, storm_producer
-from tests.fixturerepo import STEM, materialize
+from tempo.tickets import INTAKE_SIGNAL
+from tests.fixturerepo import FIXTURE, STEM, materialize
 from tests.hostfakes import FakeHost
 
 
@@ -129,3 +132,93 @@ def test_file_box_and_notify(repo):
     with pytest.raises(Refusal, match="message_class 'note' is unknown"):
         host.tool("file_box", {"summary": "x", "message_class": "note"})
     assert host.tool("notify", {"message": "log in again"}) == {"sent": False}  # the fixture sets no notify argv
+
+
+# --- eligibility and the re-offer draw (moved from test_drain.py with drain) -----------------------
+
+
+def git(repo, *args: str) -> str:
+    return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout
+
+
+def commit_ticket(repo, stem: str, *, priority: str = "P2", depends: str = "none", state: str = "confirmed",
+                  stuck: str = "20m", commit: bool = True) -> None:
+    text = (FIXTURE / "tickets" / STEM / "ticket.md").read_text()
+    text = (text.replace("state: confirmed", f"state: {state}").replace("priority: P2", f"priority: {priority}")
+            .replace("## Depends on\nnone", f"## Depends on\n{depends}").replace("- stuck: 20m", f"- stuck: {stuck}"))
+    rel = f"tickets/{stem}/ticket.md"
+    (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+    (repo / rel).write_text(text)
+    if commit:
+        git(repo, "add", rel)
+        git(repo, "commit", "-q", "-m", f"tempo({stem}): ticket", "--only", "--", rel)
+
+
+def journal(host: FakeHost) -> Journal:
+    return Journal(load_config(None, cwd=host.repo).state_dir, host.clock)
+
+
+def eligible(host: FakeHost) -> list[str]:
+    return [t["stem"] for t in host.tool("list_eligible")["eligible"]]
+
+
+def test_list_eligible_orders_by_depends_then_priority_then_age(repo):
+    commit_ticket(repo, "parent", priority="P3")
+    commit_ticket(repo, "child", priority="P0", depends="- parent")
+    commit_ticket(repo, "other", priority="P1")
+    commit_ticket(repo, "aaa-new")
+    host = FakeHost("claude", repo)
+    host.tool("begin_session")
+    j = journal(host)
+    for stem in (STEM, "aaa-new"):  # the age anchor: each stem's first authoring event
+        j.append(EventType.SIGNAL, {"signal": INTAKE_SIGNAL, "source": "human", "state": "confirmed",
+                                    "commit": "0" * 40}, ticket=stem)
+        host.clock.now += timedelta(hours=1)
+    assert eligible(host) == ["other", STEM, "aaa-new", "parent"]  # child waits on its parent
+    j.append(EventType.STATE_TRANSITION, {"to": "merged"}, ticket="parent")
+    assert eligible(host) == ["child", "other", STEM, "aaa-new"]
+
+
+def test_list_eligible_skips_drafts_uncommitted_and_over_ceiling_tickets(repo):
+    commit_ticket(repo, "rough", state="draft")
+    commit_ticket(repo, "loose", commit=False)
+    commit_ticket(repo, "too-long", stuck="200m")
+    host = FakeHost("claude", repo)
+    host.tool("begin_session")
+    assert eligible(host) == [STEM]
+
+
+def test_a_depends_cycle_is_refused_with_a_paved_road(repo):
+    commit_ticket(repo, "aaa", depends="- bbb")
+    commit_ticket(repo, "bbb", depends="- aaa")
+    host = FakeHost("claude", repo)
+    host.tool("begin_session")
+    with pytest.raises(Refusal, match="cycle.*drop the edge"):
+        host.tool("list_eligible")
+
+
+def test_a_spent_retry_cap_is_never_offered(repo):
+    host = FakeHost("claude", repo)
+    host.tool("begin_session")
+    j = journal(host)
+    j.append(EventType.STATE_TRANSITION, {"to": "running"}, ticket=STEM)
+    j.append(EventType.STATE_TRANSITION, {"to": "gate_failed", "stage": "check"}, ticket=STEM)
+    for _ in range(6):  # the shipped default retry cap
+        j.append(EventType.CAP_CONSUMED, {"cap": "retry", "ticket_sha": "x"}, ticket=STEM)
+    assert eligible(host) == []
+
+
+def test_a_premise_park_holds_until_a_ticket_edit_and_that_reoffer_draws_no_retry(repo):
+    host = FakeHost("claude", repo)
+    host.tool("begin_session")
+    j = journal(host)
+    sha = git(repo, "rev-parse", f"HEAD:tickets/{STEM}/ticket.md").strip()
+    j.append(EventType.STATE_TRANSITION, {"to": "running", "ticket_sha": sha}, ticket=STEM)
+    j.append(EventType.STATE_TRANSITION, {"to": "premise_failed", "stage": "review"}, ticket=STEM)
+    assert eligible(host) == [] and host.tool("status")["parked"] == [STEM]
+    path = repo / "tickets" / STEM / "ticket.md"
+    path.write_text(path.read_text().replace("subtract(5, 3) == 2", "subtract(5, 3) == 2, as answered"))
+    git(repo, "commit", "-q", "-am", "answer the premise")
+    assert eligible(host) == [STEM]
+    host.tool("start", {"stem": STEM})
+    assert caps.draws(journal(host).read(), STEM, "retry") == 0

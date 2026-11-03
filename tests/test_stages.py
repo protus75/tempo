@@ -35,7 +35,7 @@ from tempo.tickets import validate_ticket
 def test_retro_driver_access_is_public_and_read_only(repo):
     from tempo import runner
     from tempo.retro import Retro, RetroConstructionError
-    from tests.test_drain import pause_checkout
+    from tests.support import pause_checkout
     checkout = pause_checkout(repo)
     writer = runner.bind(checkout, FakeLLM([]))
     driver = writer.stages.driver

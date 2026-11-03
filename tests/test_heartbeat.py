@@ -213,7 +213,7 @@ def test_external_heartbeat_refuses_invalid_evidence(tmp_path, invalid):
     assert fs.files == {} and fs.trace == [] and list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.parametrize("verb", ["run", "drain"])
+@pytest.mark.parametrize("verb", ["run"])
 def test_heartbeat_is_dormant(root, tmp_path, monkeypatch, verb):
     heartbeat = Heartbeat(state_dir=root / ".tempo/state", fs=Evidence())
     dormant = boundary(heartbeat)

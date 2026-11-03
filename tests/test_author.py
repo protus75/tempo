@@ -11,7 +11,7 @@ from tempo.llm import FakeLLM
 from tempo.seams import LocalFileSystem
 from tempo.tickets import validate_ticket
 from tests.test_cli import ENV, git_out
-from tests.test_drain import Clock, commit_ticket, confirmed, make_root
+from tests.support import Clock, commit_ticket, confirmed, make_root
 from tests.test_triage import author_reply, reply
 from tempo.__main__ import main
 

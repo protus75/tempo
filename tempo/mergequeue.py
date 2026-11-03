@@ -1,4 +1,4 @@
-"""Serial merge admission for serve; CLI run/drain admit inline through merge.py."""
+"""Serial merge admission for serve; CLI run admits inline through merge.py."""
 
 import asyncio
 from collections.abc import Callable, Sequence

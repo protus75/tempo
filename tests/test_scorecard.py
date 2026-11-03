@@ -15,7 +15,7 @@ from tempo.retro import RetroArtifact, measurements, production_evidence, projec
 from tempo.scorecard import project_scorecard
 from tempo.stages import PackingSlip, check, implement
 from tempo.tickets import validate_ticket
-from tests.test_drain import confirmed
+from tests.support import confirmed
 from tests.test_retro import completed, merged, rig
 from tests.test_stages import implement_reply
 

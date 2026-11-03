@@ -229,7 +229,7 @@ def assert_reachable(sources):
     assert "tempo.daemon" in import_closure(sources)
 
 
-@pytest.mark.parametrize("verb", ["run", "drain"])
+@pytest.mark.parametrize("verb", ["run"])
 def test_daemon_admission_is_dormant(root, monkeypatch, verb):
     def pipeline(checkout):
         async def dispatch(ticket):

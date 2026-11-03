@@ -97,7 +97,7 @@ def eligible(tickets: Mapping[str, Ticket], events: Sequence[Event]) -> list[Tic
         if cycle := depends_cycle(stem, edges):
             raise Refusal(f"`## Depends on` cycle among committed tickets: {' -> '.join(cycle)}",
                           f"edit one ticket on the cycle to drop the edge that inverts the intended order,"
-                          f" then `drain` again")
+                          f" then call list_eligible again")
     settled = settled_dependencies(events)
     maps = supersedes_maps(events)
     authored = authored_at(events)

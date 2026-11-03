@@ -18,7 +18,7 @@ from tempo.seams import LocalFileSystem, SubprocessExec
 from tempo.specs import load_spec
 from tempo.status import project, render
 from tests.test_cli import ENV
-from tests.test_drain import Clock, make_root
+from tests.support import Clock, make_root
 from tests.test_retro_box import PROPOSAL
 from tests.test_retro import completed, merged, rig
 from tests.test_scorecard import invoice, review, rows

@@ -277,8 +277,7 @@ def test_recovery_alert_failures_preserve_terminal_history(root, monkeypatch, fa
     assert audit_journal(j) == []
 
 
-@pytest.mark.parametrize("verb", ["run", "drain"])
-def test_recovery_alert_does_not_change_disposition(root, verb):
+def test_recovery_alert_does_not_change_disposition(root):
     j = journal(root)
     write(root, "work", ticket())
     for stem in ("history", "work"):
@@ -310,6 +309,6 @@ def test_recovery_alert_does_not_change_disposition(root, verb):
         dispatch.stages = callback.stages
         return dispatch
 
-    assert cli(root, *(["run", "work"] if verb == "run" else ["drain"]), stages=prepare) == 0
+    assert cli(root, "run", "work", stages=prepare) == 0
     assert stages.calls == ["work"] and stages.lock_held == [True]
     assert last_states(j.read()) == {"history": "infra_error", "work": "merged"}

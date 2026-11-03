@@ -315,7 +315,8 @@ class Tools:
         tickets = {}
         for path in sorted((repo / TICKETS_DIR).glob(f"*/{TICKET_FILE}")):
             stem = path.parent.name
-            if ticket_path(stem) in dirty:
+            rel = ticket_path(stem)
+            if any(p == rel or (p.endswith("/") and rel.startswith(p)) for p in dirty):
                 continue
             try:
                 tickets[stem] = parse_ticket(stem, path.read_text(), repo)

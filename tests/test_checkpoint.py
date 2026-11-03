@@ -472,7 +472,7 @@ async def test_checkpoint_timer_survives_restart_and_roll(tmp_path, monkeypatch)
     assert "checkpoint-push/1" in rig.timers.fired
 
 
-@pytest.mark.parametrize("verb", ["run", "drain"])
+@pytest.mark.parametrize("verb", ["run"])
 def test_checkpoint_boundary_is_dormant(root, monkeypatch, verb):
     async def graph():
         tasks = asyncio.all_tasks()

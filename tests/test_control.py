@@ -394,21 +394,11 @@ def test_control_inbox_is_active(root, tmp_path, monkeypatch):
         with pytest.raises(AssertionError):
             assert_bound(production.core)
 
-    for verb in ("run", "drain"):
-        stem = "work-" + verb
-        write(root, stem, ticket())
-        stages = Stages()
-        with monkeypatch.context() as patch:
-            patch.setattr(control.ControlInbox, "consume", forbidden)
-            if verb == "drain":
-                with pytest.raises(AssertionError, match="control boundary"):
-                    cli(root, verb, stages=stages)
-                assert stages.calls == []
-            else:
-                assert cli(root, verb, stem, stages=stages) == 0
-                assert stages.calls == [stem] and stages.lock_held == [True]
-        if verb == "drain":
-            assert cli(root, verb, stages=stages) == 0
-            assert stages.calls == [stem] and stages.lock_held == [True]
-    assert (root / ".tempo/state/control/active.json").read_bytes() == b"null\n"
+    stem = "work-run"
+    write(root, stem, ticket())
+    stages = Stages()
+    with monkeypatch.context() as patch:
+        patch.setattr(control.ControlInbox, "consume", forbidden)
+        assert cli(root, "run", stem, stages=stages) == 0
+        assert stages.calls == [stem] and stages.lock_held == [True]
     assert not any(e.body.get("kind") == control.CONTROL_DECISION for e in journal(root).read())

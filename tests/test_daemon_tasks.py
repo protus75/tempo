@@ -309,7 +309,7 @@ async def test_merge_results_remain_consumer_owned(admission_context, monkeypatc
     assert owner.tasks == ()
 
 
-@pytest.mark.parametrize("verb", ["run", "drain"])
+@pytest.mark.parametrize("verb", ["run"])
 def test_background_consumers_are_dormant(root, monkeypatch, verb):
     async def noop():
         pass

@@ -9,7 +9,7 @@ from tempo import __main__ as main, daemon
 from tempo.control import ControlProjection
 from tempo.llm import FakeLLM
 from tests.test_cli import ENV, Clock, Stages, root, ticket, write
-from tests.test_daemon_composition import CoreRig, LiveDrain, assert_core_wiring
+from tests.test_daemon_composition import CoreRig, assert_core_wiring
 from tests.test_driver import build
 from tests.test_kill_executor_abort import Writer, Timer, invoke, cancelled, turn
 from tests.test_kill_signal_journal import Rig, decision
@@ -312,7 +312,7 @@ async def test_executor_abort_failure_does_not_cancel_workers(tmp_path):
         await release_all([task, invocation], [worker])
 
 
-@pytest.mark.parametrize("verb", ["run", "drain"])
+@pytest.mark.parametrize("verb", ["run"])
 def test_kill_worker_stop_is_dormant(root, tmp_path, monkeypatch, verb):
     async def probe(*args, **kwargs):
         raise AssertionError("worker stop wired")
@@ -364,10 +364,6 @@ def test_kill_worker_stop_is_dormant(root, tmp_path, monkeypatch, verb):
         rig.core.admission._dispatch = original
         await rig.drain()
         assert asyncio.all_tasks() == before
-        with monkeypatch.context() as patch:
-            live = LiveDrain(root, patch, pause=False)
-            assert (await live.run()).merged == []
-            assert asyncio.all_tasks() == before
     asyncio.run(production())
 
 

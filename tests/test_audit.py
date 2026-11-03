@@ -2,7 +2,6 @@
 
 from tempo.audit import INVARIANTS, audit, audit_journal
 from tempo.journal import Event, EventType, Journal
-from tests.test_drain_reentry import drain
 from tests.test_stages import agent, implement_reply, verdict
 from tests.test_terminal import author, clock, diagnosis_reply, repo  # noqa: F401 -- fixture
 
@@ -13,17 +12,6 @@ COMMIT = "a" * 40
 def event(type_: str, *, ticket: str | None = "ticket", key: str | None = None,
           body: dict | None = None, ts: str = "2026-10-05T00:00:00+00:00") -> Event:
     return Event(1, type_, ts, ticket, key, body or {})
-
-
-def test_a_production_drain_with_a_merge_and_parked_red_journal_is_green(repo):
-    author(repo)
-    author(repo, "red")
-    premise = {"code": "premise", "message": "generated", "paved_road": "edit the generator"}
-    code, _ = drain(repo, [agent({"tempo/thing.py": "ok\n"}), verdict(),
-                            implement_reply("premise_failed", [premise]), diagnosis_reply()])
-
-    assert code == 0
-    assert audit_journal(Journal(repo / ".tempo" / "state", clock)) == []
 
 
 def test_each_invariant_reports_its_own_planted_violation():

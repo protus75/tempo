@@ -143,10 +143,6 @@ class CircuitBreaker(_Strict):
     cooldown_minutes: Count = 10
 
 
-class Drain(_Strict):
-    max_runtime_hours: Count = 12
-
-
 class Tickets(_Strict):
     max_minutes: Count = 90
 
@@ -162,7 +158,6 @@ class Config(_Strict):
     scheduler: Scheduler = Scheduler()
     caps: Caps = Caps()
     circuit_breaker: CircuitBreaker = CircuitBreaker()
-    drain: Drain = Drain()
     tickets: Tickets = Tickets()
     engine_plane_safety_inventory: list[str]  # no shipped default: absence fails closed (section 12)
     box_policy: dict[BoxRow, StartState] = Field(default_factory=lambda: dict(BOX_POLICY_DEFAULTS))

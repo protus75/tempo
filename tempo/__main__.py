@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from tempo import control, drain, hooks, hostfiles, hosts, render as host_render, runner, serve, triage
+from tempo import control, hooks, hostfiles, hosts, render as host_render, runner, serve, triage
 from tempo.checkout import SPECS_DIR, Checkout, Refusal
 from tempo.config import ConfigError, ConfigSnapshot, load_config, migrate_config
 from tempo.control import PauseConsumer
@@ -149,7 +149,6 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("stem")
     for verb in ("confirm", "reject"):
         sub.add_parser(verb, help=f"{verb} a draft or Reject item under the lock").add_argument("stem")
-    sub.add_parser("drain", help="run every eligible ticket to quiescence under the lock")
     sub.add_parser("serve", help="run the foreground daemon until kill or a signal stops it")
     tool = sub.add_parser("tool", help="run one orchestrator tool and print its JSON result")
     tool.add_argument("name")
@@ -222,7 +221,7 @@ def main(
             return asyncio.run(_control(checkout, args.verb))
         if args.verb in {"confirm", "reject"}:
             return asyncio.run(_verdict(checkout, args.stem, args.verb))
-        if (pipeline if args.verb in {"run", "drain", "retro"} else llm) is None:
+        if (pipeline if args.verb in {"run", "retro"} else llm) is None:
             raise Refusal(f"`{args.verb}` would need an agent CLI, and tempo runs none",
                           "run tickets with /tempo-run in the VS Code chat")
         if args.verb == "triage":
@@ -250,19 +249,6 @@ def main(
         dispatch = pipeline(checkout)
         if args.verb == "retro":
             return asyncio.run(_retro(checkout, dispatch))
-        if args.verb == "drain":
-            from tempo.retro import Retro
-            class DrainDispatch:
-                _retro = Retro(checkout, dispatch)
-
-                async def __call__(self, ticket):
-                    return await dispatch(ticket)
-
-                def __getattr__(self, name):
-                    return getattr(dispatch, name)
-            report = asyncio.run(drain.drain(checkout, DrainDispatch()))
-            print(report.render(), end="")
-            return report.exit_code
         return asyncio.run(runner.run_ticket(args.stem, checkout, dispatch))
     except (ConfigError, Refusal, LockHeld, IntakeRefused, JournalCorruption,
             ExecutableNotFound, hostfiles.MarkerCorruption) as e:
@@ -389,7 +375,7 @@ async def _control(checkout: Checkout, verb: str) -> int:
         try:
             if verb == "kill":
                 raise Refusal("nothing running to kill",
-                                     "start a drain before submitting kill")
+                                     "start a run before submitting kill")
             print(f"nothing running to {verb}")
         finally:
             lock.release()

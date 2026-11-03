@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 SPECS_DIR = Path(__file__).resolve().parent.parent / "specs"
 
 
-# The provider backstop is the drain ceiling every ticket stuck budget fits under (section 9.7):
+# The provider backstop is the ceiling every ticket stuck budget fits under (section 9.7):
 # the ticket's own stuck budget is the bound the driver enforces, never a shorter per-call cap.
 def call_timeout(config: Config) -> float:
     return config.tickets.max_minutes * 60.0

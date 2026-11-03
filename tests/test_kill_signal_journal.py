@@ -226,10 +226,3 @@ def test_kill_projection_stays_latched(tmp_path):
     assert rig.projection == before
 
 
-def test_kill_signal_journal_is_active_in_drain(root, tmp_path, monkeypatch):
-    from tests.test_kill_cli_activation import applications, exercise_live_cli_kill
-    checkout, writer = exercise_live_cli_kill(root, monkeypatch)
-    assert writer.ctx.driver.journal is checkout.control.inbox.journal is checkout.journal
-    [application] = applications(checkout.journal)
-    accepted = next(e for e in checkout.journal.read() if e.body.get("kind") == control.CONTROL_DECISION)
-    assert accepted.body == decision(application["request_id"], life=application["lifecycle_id"])

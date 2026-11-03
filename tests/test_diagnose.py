@@ -138,24 +138,6 @@ def test_spent_caps_short_circuit_after_infra_draw(repo, cap, expected):
                 and e.body.get("signal") == "diagnosis") == expected
 
 
-def test_drain_renders_two_attempts_lessons_and_no_spooled_raw_marker(repo):
-    (repo / "tempo" / "thing.py").write_text("ok base\n")
-    git(repo, "commit", "-am", "green verification base")
-    author(repo)
-    marker = "PRIVATE_SPOOLED_FIRST_ATTEMPT_MARKER"
-    code, llm = invoke(repo, [RuntimeError(marker), diagnosis_reply("Avoid the first dead end."),
-                              agent({"tempo/thing.py": "nope\n"}), diagnosis_reply("Write ok in thing.py."),
-                              agent({"tempo/thing.py": "ok\n"}), verdict()], verb="drain")
-    assert code == 0
-    renders = [r.rendered for r in llm.requests if r.surface == "implement"]
-    assert len(renders) == 3
-    block = renders[2].split(data_open("ticket"), 1)[1].split(data_close("ticket"), 1)[0]
-    criteria = block.split("## Acceptance criteria", 1)[1].split("## Verification", 1)[0]
-    assert "> Avoid the first dead end." in criteria
-    assert "> Write ok in thing.py." in criteria
-    assert marker not in renders[1] and marker not in renders[2]
-
-
 def test_no_lessons_keeps_raw_harvest_reason(repo):
     author(repo)
     marker = "RAW_REASON_WITHOUT_LESSONS"
@@ -169,35 +151,3 @@ def test_no_lessons_keeps_raw_harvest_reason(repo):
     assert f"> RuntimeError: {marker}" in render
 
 
-@pytest.mark.parametrize("workspace", [True, False])
-def test_render_over_bound_calls_rework_but_not_diagnosis(repo, monkeypatch, workspace):
-    from tempo import daemon
-    from tests.test_drain import mechanical_first
-    from tests.test_rework import order
-    author(repo)
-    mechanical_first(monkeypatch, STEM, workspace=workspace)
-    calls = []
-    apply = daemon.apply_rework
-    async def observed(ctx, ticket, findings, **kwargs):
-        calls.append((ctx, ticket, findings, kwargs))
-        return await apply(ctx, ticket, findings, **kwargs)
-    async def forbidden(*args, **kwargs):
-        pytest.fail("prompt arithmetic called diagnosis")
-    monkeypatch.setattr(daemon, "apply_rework", observed)
-    monkeypatch.setattr(runner, "diagnose", forbidden)
-    code, llm = invoke(repo, [order()] if workspace else [])
-    assert code == runner.EXIT_TICKET and len(calls) == 1
-    assert calls[0][2][0].code == "render_over_bound" and calls[0][3]["attempt"] == 0
-    assert [r.surface for r in llm.requests] == (["rework"] if workspace else [])
-    events = history(repo)
-    assert not any(e.type == EventType.CAP_CONSUMED for e in events)
-    assert events[-1].body == {"to": "premise_failed", "stage": "implement", "reason": "render_over_bound"}
-    if workspace:
-        record = json.loads((repo / f"tickets/{STEM}/attempts/0/harvest.json").read_text())
-        assert "shrink or split" in record["findings"][-1]["paved_road"]
-    else:
-        from tempo.box import Box
-        from tempo.seams import LocalFileSystem
-        messages = Box(repo / ".tempo/state/box", LocalFileSystem()).messages()
-        assert len(messages) == 1 and "no usable workspace" in messages[0].summary
-        assert "shrink or split" in messages[0].summary

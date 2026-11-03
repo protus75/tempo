@@ -159,7 +159,7 @@ def test_quarantine_reconstructs_across_segments(rig):
     second = detect(rig, reason="a different failure")
     assert len(second.active) == 2 and second.tests == {identity.test_id}
     release(rig, identity)
-    rig.journal.append(EventType.SIGNAL, {"kind": "drain_halted"}, ticket="a-ticket")
+    rig.journal.append(EventType.SIGNAL, {"kind": "handoff_written"}, ticket="a-ticket")
     restart = Flake(journal=Journal(rig.journal.dir.parent, Clock()), box=rig.box,
                     cap=5, escalate=rig.escalations.append)
     assert len(restart.quarantine().active) == 1
@@ -175,7 +175,7 @@ def test_quarantine_reconstructs_across_segments(rig):
 
 
 @pytest.mark.parametrize("change", [
-    {"kind": "drain_halted"}, {"test_id": " "}, {"signature": "A" * 64},
+    {"kind": "handoff_written"}, {"test_id": " "}, {"signature": "A" * 64},
     {"signature": 123}, {"box_id": ""}, {"extra": "field"},
 ])
 def test_projection_refuses_malformed_records(rig, change):
@@ -277,7 +277,7 @@ def test_detection_failures_and_crash_replay(rig, monkeypatch, boundary):
         assert len(rig.journal.read()) == 1
 
 
-@pytest.mark.parametrize("verb", ["run", "drain"])
+@pytest.mark.parametrize("verb", ["run"])
 @pytest.mark.parametrize("trip", [None, "construction", "invocation"])
 def test_flake_detection_is_dormant(root, tmp_path, monkeypatch, verb, trip):
     dormant = Flake(journal=Journal(root / ".tempo/state", Clock()),
@@ -346,7 +346,7 @@ def test_flake_detection_is_dormant(root, tmp_path, monkeypatch, verb, trip):
         asyncio.run(exercise_core())
 
 
-@pytest.mark.parametrize("verb", ["run", "drain"])
+@pytest.mark.parametrize("verb", ["run"])
 @pytest.mark.parametrize("trip", [None, "construction", "invocation"])
 def test_flake_release_is_dormant(root, tmp_path, monkeypatch, verb, trip):
     dormant = Flake(journal=Journal(root / ".tempo/state", Clock()),

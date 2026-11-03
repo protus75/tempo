@@ -66,7 +66,6 @@ def test_valid_config_loads_from_cwd_with_shipped_defaults(tmp_path):
     }
     assert cfg.circuit_breaker.k == 3
     assert cfg.circuit_breaker.cooldown_minutes == 10
-    assert cfg.drain.max_runtime_hours == 12
     assert cfg.tickets.max_minutes == 90
     assert cfg.box_policy == {
         "failure_report": "confirmed",

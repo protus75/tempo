@@ -127,59 +127,6 @@ def test_resume_requires_current_pause_identity(root, raw, capsys):
         lock.release()
 
 
-@pytest.mark.parametrize("verb", ["pause", "resume"])
-@pytest.mark.parametrize("stale", [False, True])
-def test_pause_resume_apply_directly_under_lock(root, monkeypatch, capsys, verb, stale):
-    state = root / ".tempo/state"
-    if stale:
-        discovery(root, "old-life", "old-hold")
-        control.publish_request(state, control.ControlRequest("old-pause", "old-life", "pause", None), LocalFileSystem())
-    def contents():
-        return {p.relative_to(state): p.read_bytes() for p in state.rglob("*") if p.is_file() and p.name != "tempo.lock"}
-    before = contents()
-    trace = []
-    original_acquire, original_release = Lockfile.acquire, Lockfile.release
-    def acquired(self):
-        original_acquire(self)
-        trace.append("acquire")
-    def released(self):
-        assert self.held
-        trace.append("release")
-        original_release(self)
-    def forbidden(*args, **kwargs):
-        pytest.fail("idle control allocated identity, constructed consumer or changed a record")
-    with monkeypatch.context() as patch:
-        patch.setattr(Lockfile, "acquire", acquired)
-        patch.setattr(Lockfile, "release", released)
-        patch.setattr(entry, "uuid4", forbidden)
-        patch.setattr(entry, "build_control", forbidden)
-        patch.setattr(control, "read_active", forbidden)
-        patch.setattr(control, "publish_request", forbidden)
-        patch.setattr(control, "write_active", forbidden)
-        patch.setattr(Journal, "append", forbidden)
-        assert invoke(root, verb) == 0
-    assert capsys.readouterr().out == f"nothing running to {verb}\n"
-    assert trace == ["acquire", "release"] and contents() == before
-    lock = acquire(root)
-    lock.release()
-    write(root, "work", ticket())
-    stages = Stages()
-    lifecycles = []
-    original = entry.build_control
-    def build(checkout):
-        consumer = original(checkout)
-        lifecycles.append(consumer.projection.lifecycle_id)
-        return consumer
-    monkeypatch.setattr(entry, "build_control", build)
-    assert entry.main(["drain"], cwd=root, env=ENV, clock=Clock(), pipeline=stages) == 0
-    assert stages.calls == ["work"] and stages.lock_held == [True]
-    assert len(lifecycles) == 1 and lifecycles[0] != "old-life"
-    assert (state / "control/active.json").read_bytes() == b"null\n"
-    if stale:
-        [decision] = [e.body for e in stages.checkout.journal.read() if e.body.get("kind") == control.CONTROL_DECISION]
-        assert decision["decision"] == "stale" and decision["lifecycle_id"] == "old-life"
-
-
 def test_control_routing_lock_and_restart_races(root, monkeypatch, capsys):
     original = Lockfile.acquire
     next_owner = Lockfile(root / ".tempo/state", instance_id="next-owner", clock=Clock())

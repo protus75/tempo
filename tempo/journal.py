@@ -35,10 +35,10 @@ Dispatch = Literal["retry", "escalate", "reject_queue", "park"]
 
 SIGNAL_NAMES: frozenset[str] = frozenset({
     "author_invoked", "checkpoint_push_failed", "control_decision", "dead_dependency",
-    "diagnosis", "draft_confirmed", "drain_halted",
+    "diagnosis", "draft_confirmed",
     "flake_detected", "flake_released", "handoff_written", "harvest_failed", "kill_applied",
     "merge_conflict_facts", "merge_red_streak", "merge_tree_mismatch", "provider_call_outcome",
-    "recovery_alert", "reject_arrival", "reject_verdict", "reoffered", "requisition_verdict",
+    "recovery_alert", "reject_verdict", "reoffered", "requisition_verdict",
     "retro_failed", "retro_ticket_authored", "retro_prompt_spec_change_merged", "tombstone_auto_reopened",
     "rework_order", "session_begun", "stage_failed", "storm_breaker_trip", "storm_occurrence", "subagent_call_closed", "supersedes",
     "ticket_intake", "triage_pass", "watcher_parse_failure",

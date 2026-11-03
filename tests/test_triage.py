@@ -13,7 +13,7 @@ from tempo.llm import FakeLLM
 from tempo.lockfile import Lockfile
 from tempo.seams import LocalFileSystem
 from tests.test_cli import ENV, git_out
-from tests.test_drain import Clock, commit_ticket, confirmed, make_root
+from tests.support import Clock, commit_ticket, confirmed, make_root
 
 
 def root_with_box(tmp_path: Path) -> tuple[Path, Box]:
@@ -325,7 +325,7 @@ def test_reopened_message_bypasses_its_tombstone(tmp_path, monkeypatch, recorded
 async def escape_rig(tmp_path):
     from tempo import runner, stages
     from tempo.tickets import validate_ticket
-    from tests.test_drain import pause_checkout
+    from tests.support import pause_checkout
     from tests.test_stages import implement_reply
     root, box = root_with_box(tmp_path)
     c = pause_checkout(root)
@@ -512,5 +512,4 @@ def test_escape_unattributed_reports(tmp_path):
                             bug_origin="player", has_repro=False)
         await triage.triage_pass(c, FakeLLM(["{}"] * 7))
         assert box.get(id).status == "pending" and len(attribution(c)) == before
-        assert "triage" not in __import__("tempo.drain", fromlist=["drain"]).drain.__code__.co_names
     asyncio.run(scenario())

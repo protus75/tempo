@@ -247,14 +247,6 @@ async def test_executor_abort_failure_propagates(tmp_path):
     await cancelled(task)
 
 
-def test_executor_abort_is_active_in_drain(root, tmp_path, monkeypatch):
-    from tests.test_kill_cli_activation import exercise_live_cli_kill
-    checkout, writer = exercise_live_cli_kill(root, monkeypatch)
-    assert writer.ctx.driver._active is None
-    assert writer.ctx.driver.llm.aborts == 1
-    assert writer.ctx.driver.journal is checkout.control.inbox.journal
-
-
 @pytest.mark.asyncio
 async def test_executor_abort_owns_stage_not_calling_worker(tmp_path):
     writer = Writer()

@@ -434,7 +434,7 @@ def test_supersedes_dependency_folds(ctx, leaf_state):
     journal = ctx.driver.journal
     for stem, next_stems in [("original", ["piece-one", "piece-two"]), ("piece-one", ["leaf-a", "leaf-b"])]:
         journal.append(EventType.SIGNAL, {"signal": SUPERSEDES, "successors": next_stems}, ticket=stem, key=None)
-    journal.append(EventType.SIGNAL, {"signal": "drain_halted", "successors": ["ignore"]}, ticket="original")
+    journal.append(EventType.SIGNAL, {"signal": "handoff_written", "successors": ["ignore"]}, ticket="original")
     for stem, state in [("original", "rejected"), ("piece-one", "abandoned"), ("piece-two", "merged"),
                          ("leaf-a", "already_satisfied"), ("leaf-b", "rejected"), ("leaf-b", leaf_state)]:
         journal.append(EventType.STATE_TRANSITION, {"to": state, "stem": "wrong-envelope"}, ticket=stem)

@@ -2,8 +2,8 @@
 
 Per admission, all before main moves: restore the worktree's ticket plane -> rebase onto main ->
 re-run the mechanical hard set on the rebased candidate -> require the pinned review approval ->
-squash-merge with trailers -> journal `to: merged` -> delete the worktree and branch. Run/drain
-admit inline; serve offers through AdmissionBoundary and its serial MergeQueue consumer.
+squash-merge with trailers -> journal `to: merged` -> delete the worktree and branch. Run
+admits inline; serve offers through AdmissionBoundary and its serial MergeQueue consumer.
 
 A refusal leaves main untouched and the branch in place; journaling a non-ok terminal is the
 runner's (section 11.2).

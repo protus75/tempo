@@ -10,7 +10,7 @@ from tempo.storm import storm_producer
 from tempo.inbox import CAPS, ReportError, bounded, ingest, validate_report
 from tempo.journal import Journal
 from tempo.seams import LocalFileSystem
-from tests.test_drain import Clock
+from tests.support import Clock
 
 ROOT = Path(__file__).resolve().parents[1]
 

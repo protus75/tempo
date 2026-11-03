@@ -143,7 +143,7 @@ def test_registry_format(tmp_path):
 def test_tombstone_rereports_reopen_at_threshold(tmp_path, monkeypatch):
     from tempo.storm import storm_producer
     from tempo.journal import EventType, Journal
-    from tests.test_drain import Clock, commit_ticket, confirmed
+    from tests.support import Clock, commit_ticket, confirmed
     from tests.test_triage import root_with_box, reply, run
     from tempo.llm import FakeLLM
 
@@ -203,7 +203,7 @@ def test_tombstone_rereports_reopen_at_threshold(tmp_path, monkeypatch):
 def test_tombstone_reopen_requires_journal_callback(tmp_path, monkeypatch):
     from tempo.box import RereportCallbackRequired, RereportJournal
     from tempo.journal import Journal
-    from tests.test_drain import Clock
+    from tests.support import Clock
 
     box = Box(tmp_path / "box", LocalFileSystem())
     id, _ = box.enqueue(message_class="suggestion", origin="test", summary="same")
@@ -239,7 +239,7 @@ def test_tombstone_reopen_requires_journal_callback(tmp_path, monkeypatch):
 def test_rereport_crash_replay_counts_and_reopens_once(tmp_path, monkeypatch, point, after):
     from tempo.storm import storm_producer
     from tempo.journal import EventType, Journal
-    from tests.test_drain import Clock
+    from tests.support import Clock
 
     class Crash(BaseException):
         pass
@@ -286,7 +286,7 @@ def test_rereport_crash_replay_counts_and_reopens_once(tmp_path, monkeypatch, po
 def test_late_rereport_replay_preserves_later_arrival_count(tmp_path, monkeypatch, after):
     from tempo.storm import storm_producer
     from tempo.journal import Journal
-    from tests.test_drain import Clock
+    from tests.support import Clock
 
     clock = Clock()
     box = storm_producer(root=tmp_path / "box", fs=LocalFileSystem(),
