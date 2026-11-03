@@ -924,7 +924,7 @@ These were decided first, then revised by the review dispositions you accepted.
 ## 8. Phases
 
 Before each phase, its exact file list is posted for approval. P1–P3, each of P4a, P4b, and P4c, and P6 are one commit each. P5a and P5b
-are each a series, one commit per removed module.
+are each a series of removal commits.
 
 ### P0 — Plan
 
@@ -1118,15 +1118,14 @@ gate:
 - Decide tools for the ticket flow (`retry`, `escalate`, `reject`, `park`, `reoffer`, `release_hold`)
   and the Record tools `file_box` and `notify` (§4.1).
 - `IDENTICAL_K` moves from `runner` to `caps`.
-- Remove one scripted module per commit, listing each one's test deletions first. The 22 carried
-  scripted-layer test files (D14) are deleted with their modules; tests of kept code inside them are
-  first moved to the kept module's tests:
+- Remove the scripted layer in this commit order, listing each commit's test deletions first. The 22
+  carried scripted-layer test files (D14) are deleted with their modules; tests of kept code inside them
+  are first moved to the kept module's tests:
   - `drain`
+  - `runner`, `daemon`, and `serve` together, because each imports the others: this takes `runner`
+    dispatch, its ladder and rework routing, and diagnose's only caller
   - `stages.diagnose` + `specs/diagnose.md`
-  - rework routing + `specs/rework.md` (`rework.py` itself stays, unused, until P5b)
-  - ladder routing in `runner`
-  - the `daemon` loop and `serve`
-  - `runner` dispatch
+  - `specs/rework.md` (`rework.py` itself stays, unused, until P5b)
 - Each removal also deletes its CLI command. At the end of P5a, `__main__` joins the kept set and the
   import-graph test covers it.
 - Removed with the daemon, because only the daemon or `serve` called them: `restart`, `watcher`,
