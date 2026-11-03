@@ -79,7 +79,9 @@ not reached, because the failure reasons differed between attempts.
   allows only `implement`, `check`, `review`, `merge`, so `_decide` journaled `harvest_failed` on attempts 0
   and 1. `read_attempts` then showed no findings for those attempts. The orchestrator filed this to the
   box, and triage closed it for want of a repro. Fixed in `f716130`: the stage is allowed, and
-  `read_attempts` falls back to the harvest's findings.
+  `read_attempts` falls back to the harvest's findings. The P7b rerun (below) found the larger half:
+  before a decision, `read_attempts` returned null for every failure, because it read only decided
+  attempts. It now also returns the failure awaiting a decision.
 - **A subagent skipped `output.txt`.** On attempt 2, the Sonnet requisition_review put its verdict in
   its final message (saved to `stop.txt`) and left `output.txt` empty. `submit` classed the call a
   failure, and prepare re-prompted. That cost one call, and the verdict was lost. Cause: the specs said
@@ -87,3 +89,16 @@ not reached, because the failure reasons differed between attempts.
 - **Haiku is a weak requisition_review.** Requisition_review runs at the ticket's tier. Haiku twice
   read an intentional rig as a spec gap, even after the retry lesson explained it. Fixed in `e46853e`:
   `pins.requisition_review` is required and outside `models_by_tier`, like `pins.review`.
+
+### P7b rerun
+
+Run 2026-11-03 in `~/livegate/p7b`, Manual mode, after the three fixes. No permission prompts.
+
+- `add-subtract` at `agent_tier: low`: requisition_review on Opus (the new pin), implement on
+  Haiku, review on Opus, merged `bca3d6a`.
+- `fence-wall` (a scope fence missing `test_calc.py`): Opus snagged it as `fence_wall`,
+  `authoring_error`. The harvest was written with that finding (no `harvest_failed`), and the
+  orchestrator parked the ticket with the right repair.
+- All four calls wrote their reply to `output.txt`.
+- `read_attempts`, called before the decision, returned `"text": null`. It now returns the pending
+  failure; this is covered by a test, not yet live.

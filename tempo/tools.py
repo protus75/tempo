@@ -348,8 +348,9 @@ class Tools:
         return {"stem": stem, "text": (self.c.repo / ticket_path(stem)).read_text()}
 
     async def read_attempts(self, stem: str) -> dict[str, Any]:
+        """The failure awaiting a decision (null when none) and the decided attempts before it."""
         self._ticket(stem)
-        return {"stem": stem, "text": prior_attempts(self.ctx, stem)}
+        return {"stem": stem, "failure": self._current_failure(stem), "text": prior_attempts(self.ctx, stem)}
 
     async def read_box(self) -> dict[str, Any]:
         """Ingest host reports, retry escape attribution for resolved bug reports, and list what is pending."""
@@ -794,16 +795,21 @@ class Tools:
 
     def _failure(self, stem: str) -> dict[str, Any]:
         """The current run's failed stage; refuse while the run has not failed."""
+        failure = self._current_failure(stem)
+        if failure is None:
+            raise Refusal(f"{stem}'s run has no failed stage", "continue the ticket flow; decide only after a failure")
+        return failure
+
+    def _current_failure(self, stem: str) -> dict[str, Any] | None:
+        """The `stage_failed` body awaiting a decision; None before a failure and once one is decided."""
         failure = None
         for e in self.c.journal.read():
             if e.ticket != stem:
                 continue
-            if e.type == EventType.STATE_TRANSITION and e.body.get("to") == "running":
+            if e.type == EventType.STATE_TRANSITION:
                 failure = None
             elif e.type == EventType.SIGNAL and e.body.get("signal") == STAGE_FAILED:
                 failure = e.body
-        if failure is None:
-            raise Refusal(f"{stem}'s run has no failed stage", "continue the ticket flow; decide only after a failure")
         return failure
 
     async def _lessons(self, stem: str, decision: str, lessons: str) -> None:

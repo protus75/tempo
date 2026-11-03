@@ -35,7 +35,8 @@ A result with `"ok": false` is a refusal. Do what its `do_instead` says, or end 
 
 ## Decide
 
-After a failure, call `read_attempts` with `{"stem": "<stem>"}` and read the findings. A
+After a failure, call `read_attempts` with `{"stem": "<stem>"}`. Its `"failure"` is this attempt's
+stage, outcome, and findings; its `"text"` is the attempts decided before it. A
 `provider_drought` or `auth_error` outcome ends the session instead (see End). Otherwise call exactly
 one of these with `{"stem": "<stem>", "lessons": "<what this attempt taught, for the next attempt>"}`:
 

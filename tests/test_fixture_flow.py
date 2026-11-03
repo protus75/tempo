@@ -142,16 +142,21 @@ def test_retry_records_the_lessons_and_the_next_start_reoffers_the_ticket(repo):
 
 
 def test_a_requisition_review_failure_is_harvested_and_read_attempts_shows_its_findings(repo):
-    """P7: a requisition_review failure's harvest was refused, so read_attempts showed no findings."""
+    """P7: a requisition_review failure's harvest was refused, and read_attempts before the decision showed no
+    findings at all: it read only decided attempts."""
     host = FakeHost("claude", repo)
     host.tool("begin_session")
     failed_run(host)
+    pending = host.tool("read_attempts", {"stem": STEM})
+    assert pending["failure"]["stage"] == "requisition_review" and pending["text"] is None
+    assert [f["message"] for f in pending["failure"]["findings"]] == ["the ticket cannot be built as written"]
     host.tool("retry", {"stem": STEM, "lessons": "the reviewer misread it"})
     events = Journal(load_config(None, cwd=repo).state_dir, host.clock).read()
     assert not [e for e in events if e.type == EventType.SIGNAL and e.body.get("signal") == "harvest_failed"]
     assert (repo / "tickets" / STEM / "attempts" / "0" / "harvest.json").is_file()
-    text = host.tool("read_attempts", {"stem": STEM})["text"]
-    assert "the ticket cannot be built as written" in text and "no findings artifact" not in text
+    decided = host.tool("read_attempts", {"stem": STEM})
+    assert decided["failure"] is None
+    assert "the ticket cannot be built as written" in decided["text"] and "no findings artifact" not in decided["text"]
 
 
 def test_retry_is_refused_after_identical_k_failures_for_the_same_reason(repo):

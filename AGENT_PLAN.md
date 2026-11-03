@@ -1271,7 +1271,10 @@ Only Claude passed the live gate, so P7 runs Claude.
 - **Fix from the run: a requisition_review failure is harvested.** `Harvest.stage` did not allow
   `requisition_review`, so `_decide` journaled `harvest_failed` and `read_attempts` showed no findings.
   The stage is allowed, and `prior_attempts` falls back to the harvest's findings when the failed
-  stage left no review or checks artifact. A fixture-flow test covers it.
+  stage left no review or checks artifact. The P7b rerun showed the rest: the orchestrator calls
+  `read_attempts` before deciding, when `prior_attempts` holds only decided attempts, so it returned
+  null. `read_attempts` now also returns `"failure"`, the `stage_failed` awaiting a decision (null
+  once decided), and `tempo/rules/orchestrator.md` names it. A fixture-flow test covers both.
 - **Fix from the run: requisition_review is pinned like review.** It resolved at the ticket's tier, so
   a `low` ticket had its feasibility judged by Haiku, which twice blocked a sound ticket. Config load
   now requires `pins.requisition_review` outside `models_by_tier`, as for `pins.review`. The default
