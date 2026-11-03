@@ -78,9 +78,12 @@ not reached, because the failure reasons differed between attempts.
 - **Defect: a failure at requisition_review loses its harvest.** `Harvest.stage` (`tempo/artifacts.py`)
   allows only `implement`, `check`, `review`, `merge`, so `_decide` journaled `harvest_failed` on attempts 0
   and 1. `read_attempts` then showed no findings for those attempts. The orchestrator filed this to the
-  box, and triage closed it for want of a repro.
+  box, and triage closed it for want of a repro. Fixed in `f716130`: the stage is allowed, and
+  `read_attempts` falls back to the harvest's findings.
 - **A subagent skipped `output.txt`.** On attempt 2, the Sonnet requisition_review put its verdict in
   its final message (saved to `stop.txt`) and left `output.txt` empty. `submit` classed the call a
-  failure, and prepare re-prompted. That cost one call, and the verdict was lost.
+  failure, and prepare re-prompted. That cost one call, and the verdict was lost. Cause: the specs said
+  "Reply with ONLY one JSON object". Fixed in `b9fb300`: every spec says to write it to the `reply:` file.
 - **Haiku is a weak requisition_review.** Requisition_review runs at the ticket's tier. Haiku twice
-  read an intentional rig as a spec gap, even after the retry lesson explained it.
+  read an intentional rig as a spec gap, even after the retry lesson explained it. Fixed in `e46853e`:
+  `pins.requisition_review` is required and outside `models_by_tier`, like `pins.review`.
