@@ -19,7 +19,7 @@ from tempo import caps
 from tempo.journal import TERMINAL_STATES, Event, EventType
 from tempo.lockfile import Lockfile
 from tempo.reconcile import reconcile
-from tempo.backlog import PREMISE, RETIRED, SETTLED, eligible, premise_parked, settled_dependencies, start_run
+from tempo.backlog import PREMISE, RETIRED, SETTLED, eligible, parked, settled_dependencies, start_run
 from tempo.checkout import Checkout, Refusal
 from tempo.runner import EXIT_MERGED, EXIT_TICKET, Dispatch
 from tempo.stages import harvest_orphan
@@ -178,7 +178,7 @@ class _Drain:
             if material != self._offer_material() or events != prepared_events:
                 continue
             last = last_states(events)
-            held = {s for s in scan.tickets if last.get(s) == PREMISE and premise_parked(events, s, shas[s])}
+            held = {s for s in scan.tickets if parked(events, s, shas[s])}
             pick, reoffer = self._select(scan, events, last, held)
             if pick is None:
                 if self.storm_waiting:

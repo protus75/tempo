@@ -189,6 +189,7 @@ class Calls:
                 raise Refusal(f"call {record['call_id']} is open", "submit it before preparing another call")
             if record["key"].startswith(prefix):
                 self._abandon(record)
+        history = self.journal.read()  # the snapshot starts after the closes, which are not this call's changes
 
         completions = sorted(
             (e for e in history if e.type == EventType.EFFECT_COMPLETION and "call" in e.body

@@ -1,15 +1,18 @@
-"""A fake-host orchestrator session on the fixture repo (AGENT_PLAN.md P4 steps b-e): begin_session,
-status, start, requisition, implement, check, review, merge, and the handoff, every action fenced by the
-host's hooks."""
+"""A fake-host orchestrator session on the fixture repo (AGENT_PLAN.md P4 steps b-e, P5a): begin_session,
+status, start, requisition, implement, check, review, merge, each failure decision, a resumed session, and
+the handoff, every action fenced by the host's hooks."""
 
 import json
 import subprocess
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
-from tempo.journal import EventType, Journal
+from tempo.checkout import Refusal
 from tempo.config import load_config
+from tempo.journal import EventType, Journal
+from tempo.lockfile import LOCK_STALE_S
 from tests.fixturerepo import STEM, materialize
 from tests.hostfakes import FakeHost
 
@@ -93,3 +96,122 @@ def test_a_failed_review_reports_the_findings_and_the_session_hands_off(repo):
     assert [f["code"] for f in reviewed["findings"]] == ["ticket"]
     assert (repo / "tickets" / STEM / "review.md").is_file()
     host.tool("write_handoff", {"text": "review returned rma"})
+
+
+RMA_TICKET = json.dumps({"verdict": "rma", "summary": "infeasible", "findings": [
+    {"code": "ticket", "message": "the ticket cannot be built as written", "paved_road": "rewrite it",
+     "kind": "authoring_error"}]})
+
+
+def failed_run(host: FakeHost) -> dict:
+    """Start the ticket and fail its requisition review: the quickest final failure."""
+    host.tool("start", {"stem": STEM})
+    failed = call(host, "requisition_review", RMA_TICKET)
+    while not failed["final"]:
+        failed = call(host, "requisition_review", RMA_TICKET)
+    assert failed["outcome"] == "gate_failed"
+    return failed
+
+
+def terminals(host: FakeHost) -> list[dict]:
+    events = Journal(load_config(None, cwd=host.repo).state_dir, host.clock).read()
+    return [e.body for e in events if e.type == EventType.STATE_TRANSITION and e.body["to"] != "running"]
+
+
+def eligible(host: FakeHost) -> list[str]:
+    return [t["stem"] for t in host.tool("list_eligible")["eligible"]]
+
+
+def test_retry_records_the_lessons_and_the_next_start_reoffers_the_ticket(repo):
+    host = FakeHost("claude", repo)
+    host.tool("begin_session")
+    failed_run(host)
+    decided = host.tool("retry", {"stem": STEM, "lessons": "the ticket was fine; the reviewer misread it"})
+    assert decided["dispatch"] == "retry" and decided["to"] == "gate_failed" and decided["stage"] == "requisition_review"
+    assert terminals(host)[-1]["reason"] == "ticket"
+    assert "the reviewer misread it" in (repo / "tickets" / STEM / "decisions.md").read_text()
+    assert "decisions.md" in git(repo, "show", "--stat", "HEAD")
+    assert not (repo / ".tempo" / "worktrees" / STEM).exists()
+    assert eligible(host) == [STEM]
+    assert host.tool("start", {"stem": STEM})["attempt"] == 1
+
+
+def test_retry_is_refused_after_identical_k_failures_for_the_same_reason(repo):
+    host = FakeHost("claude", repo)
+    host.tool("begin_session")
+    for _ in range(2):
+        failed_run(host)
+        host.tool("retry", {"stem": STEM, "lessons": "try again"})
+    failed_run(host)
+    with pytest.raises(Refusal, match="3 times running"):
+        host.tool("retry", {"stem": STEM, "lessons": "try again"})
+    assert host.tool("escalate", {"stem": STEM, "lessons": "a stronger model"})["dispatch"] == "escalate"
+
+
+def test_escalate_runs_the_next_start_at_the_next_rung(repo):
+    host = FakeHost("claude", repo)
+    host.tool("begin_session")
+    failed_run(host)
+    decided = host.tool("escalate", {"stem": STEM, "lessons": "needs more effort"})
+    assert decided["rung"] == terminals(host)[-1]["rung"]
+    host.tool("start", {"stem": STEM})
+    events = Journal(load_config(None, cwd=repo).state_dir, host.clock).read()
+    draw = [e.body for e in events if e.type == EventType.CAP_CONSUMED and e.body["cap"] == "retry"][-1]
+    assert draw["rung"] == decided["rung"]
+
+
+def test_park_holds_the_ticket_until_reoffer(repo):
+    host = FakeHost("claude", repo)
+    host.tool("begin_session")
+    failed_run(host)
+    host.tool("park", {"stem": STEM, "lessons": "the criteria contradict each other"})
+    assert eligible(host) == [] and host.tool("status")["parked"] == [STEM]
+    with pytest.raises(Refusal, match="not running"):
+        host.tool("park", {"stem": STEM, "lessons": "again"})
+    host.tool("reoffer", {"stem": STEM, "lessons": "the contradiction was in the reviewer's reading"})
+    assert eligible(host) == [STEM] and host.tool("status")["parked"] == []
+    with pytest.raises(Refusal, match="not parked"):
+        host.tool("reoffer", {"stem": STEM, "lessons": "again"})
+
+
+def test_reject_retires_the_ticket(repo):
+    host = FakeHost("claude", repo)
+    host.tool("begin_session")
+    failed_run(host)
+    assert host.tool("reject", {"stem": STEM, "lessons": "not worth doing"})["to"] == "rejected"
+    assert "state: rejected" in (repo / "tickets" / STEM / "ticket.md").read_text()
+    assert [t["to"] for t in terminals(host)] == ["gate_failed", "rejected"]
+    assert eligible(host) == []
+
+
+def test_a_decision_needs_a_failed_run_and_lessons(repo):
+    host = FakeHost("claude", repo)
+    host.tool("begin_session")
+    host.tool("start", {"stem": STEM})
+    with pytest.raises(Refusal, match="no failed stage"):
+        host.tool("retry", {"stem": STEM, "lessons": "x"})
+    call(host, "requisition_review", RMA_TICKET)
+    with pytest.raises(Refusal, match="lessons is blank"):
+        host.tool("park", {"stem": STEM, "lessons": " "})
+
+
+def test_a_session_killed_mid_ticket_resumes_from_status(repo):
+    host = FakeHost("claude", repo)
+    host.tool("begin_session")
+    host.tool("start", {"stem": STEM})
+    call(host, "requisition_review", APPROVE_TICKET)
+    prepared = host.tool("prepare", {"stem": STEM, "surface": "implement"})
+    assert prepared["state"] == "pending"  # the chat dies here, with the implement call open
+
+    host.clock.now += timedelta(seconds=LOCK_STALE_S + 1)
+    host.chat, host.token = "chat-2", None
+    assert host.tool("begin_session")["number"] == 2
+    status = host.tool("status")
+    assert [(c["call_id"], c["live_session"]) for c in status["open_calls"]] == [(prepared["call"], False)]
+    implemented = call(host, "implement", IMPLEMENTED, edits={"calc.py": SUBTRACT, "test_calc.py": TEST})
+    assert implemented["outcome"] == "ok", implemented
+    job = host.tool("check", {"stem": STEM})
+    assert host.tool("job", {"id": job["id"]})["result"]["outcome"] == "ok"
+    call(host, "review", APPROVE_DIFF)
+    job = host.tool("merge", {"stem": STEM})
+    assert host.tool("job", {"id": job["id"]})["result"]["outcome"] == "ok"

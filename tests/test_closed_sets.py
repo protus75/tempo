@@ -68,8 +68,11 @@ def test_session_and_tool_constants():
     assert lockfile.LOCK_STALE_S == 900.0
     assert lockfile.SESSION_FILE == 'session.json'
     assert tools.TOOL_CALL_S == 90.0
+    assert tools.NOT_FAILED == ('ok', 'already_satisfied')
+    assert tools.STAGE_FAILED == 'stage_failed'
+    assert tools.DECISIONS == 'decisions.md'
     assert tools.FLOW_SURFACES == ('requisition_review', 'implement', 'review')
-    assert tuple(tools.TOOLS) == ('begin_session', 'status', 'list_eligible', 'read_ticket', 'read_attempts', 'read_box', 'start', 'prepare', 'submit', 'check', 'merge', 'job', 'write_handoff')
+    assert tuple(tools.TOOLS) == ('begin_session', 'status', 'list_eligible', 'read_ticket', 'read_attempts', 'read_box', 'start', 'prepare', 'submit', 'check', 'merge', 'job', 'write_handoff', 'retry', 'escalate', 'reject', 'park', 'reoffer', 'release_hold', 'file_box', 'notify')
     assert jobs.KINDS == ('check', 'merge', 'submit')
     assert jobs.FINISHED == frozenset({'done', 'lost'})
     assert hosts.HOSTS == ('claude', 'copilot', 'codex')
@@ -80,6 +83,7 @@ def test_session_and_tool_constants():
 def test_caps_closed_sets_and_constants():
     assert caps.CAPS == ('decisions', 'retry', 'infra', 'premise_bounce')
     assert caps.LEVELS == ('low', 'medium', 'high', 'max')
+    assert caps.IDENTICAL_K == 3
 
 def test_checkpoint_closed_sets_and_constants():
     assert checkpoint.CHECKPOINT_MERGES == 5
@@ -98,6 +102,7 @@ def test_control_closed_sets_and_constants():
 def test_backlog_closed_sets_and_constants():
     assert dict(backlog.PRIORITY) == {'P0': 0, 'P1': 1, 'P2': 2, 'P3': 3}
     assert backlog.RETIRED == frozenset({'rejected'})
+    assert backlog.REOFFERED == 'reoffered'
     assert backlog.SETTLED == frozenset({'already_satisfied', 'merged'})
 
 def test_enginelog_closed_sets_and_constants():
@@ -112,11 +117,11 @@ def test_inbox_closed_sets_and_constants():
     assert dict(inbox.CAPS) == {'log': 65536, 'replay': 1048576}
 
 def test_journal_closed_sets_and_constants():
-    assert set(get_args_deep(journal.Dispatch)) == {'escalate', 'reject_queue', 'retry'}
+    assert set(get_args_deep(journal.Dispatch)) == {'escalate', 'park', 'reject_queue', 'retry'}
     assert dict(journal.EVENT_VERSIONS) == {'cap_consumed': 1, 'checkpoint': 1, 'effect_completion': 1, 'effect_intent': 1, 'signal': 1, 'state_transition': 1, 'timer_armed': 1, 'timer_fired': 1}
     assert {e.value for e in journal.EventType} == {'cap_consumed', 'checkpoint', 'effect_completion', 'effect_intent', 'signal', 'state_transition', 'timer_armed', 'timer_fired'}
     assert journal.ROLL_BYTES == 67108864
-    assert journal.SIGNAL_NAMES == frozenset({'author_invoked', 'checkpoint_push_failed', 'control_decision', 'dead_dependency', 'diagnosis', 'draft_confirmed', 'drain_halted', 'flake_detected', 'flake_released', 'handoff_written', 'harvest_failed', 'kill_applied', 'merge_conflict_facts', 'merge_red_streak', 'merge_tree_mismatch', 'provider_call_outcome', 'recovery_alert', 'reject_arrival', 'reject_verdict', 'requisition_verdict', 'retro_failed', 'retro_prompt_spec_change_merged', 'retro_ticket_authored', 'rework_order', 'session_begun', 'storm_breaker_trip', 'storm_occurrence', 'subagent_call_closed', 'supersedes', 'ticket_intake', 'tombstone_auto_reopened', 'triage_pass', 'watcher_parse_failure'})
+    assert journal.SIGNAL_NAMES == frozenset({'author_invoked', 'checkpoint_push_failed', 'control_decision', 'dead_dependency', 'diagnosis', 'draft_confirmed', 'drain_halted', 'flake_detected', 'flake_released', 'handoff_written', 'harvest_failed', 'kill_applied', 'merge_conflict_facts', 'merge_red_streak', 'merge_tree_mismatch', 'provider_call_outcome', 'recovery_alert', 'reject_arrival', 'reject_verdict', 'reoffered', 'requisition_verdict', 'retro_failed', 'retro_prompt_spec_change_merged', 'retro_ticket_authored', 'rework_order', 'session_begun', 'stage_failed', 'storm_breaker_trip', 'storm_occurrence', 'subagent_call_closed', 'supersedes', 'ticket_intake', 'tombstone_auto_reopened', 'triage_pass', 'watcher_parse_failure'})
     assert journal.TERMINAL_STATES == frozenset({'abandoned', 'already_satisfied', 'gate_failed', 'infra_error', 'invalid_artifact', 'merged', 'premise_failed', 'rejected', 'timeout'})
 
 def test_llm_closed_sets_and_constants():
@@ -147,7 +152,6 @@ def test_runner_closed_sets_and_constants():
     assert runner.EXIT_REFUSED == 2
     assert runner.EXIT_TICKET == 1
     assert stages.HARVEST_TAIL_CHARS == 4000
-    assert runner.IDENTICAL_K == 3
 
 def test_serve_closed_sets_and_constants():
     assert serve.SERVE_POLL_S == 0.1

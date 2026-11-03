@@ -3,11 +3,13 @@
 from collections.abc import Iterable
 
 from tempo.config import Caps, Config, ConfigSnapshot
-from tempo.journal import Event, EventType, Journal
+from tempo.journal import TERMINAL_STATES, Event, EventType, Journal
 from tempo.tickets import Ticket
 
 CAPS = ("decisions", "retry", "infra", "premise_bounce")
 LEVELS = ("low", "medium", "high", "max")
+# Contract constant: `retry` is refused once the same terminal reason has repeated this many times.
+IDENTICAL_K = 3
 
 
 def _check(cap: str) -> None:
@@ -75,6 +77,13 @@ def next_rung(config: Config | ConfigSnapshot, host: str, tier: str, effort: str
     if effort != "max":
         return {"tier": tier, "effort": LEVELS[LEVELS.index(effort) + 1]}
     return None
+
+
+def identical(events: Iterable[Event], stem: str, reason: str) -> bool:
+    """The stem's last `IDENTICAL_K - 1` terminals all ended for `reason`, so one more would be the K-th."""
+    previous = [e.body.get("reason") for e in events if e.type == EventType.STATE_TRANSITION
+                and e.ticket == stem and e.body.get("to") in TERMINAL_STATES]
+    return len(previous) >= IDENTICAL_K - 1 and all(r == reason for r in previous[-(IDENTICAL_K - 1):])
 
 
 def spent_reason(cap: str) -> str:

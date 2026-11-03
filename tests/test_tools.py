@@ -6,8 +6,13 @@ from datetime import timedelta
 import pytest
 
 from tempo.__main__ import _tool
+from tempo.box import BOX_DIR
 from tempo.checkout import Refusal
+from tempo.config import load_config
+from tempo.journal import Journal
 from tempo.lockfile import LOCK_STALE_S
+from tempo.seams import LocalFileSystem
+from tempo.storm import STORM_THRESHOLD, storm_producer
 from tests.fixturerepo import STEM, materialize
 from tests.hostfakes import FakeHost
 
@@ -45,7 +50,9 @@ def test_one_thing_at_a_time_while_a_call_is_open(repo):
     host.tool("start", {"stem": STEM})
     prepared = host.tool("prepare", {"stem": STEM, "surface": "requisition_review"})
     for name, args in (("prepare", {"stem": STEM, "surface": "implement"}), ("start", {"stem": STEM}),
-                       ("check", {"stem": STEM}), ("write_handoff", {"text": "x"})):
+                       ("check", {"stem": STEM}), ("write_handoff", {"text": "x"}),
+                       ("retry", {"stem": STEM, "lessons": "x"}), ("file_box", {"summary": "x"}),
+                       ("notify", {"message": "x"})):
         with pytest.raises(Refusal, match=f"call {prepared['call']} is open"):
             host.tool(name, args)
     assert host.tool("submit", {"call": prepared["call"]}) == {"state": "pending"}
@@ -93,3 +100,32 @@ def test_the_tool_verb_prints_one_json_object(repo, capsys):
     assert json.loads(capsys.readouterr().out)["ok"] is False
     assert _tool(host.tools(), "status", "{}") == 0
     assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+def test_a_storm_hold_keeps_the_ticket_out_until_release_hold(repo):
+    host = FakeHost("claude", repo)
+    host.tool("begin_session")
+    config = load_config(None, cwd=repo)
+    box = storm_producer(root=config.state_dir / BOX_DIR, fs=LocalFileSystem(),
+                         journal=Journal(config.state_dir, host.clock), clock=host.clock)
+    for n in range(STORM_THRESHOLD + 1):
+        box.enqueue(message_class="failure_report", origin=STEM, stage="implement", outcome="gate_failed",
+                    summary="the same failure", occurrence_id=f"arrival-{n}")
+    [(hold, stem)] = host.tool("status")["holds"].items()
+    assert stem == STEM and host.tool("list_eligible")["eligible"] == []
+    with pytest.raises(Refusal, match="is not live"):
+        host.tool("release_hold", {"hold_id": "nope", "lessons": "x"})
+    assert host.tool("release_hold", {"hold_id": hold, "lessons": "the failure was a flaky runner"})["released"]
+    assert host.tool("status")["holds"] == {}
+    assert [t["stem"] for t in host.tool("list_eligible")["eligible"]] == [STEM]
+    assert "flaky runner" in (repo / "tickets" / STEM / "decisions.md").read_text()
+
+
+def test_file_box_and_notify(repo):
+    host = FakeHost("claude", repo)
+    host.tool("begin_session")
+    filed = host.tool("file_box", {"summary": "test_calc.py has no runner"})
+    assert [m["id"] for m in host.tool("read_box")["pending"]] == [filed["id"]]
+    with pytest.raises(Refusal, match="message_class 'note' is unknown"):
+        host.tool("file_box", {"summary": "x", "message_class": "note"})
+    assert host.tool("notify", {"message": "log in again"}) == {"sent": False}  # the fixture sets no notify argv

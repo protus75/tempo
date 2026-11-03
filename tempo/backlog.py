@@ -23,19 +23,27 @@ RETIRED = frozenset({"rejected"})
 PRIORITY = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 
 PREMISE = "premise_failed"
+REOFFERED = "reoffered"
 SUPERSEDES = "supersedes"
 
 
-def premise_parked(events: Iterable[Event], stem: str, ticket_sha: str) -> bool:
-    """The premise park (section 18): the stem's last run ended `premise_failed` against this same `ticket.md`."""
-    last: str | None = None
+def parked(events: Iterable[Event], stem: str, ticket_sha: str) -> bool:
+    """The park (section 18): the stem's last run ended `premise_failed`, or the orchestrator parked it, against
+    this same `ticket.md`, and no `reoffer` released it since."""
+    last: dict | None = None
     ran_sha: str | None = None
+    released = False
     for e in events:
-        if e.type == EventType.STATE_TRANSITION and e.ticket == stem:
-            last = e.body.get("to")
-            if last == "running":
-                ran_sha = e.body.get("ticket_sha")
-    return last == PREMISE and ran_sha == ticket_sha
+        if e.ticket != stem:
+            continue
+        if e.type == EventType.STATE_TRANSITION:
+            last, released = e.body, False
+            if last.get("to") == "running":
+                ran_sha = last.get("ticket_sha")
+        elif e.type == EventType.SIGNAL and e.body.get("signal") == REOFFERED:
+            released = e.body.get("ticket_sha") == ticket_sha
+    return (last is not None and (last.get("to") == PREMISE or last.get("dispatch") == "park")
+            and ran_sha == ticket_sha and not released)
 
 
 def authored_at(events: Iterable[Event]) -> dict[str, str]:
@@ -159,6 +167,23 @@ async def dead_dependents(dead: str, checkout: Checkout) -> None:
                             summary=f"{stem} depends on {dependency}, which was rejected or abandoned; re-wire, re-scope, or reject it",
                             occurrence_id=arrival_id("dead-dependency", stem, dependency))
                 checkout.journal.append(EventType.SIGNAL, {"signal": "dead_dependency", "dead": dependency}, ticket=stem)
+
+
+async def reject_ticket(stem: str, checkout: Checkout, *, actor: str = "operator") -> bool:
+    """Reject mutation for a caller already holding the writer lock."""
+    rel = ticket_path(stem)
+    path = checkout.repo / rel
+    last = last_states(checkout.journal.read()).get(stem)
+    if path.is_file() and ticket_state(path) != "rejected":
+        checkout.fs.write(path, stamp(path.read_text(), "state", "rejected").encode())
+        await checkout.git.add(checkout.repo, [rel])
+        await checkout.git.commit(checkout.repo, f"tempo({stem}): rejected", only=[rel])
+    if last != "rejected":
+        checkout.journal.append(EventType.SIGNAL,
+                                {"signal": "reject_verdict", "verdict": "kill", "actor": actor}, ticket=stem)
+        checkout.journal.append(EventType.STATE_TRANSITION, {"to": "rejected"}, ticket=stem)
+    await dead_dependents(stem, checkout)
+    return last != "rejected"
 
 
 async def admit(stem: str, checkout: Checkout) -> Ticket:

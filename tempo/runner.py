@@ -12,9 +12,9 @@ from typing import assert_never
 from tempo.artifacts import Finding, Harvest, StageResult
 from tempo.box import BOX_DIR
 from tempo.storm import arrival_id
-from tempo.backlog import admit, dead_dependents, ticket_state
+from tempo.backlog import admit, reject_ticket, ticket_state
 from tempo.checkout import SPECS_DIR, Checkout, Refusal
-from tempo.caps import capability, consume, next_rung, spent, spent_reason
+from tempo.caps import IDENTICAL_K, capability, consume, next_rung, spent, spent_reason
 from tempo.driver import Driver
 from tempo.effects import Effects
 from tempo.journal import TERMINAL_STATES, Dispatch as JournalDispatch, Event, EventType, dispatch_of
@@ -32,7 +32,6 @@ EXIT_MERGED = 0
 EXIT_TICKET = 1
 EXIT_REFUSED = 2
 
-IDENTICAL_K = 3
 
 # The stage seam: drives the validated ticket through the stages and merge, journals the run's single
 # terminal transition (section 11), and returns that terminal state.
@@ -326,20 +325,3 @@ def committed_draft(checkout, stem: str) -> bool:
     return (path.is_file() and ticket_state(path) == "draft" and any(
         e.ticket == stem and e.body.get("signal") == INTAKE_SIGNAL
         for e in checkout.journal.read()))
-
-
-async def reject_ticket(stem: str, checkout: Checkout) -> bool:
-    """Reject mutation for a caller already holding the writer lock."""
-    rel = ticket_path(stem)
-    path = checkout.repo / rel
-    last = last_states(checkout.journal.read()).get(stem)
-    if path.is_file() and ticket_state(path) != "rejected":
-        checkout.fs.write(path, stamp(path.read_text(), "state", "rejected").encode())
-        await checkout.git.add(checkout.repo, [rel])
-        await checkout.git.commit(checkout.repo, f"tempo({stem}): rejected", only=[rel])
-    if last != "rejected":
-        checkout.journal.append(EventType.SIGNAL,
-                                {"signal": "reject_verdict", "verdict": "kill", "actor": "operator"}, ticket=stem)
-        checkout.journal.append(EventType.STATE_TRANSITION, {"to": "rejected"}, ticket=stem)
-    await dead_dependents(stem, checkout)
-    return last != "rejected"

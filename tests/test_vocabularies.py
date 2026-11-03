@@ -14,7 +14,7 @@ from tempo.journal import EventType, Journal
 def test_dispatch_vocabulary_is_closed():
     Dispatch = journal_module.Dispatch
     dispatch_of = journal_module.dispatch_of
-    assert get_args(Dispatch) == ("retry", "escalate", "reject_queue")
+    assert get_args(Dispatch) == ("retry", "escalate", "reject_queue", "park")
     assert dispatch_of({}) is None
     for name in get_args(Dispatch):
         assert dispatch_of({"dispatch": name}) == name

@@ -1,7 +1,7 @@
 """The orchestrator's tools (AGENT_PLAN.md section 4.1): `tempo tool <name> '<json>'` prints one JSON result.
 
-P4 builds the Read and Run tools, `begin_session`, and `write_handoff`; P5 builds the Decide tools and
-the rest of Record. Every tool except `begin_session` and `status` needs the token `begin_session`
+P4 builds the Read and Run tools, `begin_session`, and `write_handoff`; P5a builds the Decide tools for a
+failed run and the rest of Record. Every tool except `begin_session` and `status` needs the token `begin_session`
 returned. Writing tools take the single-writer lock for their whole call, and refuse while a subagent
 call is open or a job is running. `check`, `merge`, and a call's validation in `submit` run as
 start-then-poll jobs in a detached worker that holds the writer lock (`run_job`).
@@ -19,18 +19,19 @@ from typing import Any
 from pydantic import BaseModel
 
 from tempo import render
-from tempo.artifacts import StageResult
-from tempo.backlog import PREMISE, admit, eligible, premise_parked, start_run
-from tempo.box import BOX_DIR, Box, RereportJournal
+from tempo.artifacts import Finding, StageResult
+from tempo.backlog import PREMISE, REOFFERED, SETTLED, admit, eligible, parked, reject_ticket, start_run
+from tempo.box import BOX_DIR, MESSAGE_CLASSES, Box, BoxError, RereportJournal
 from tempo.call import Calls, CallSpec, closed, issued, open_calls
-from tempo.caps import capability, spent
+from tempo.caps import IDENTICAL_K, capability, consume, identical, next_rung, spent
 from tempo.checkout import SPECS_DIR, Checkout, Refusal
+from tempo.control import CONTROL_DECISION
 from tempo.driver import Driver, LlmStage, unwrap_fence
 from tempo.effects import Effects
 from tempo.hooks import CLAIM, HOOKS_DIR
 from tempo.hosts import LAYOUTS
 from tempo.jobs import Jobs
-from tempo.journal import TERMINAL_STATES, EventType, render_ts, run_seq
+from tempo.journal import TERMINAL_STATES, Dispatch, EventType, render_ts, run_seq
 from tempo.llm import LLMRequest, LLMResult
 from tempo.llmeffect import llm_key
 from tempo.lockfile import Lockfile, LockHeld, Sessions
@@ -39,9 +40,11 @@ from tempo.notify import send
 from tempo.requisition import REQUISITION_STUCK_S, requisition
 from tempo.seams import Notifications
 from tempo.specs import RenderOverBound
-from tempo.stages import (ImplementReply, StageContext, check, finish_implement, finish_review, implement_stage,
-                          packing_slip, prepare_worktree, prior_attempts, review_stage)
+from tempo.stages import (ImplementReply, StageContext, check, finish_implement, finish_review, harvest,
+                          implement_stage, packing_slip, prepare_worktree, prior_attempts, review_stage,
+                          run_wall_seconds)
 from tempo.status import last_states, project
+from tempo.storm import StormLedger
 from tempo.status import render as render_status
 from tempo.thresh import fold_breakers
 from tempo.tickets import (TICKET_FILE, TICKETS_DIR, Ticket, TicketInvalid, _porcelain, parse_ticket, stem_findings,
@@ -53,6 +56,9 @@ TOOL_CALL_S = 90.0
 # The surfaces of the P4 orchestrator flow; triage, author, and retro get their tools in P5.
 FLOW_SURFACES = ("requisition_review", "implement", "review")
 HANDOFF = f"{TICKETS_DIR}/orchestrator/handoff.md"
+DECISIONS = "decisions.md"
+STAGE_FAILED = "stage_failed"
+NOT_FAILED = ("ok", "already_satisfied")
 
 
 class _NoModel:
@@ -89,6 +95,14 @@ TOOLS = {
     "merge": _Tool("merge", writes=True),
     "job": _Tool("job", late=True),
     "write_handoff": _Tool("write_handoff", writes=True, late=True),
+    "retry": _Tool("retry", writes=True),
+    "escalate": _Tool("escalate", writes=True),
+    "reject": _Tool("reject", writes=True),
+    "park": _Tool("park", writes=True),
+    "reoffer": _Tool("reoffer", writes=True),
+    "release_hold": _Tool("release_hold", writes=True),
+    "file_box": _Tool("file_box", writes=True),
+    "notify": _Tool("notify", writes=True),
 }
 
 
@@ -98,6 +112,17 @@ def _json(value: Any) -> Any:
     if isinstance(value, list):
         return [_json(v) for v in value]
     return value
+
+
+def _reason(outcome: str, findings: list[Any]) -> str:
+    """The terminal reason, derived from the outcome alone (section 4.1), never from orchestrator text."""
+    codes = {f["code"] if isinstance(f, dict) else f.code for f in findings}
+    return ",".join(sorted(codes)) or outcome
+
+
+def _need(lessons: str) -> None:
+    if not lessons.strip():
+        raise Refusal("lessons is blank", "pass what this attempt taught, for the next attempt and the handoff")
 
 
 def _result(result: StageResult) -> dict[str, Any]:
@@ -175,7 +200,7 @@ class Tools:
                      retry_cap=self.c.config.caps.retry, notify=self._notify, new_id=self.new_id)
 
     async def _notify(self, failure: str, message: str) -> None:
-        """Chupa's notification transport, called directly (the `notify` tool is P5)."""
+        """Chupa's notification transport, behind the `notify` tool and tempo's own escalations."""
         argv = self.c.config.notify
         if argv is None:
             return
@@ -269,7 +294,17 @@ class Tools:
         return {"text": render_status(project(events, box=box, policy=self.c.config.box_policy)),
                 "session": session, "open_calls": calls,
                 "jobs": self.jobs.records()[-5:],
+                "parked": await self._parked(events),
+                "holds": StormLedger(journal=self.c.journal, clock=self.c.clock).holds(),
                 "cooldowns": {h: end for h in self.c.config.orchestrator.models if (end := self._cooldown(h))}}
+
+    async def _parked(self, events: list) -> list[str]:
+        out = []
+        for stem, to in sorted(last_states(events).items()):
+            if to in TERMINAL_STATES and (self.c.repo / ticket_path(stem)).is_file() and parked(
+                    events, stem, await self.c.git.rev_parse(self.c.repo, f"HEAD:{ticket_path(stem)}")):
+                out.append(stem)
+        return out
 
     async def list_eligible(self) -> dict[str, Any]:
         assert self.session is not None
@@ -288,11 +323,12 @@ class Tools:
                 continue
         events = self.c.journal.read()
         last = last_states(events)
+        held = set(StormLedger(journal=self.c.journal, clock=self.c.clock).holds().values())
         out = []
         for ticket in eligible(tickets, events):
             stem = ticket.stem
             sha = await self.c.git.rev_parse(repo, f"HEAD:{ticket_path(stem)}")
-            if last.get(stem) == PREMISE and premise_parked(events, stem, sha):
+            if stem in held or parked(events, stem, sha):
                 continue
             if spent(self.c.config.caps, events, stem) is not None:
                 continue
@@ -345,6 +381,7 @@ class Tools:
         else:
             req = requisition(self.c.repo, stem, text, SPECS_DIR)
             if (snag := req.precheck()) is not None:
+                self._failed(stem, surface, "gate_failed", list(snag.findings))
                 return {"state": "completed", "final": True, "outcome": "gate_failed", "verdict": _json(snag)}
             stage, consumed, stuck = req.stage(), None, REQUISITION_STUCK_S
         spec = CallSpec(stage=stage, consumed=consumed, ticket=stem, attempt=attempt, workspace=worktree,
@@ -353,6 +390,7 @@ class Tools:
         try:
             prepared = await self._calls(self.session["host"], self.session["token"]).prepare(spec)
         except RenderOverBound as e:
+            self._failed(stem, surface, "premise_failed", [e.finding])
             return {"state": "completed", "final": True, "outcome": "premise_failed", "findings": [_json(e.finding)]}
         out = {"call": prepared.call, "state": prepared.state}
         if prepared.state == "pending":
@@ -426,11 +464,11 @@ class Tools:
         ticket, attempt = self._running(stem)
         _, spec = implement_stage(self.ctx, ticket, self.ctx.worktree(stem))
         slip = await packing_slip(self.ctx, spec, stem, self._implement_reply(stem, attempt))
-        return _result(await check(self.ctx, ticket, slip, attempt=attempt))
+        return self._failed_result(stem, "check", _result(await check(self.ctx, ticket, slip, attempt=attempt)))
 
     async def _job_merge(self, stem: str) -> dict[str, Any]:
         ticket, attempt = self._running(stem)
-        return _result(await merge(self.ctx, ticket, attempt=attempt))
+        return self._failed_result(stem, "merge", _result(await merge(self.ctx, ticket, attempt=attempt)))
 
     async def _job_submit(self, call: str, host: str, session: str) -> dict[str, Any]:
         record = issued(self.c.journal.read(), call)
@@ -441,6 +479,8 @@ class Tools:
                                "findings": _json(submitted.findings)}
         if submitted.result is not None:
             out |= _result(await finish(submitted.result)) | {"final": True}
+        if out["final"]:
+            self._failed_result(record["ticket"], record["surface"], out)
         return out
 
     async def _surface(self, record: dict[str, Any]) -> tuple[LlmStage, Callable[[StageResult], Awaitable[StageResult]]]:
@@ -468,3 +508,144 @@ class Tools:
                                findings=list(made.findings), provider=result.provider, model=result.model)
         return req.stage(), verdict
 
+    # --- decide ----------------------------------------------------------------------------------
+
+    def _failed(self, stem: str, stage: str, outcome: str, findings: list[Any]) -> None:
+        """Record a stage that ended final and not ok: the fact every Decide tool reads."""
+        if outcome not in NOT_FAILED:
+            self.c.journal.append(EventType.SIGNAL, {"signal": STAGE_FAILED, "stage": stage, "outcome": outcome,
+                                                     "reason": _reason(outcome, findings),
+                                                     "findings": _json(findings)}, ticket=stem)
+
+    def _failed_result(self, stem: str, stage: str, result: dict[str, Any]) -> dict[str, Any]:
+        self._failed(stem, stage, result["outcome"], result["findings"])
+        return result
+
+    def _failure(self, stem: str) -> dict[str, Any]:
+        """The current run's failed stage; refuse while the run has not failed."""
+        failure = None
+        for e in self.c.journal.read():
+            if e.ticket != stem:
+                continue
+            if e.type == EventType.STATE_TRANSITION and e.body.get("to") == "running":
+                failure = None
+            elif e.type == EventType.SIGNAL and e.body.get("signal") == STAGE_FAILED:
+                failure = e.body
+        if failure is None:
+            raise Refusal(f"{stem}'s run has no failed stage", "continue the ticket flow; decide only after a failure")
+        return failure
+
+    async def _lessons(self, stem: str, decision: str, lessons: str) -> None:
+        rel = f"{TICKETS_DIR}/{stem}/{DECISIONS}"
+        path = self.c.repo / rel
+        before = path.read_text() if path.is_file() else ""
+        attempt = run_seq(self.c.journal.read(), stem)
+        self.c.fs.write(path, f"{before}## Run {attempt}: {decision}\n\n{lessons.strip()}\n\n".encode())
+        await self.c.git.add(self.c.repo, [rel])
+        await self.c.git.commit(self.c.repo, f"tempo({stem}): {decision}", only=[rel])
+
+    async def _decide(self, stem: str, lessons: str, dispatch: Dispatch, *,
+                      rung: dict[str, str] | None = None) -> dict[str, Any]:
+        """What `runner.drive` did after a failure: harvest, caps, lessons, the terminal, the worktree."""
+        _need(lessons)
+        _, attempt = self._running(stem)
+        failure = self._failure(stem)
+        events = self.c.journal.read()
+        outcome, stage, reason = failure["outcome"], failure["stage"], failure["reason"]
+        if dispatch in ("retry", "escalate") and (cap := spent(self.c.config.caps, events, stem)) is not None:
+            raise Refusal(f"{stem}'s {cap} cap is spent", "park or reject it")
+        if dispatch == "retry" and identical(events, stem, reason):
+            raise Refusal(f"{stem} has failed for {reason!r} {IDENTICAL_K} times running",
+                          "escalate, park, or reject it")
+        sha = await self.c.git.rev_parse(self.c.repo, f"HEAD:{ticket_path(stem)}")
+        if outcome in ("infra_error", "timeout"):
+            consume(self.c.journal, stem, "infra", sha)
+        if outcome == PREMISE and "render_over_bound" not in reason.split(","):
+            consume(self.c.journal, stem, "premise_bounce", sha)
+        consume(self.c.journal, stem, "decisions", sha)
+        try:
+            await harvest(self.ctx, stem, attempt=attempt, stage=stage, terminal=outcome,
+                          findings=[Finding.model_validate(f) for f in failure["findings"]],
+                          wall_seconds=run_wall_seconds(self.ctx, stem))
+        except Exception as exc:  # noqa: BLE001 -- a failed harvest never blocks the decision
+            self.c.journal.append(EventType.SIGNAL, {"signal": "harvest_failed",
+                                                     "error": self.driver.redactor.scrub(f"{type(exc).__name__}: {exc}")},
+                                  ticket=stem)
+        terminal: dict[str, Any] = {"to": outcome, "stage": stage, "reason": reason, "dispatch": dispatch}
+        if rung is not None:
+            terminal["rung"] = rung
+        self.c.journal.append(EventType.STATE_TRANSITION, terminal, ticket=stem)
+        await self._lessons(stem, dispatch, lessons)
+        if self.ctx.worktree(stem).exists():
+            await self.c.git.worktree_remove(self.c.repo, self.ctx.worktree(stem))
+        return {"stem": stem, **terminal}
+
+    async def retry(self, stem: str, lessons: str) -> dict[str, Any]:
+        return await self._decide(stem, lessons, "retry")
+
+    async def escalate(self, stem: str, lessons: str) -> dict[str, Any]:
+        assert self.session is not None
+        ticket, _ = self._running(stem)
+        rung = next_rung(self.c.config, self.session["host"], ticket.frontmatter.agent_tier,
+                         ticket.frontmatter.agent_effort)
+        if rung is None:
+            raise Refusal(f"{stem} is already on {self.session['host']}'s top implement rung", "park or reject it")
+        return await self._decide(stem, lessons, "escalate", rung=rung)
+
+    async def park(self, stem: str, lessons: str) -> dict[str, Any]:
+        return await self._decide(stem, lessons, "park")
+
+    async def reject(self, stem: str, lessons: str) -> dict[str, Any]:
+        last = last_states(self.c.journal.read()).get(stem)
+        if last == "running":
+            await self._decide(stem, lessons, "reject_queue")
+        else:
+            _need(lessons)
+            self._ticket(stem)
+            if last in SETTLED:
+                raise Refusal(f"{stem} is {last}", "leave settled work in place")
+            await self._lessons(stem, "reject", lessons)
+        await reject_ticket(stem, self.c, actor="orchestrator")
+        return {"stem": stem, "to": "rejected"}
+
+    async def reoffer(self, stem: str, lessons: str) -> dict[str, Any]:
+        _need(lessons)
+        self._ticket(stem)
+        events = self.c.journal.read()
+        sha = await self.c.git.rev_parse(self.c.repo, f"HEAD:{ticket_path(stem)}")
+        if not parked(events, stem, sha):
+            raise Refusal(f"{stem} is not parked", "start it, or pick a stem from list_eligible")
+        if (cap := spent(self.c.config.caps, events, stem)) is not None:
+            raise Refusal(f"{stem}'s {cap} cap is spent", "reject it")
+        await self._lessons(stem, "reoffer", lessons)
+        self.c.journal.append(EventType.SIGNAL, {"signal": REOFFERED, "ticket_sha": sha}, ticket=stem)
+        return {"stem": stem, "reoffered": True}
+
+    async def release_hold(self, hold_id: str, lessons: str) -> dict[str, Any]:
+        assert self.session is not None
+        _need(lessons)
+        holds = StormLedger(journal=self.c.journal, clock=self.c.clock).holds()
+        if hold_id not in holds:
+            raise Refusal(f"hold {hold_id!r} is not live", f"release one of {sorted(holds) or 'no holds'}")
+        await self._lessons(holds[hold_id], "release_hold", lessons)
+        self.c.journal.append(EventType.SIGNAL, {
+            "kind": CONTROL_DECISION, "request_id": self.new_id(), "lifecycle_id": self.session["token"],
+            "verb": "resume", "hold_id": hold_id, "decision": "accepted", "reason": "orchestrator release_hold"},
+            ticket=None)
+        return {"hold_id": hold_id, "stem": holds[hold_id], "released": True}
+
+    # --- record ----------------------------------------------------------------------------------
+
+    async def file_box(self, summary: str, message_class: str = "suggestion") -> dict[str, Any]:
+        if message_class not in MESSAGE_CLASSES:
+            raise Refusal(f"message_class {message_class!r} is unknown", f"use one of {', '.join(MESSAGE_CLASSES)}")
+        box = Box(self.state / BOX_DIR, self.c.fs, rereport=RereportJournal(self.c.journal))
+        try:
+            id, created = box.enqueue(message_class=message_class, origin="orchestrator", summary=summary)
+        except BoxError as e:
+            raise Refusal(str(e), "fix the message and file it again") from None
+        return {"id": id, "created": created}
+
+    async def notify(self, message: str) -> dict[str, Any]:
+        await self._notify("orchestrator", message)
+        return {"sent": self.c.config.notify is not None}
