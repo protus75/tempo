@@ -2,42 +2,23 @@
 cases on captured payloads."""
 
 import json
-import subprocess
 from pathlib import Path
 
 import pytest
 
-from tempo import hooks, render
+from tempo import hooks
+from tempo.__main__ import main
 from tempo.config import load_config
 from tempo.seams import LocalFileSystem
 from tests.fixturerepo import STEM, materialize
 from tests.hostfakes import FakeHost, payload
 
 HOSTS = ["claude", "copilot", "codex"]
-COPILOT = """  copilot:
-    models_by_tier: {low: cp-small, medium: cp-small, high: cp-small, max: cp-small}
-    pins: {review: cp-large}
-    quota_window_minutes: 60
-orchestrator:
-  models: {claude: claude-opus-5-5, codex: gpt-6-astra, copilot: cp-large}
-"""
-
-
-def git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
 
 
 @pytest.fixture
 def repo(tmp_path):
-    repo = materialize(tmp_path / "fixture")
-    config = repo / "config.yaml"
-    text = config.read_text()
-    head, _, tail = text.partition("orchestrator:\n  models: {claude: claude-opus-5-5, codex: gpt-6-astra}\n")
-    config.write_text(head + COPILOT + tail)
-    render.write(repo, load_config(None, cwd=repo), LocalFileSystem())
-    git(repo, "add", "-A")
-    git(repo, "commit", "-q", "-m", "copilot")
-    return repo
+    return materialize(tmp_path / "fixture")
 
 
 def open_call(name: str, repo: Path, surface: str) -> tuple[FakeHost, dict]:
@@ -72,6 +53,22 @@ def test_an_unparseable_payload_is_denied(repo, name):
         out, code = hooks.handle(name, data, cwd=repo, clock=FakeHost(name, repo).clock, fs=LocalFileSystem())
         assert code == 2
         assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize("name", HOSTS)
+def test_begin_session_is_allowed_from_a_chat_with_no_session(repo, name):
+    data = payload(name, "PreToolUse", chat="new-chat", cwd=repo, kind="shell", command="tempo tool begin_session '{}'")
+    out, code = hooks.handle(name, data, cwd=repo, clock=FakeHost(name, repo).clock, fs=LocalFileSystem())
+    assert code == 0 and json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+def test_the_hook_command_logs_every_payload_and_its_reply(repo, capsys):
+    assert main(["hook", "claude"], cwd=repo, stdin=b"not json") == 2
+    data = payload("claude", "PreToolUse", chat="plain", cwd=repo, kind="read", path="calc.py")
+    assert main(["hook", "claude"], cwd=repo, stdin=data) == 0
+    log = [json.loads(line) for line in (load_config(None, cwd=repo).state_dir / "engine.log").read_text().splitlines()]
+    assert [(e["event"], e["payload"], e["exit"]) for e in log] == [("hook", "not json", 2), ("hook", data.decode(), 0)]
+    assert json.loads(log[0]["reply"])["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 @pytest.mark.parametrize("name", HOSTS)
@@ -180,6 +177,24 @@ def test_subagent_stop_writes_stop_txt_and_the_reported_model(repo, name):
     stop = json.loads((call_dir / "stop.txt").read_text())
     assert stop["message"] == "usage limit reached"
     assert json.loads((call_dir / "call.json").read_text())["host_reported_model"] == "m-actual"
+
+
+def test_the_spawn_returning_writes_stop_txt_when_no_subagent_stop_came(repo):
+    # Captured on Claude: a subagent that hits its limit sends no SubagentStop.
+    host, prepared, agent = spawned("claude", repo, "review")
+    host.hook("PostToolUse", kind="spawn", target=agent, prompt=prepared["spawn_prompt"])
+    assert json.loads((Path(reply_path(prepared)).parent / "stop.txt").read_text())["message"] == ""
+    assert not (load_config(None, cwd=repo).state_dir / hooks.HOOKS_DIR / hooks.ACTIVE).exists()
+
+
+def test_the_orchestrator_spawns_only_in_the_foreground(repo):
+    host, prepared = open_call("claude", repo, "review")
+    data = payload("claude", "PreToolUse", chat=host.chat, cwd=repo, kind="spawn", target=prepared["agent"],
+                   prompt=prepared["spawn_prompt"])
+    body = json.loads(data)
+    body["tool_input"]["run_in_background"] = True
+    out, _ = hooks.handle("claude", json.dumps(body).encode(), cwd=repo, clock=host.clock, fs=LocalFileSystem())
+    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 def test_begin_session_records_the_chat_from_the_hook(repo):

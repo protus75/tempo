@@ -1,0 +1,22 @@
+{
+  "cwd": "@REPO@",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PreToolUse",
+  "permission_mode": "auto",
+  "prompt_id": "fd911211-0525-4bc6-a0f3-65939f4bc59f",
+  "scratchpad_dir": "/tmp/claude-1000/-home-user-livegate-claude/@CHAT@/scratchpad",
+  "session_id": "@CHAT@",
+  "tool_input": {
+    "content": "hi",
+    "message": "hi",
+    "recipient": "probe",
+    "summary": "hi",
+    "to": "probe",
+    "type": "message"
+  },
+  "tool_name": "SendMessage",
+  "tool_use_id": "toolu_01KaPrhsfc2LTWTyvJhPaaQy",
+  "transcript_path": "@HOME@/.claude/projects/-home-user-livegate-claude/@CHAT@.jsonl"
+}

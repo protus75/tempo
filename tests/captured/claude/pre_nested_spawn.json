@@ -1,0 +1,21 @@
+{
+  "agent_id": "ad92b0997ca053c36",
+  "agent_type": "general-purpose",
+  "cwd": "@REPO@",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PreToolUse",
+  "permission_mode": "auto",
+  "prompt_id": "73c66799-7380-4a5f-b26c-dac40302479a",
+  "scratchpad_dir": "/tmp/claude-1000/-home-user-livegate-claude/@CHAT@/scratchpad",
+  "session_id": "@CHAT@",
+  "tool_input": {
+    "description": "Spawn nested hi agent",
+    "prompt": "hi",
+    "run_in_background": false
+  },
+  "tool_name": "Agent",
+  "tool_use_id": "toolu_016napStNGgVWn9VQfq8JxTK",
+  "transcript_path": "@HOME@/.claude/projects/-home-user-livegate-claude/@CHAT@.jsonl"
+}

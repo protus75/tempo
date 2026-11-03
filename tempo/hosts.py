@@ -6,22 +6,22 @@ payloads and corrects them here. A payload that does not parse is None, and ever
 
 import json
 import re
-import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
 from tempo.hostfiles import CONDUCT_FILES
 
 HOSTS = ("claude", "copilot", "codex")
-EVENTS = {"PreToolUse": "pre_tool", "SubagentStart": "subagent_start", "SubagentStop": "subagent_stop"}
+EVENTS = {"PreToolUse": "pre_tool", "PostToolUse": "post_tool", "SubagentStart": "subagent_start",
+          "SubagentStop": "subagent_stop"}
 
 
 @dataclass(frozen=True)
 class Layout:
     instructions: str
     orchestrator: str
-    start: str | None  # Codex: the P4c live gate confirms where its start command lives
+    start: str  # the /tempo-run command; on Codex a skill, since Codex has no project-level prompts
     agents: str
     agent_suffix: str
     hooks: str
@@ -32,8 +32,8 @@ LAYOUTS = {
                      ".claude/agents", ".md", ".claude/settings.json"),
     "copilot": Layout(CONDUCT_FILES["copilot"], ".github/agents/tempo-orchestrator.agent.md",
                       ".github/prompts/tempo-run.prompt.md", ".github/agents", ".agent.md", ".github/hooks/tempo.json"),
-    "codex": Layout(CONDUCT_FILES["codex"], ".codex/tempo-orchestrator.md", None, ".codex/agents", ".toml",
-                    ".codex/hooks.json"),
+    "codex": Layout(CONDUCT_FILES["codex"], ".codex/tempo-orchestrator.md", ".agents/skills/tempo-run/SKILL.md",
+                    ".codex/agents", ".toml", ".codex/hooks.json"),
 }
 
 
@@ -47,7 +47,7 @@ def hook_config(host: str) -> dict[str, Any]:
     command = {"type": "command", "command": f"tempo hook {host}"}
     if host == "copilot":
         return {"version": 1, "hooks": {event: [command] for event in EVENTS}}
-    return {"hooks": {event: [({"matcher": "*"} if event == "PreToolUse" else {}) | {"hooks": [command]}]
+    return {"hooks": {event: [({"matcher": "*"} if event.endswith("ToolUse") else {}) | {"hooks": [command]}]
                       for event in EVENTS}}
 
 
@@ -62,12 +62,13 @@ class ToolUse:
     command: str | None = None
     agent: str | None = None
     prompt: str | None = None
+    background: bool = False
 
 
 @dataclass(frozen=True)
 class HookEvent:
     host: str
-    event: Literal["pre_tool", "subagent_start", "subagent_stop"]
+    event: Literal["pre_tool", "post_tool", "subagent_start", "subagent_stop"]
     chat: str
     cwd: str
     agent_type: str | None = None  # the calling subagent; None for a top-level chat (always None on Codex)
@@ -84,6 +85,7 @@ class _Tool:
     command: str | None = None
     agent: str | None = None
     prompt: str | None = None
+    background: str | None = None
 
 
 @dataclass(frozen=True)
@@ -97,12 +99,13 @@ class _Fields:
     agent_id: str | None
     message: str
     model: str
+    result: str | None = None  # PostToolUse: the tool's result
 
 
 _SNAKE = _Fields("hook_event_name", "session_id", "cwd", "tool_name", "tool_input", "agent_type", "agent_id",
                  "last_assistant_message", "model")
 FIELDS = {
-    "claude": _SNAKE,
+    "claude": replace(_SNAKE, result="tool_response"),
     "copilot": _Fields("hookEventName", "sessionId", "cwd", "toolName", "toolInput", "agentType", "agentId",
                        "lastAssistantMessage", "model"),
     "codex": _Fields("hook_event_name", "session_id", "cwd", "tool_name", "tool_input", None, None,
@@ -120,11 +123,13 @@ TOOLS: dict[str, dict[str, _Tool]] = {
         "MultiEdit": _Tool("write", ("file_path",)),
         "NotebookEdit": _Tool("write", ("notebook_path",)),
         "Bash": _Tool("shell", command="command"),
-        "Task": _Tool("spawn", agent="subagent_type", prompt="prompt"),
-        "Agent": _Tool("spawn", agent="subagent_type", prompt="prompt"),
+        "Task": _Tool("spawn", agent="subagent_type", prompt="prompt", background="run_in_background"),
+        "Agent": _Tool("spawn", agent="subagent_type", prompt="prompt", background="run_in_background"),
         "SendMessage": _Tool("message"),
         "TaskStop": _Tool("stop"),
         "TodoWrite": _Tool("noop"),
+        "ToolSearch": _Tool("noop"),  # loads deferred tool schemas, TaskStop among them
+        "SubagentHandback": _Tool("noop"),  # a subagent's final report to its chat
     },
     "copilot": {
         "read_file": _Tool("read", ("filePath",)),
@@ -139,14 +144,13 @@ TOOLS: dict[str, dict[str, _Tool]] = {
         "manage_todo_list": _Tool("noop"),
     },
     "codex": {
-        "shell": _Tool("shell", command="command"),
-        "exec_command": _Tool("shell", command="cmd"),
+        "Bash": _Tool("shell", command="command"),
         "apply_patch": _Tool("write"),
         "read_file": _Tool("read", ("path",)),
         "list_dir": _Tool("search", ("dir_path",)),
         "grep_files": _Tool("search", ("path",)),
-        "spawn_agent": _Tool("spawn", agent="agent_type", prompt="message"),
-        "send_input": _Tool("message"),
+        "collaborationspawn_agent": _Tool("spawn", agent="agent_type", prompt="message"),
+        "collaborationsend_message": _Tool("message"),
         "resume_agent": _Tool("message"),
         "wait": _Tool("wait"),
         "close_agent": _Tool("stop"),
@@ -159,17 +163,6 @@ _PATCH_PATH = re.compile(r"^\*\*\* (?:Add File|Update File|Delete File|Move to):
 
 def _str(value: Any) -> str | None:
     return value if isinstance(value, str) else None
-
-
-def _command(value: Any) -> str | None:
-    """A shell command as one string; Codex's `[bash, -lc, <script>]` unwraps to the script."""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list) and value and all(isinstance(v, str) for v in value):
-        if len(value) == 3 and value[0] in ("bash", "sh", "zsh") and value[1] in ("-lc", "-c"):
-            return value[2]
-        return shlex.join(value)
-    return None
 
 
 def _tool(host: str, name: str, args: Any) -> ToolUse | None:
@@ -185,19 +178,30 @@ def _tool(host: str, name: str, args: Any) -> ToolUse | None:
                 return None
             paths.append(path)
     if host == "codex" and name == "apply_patch":
-        patch = _str(args.get("input", args.get("patch")))
+        patch = _str(args.get("command"))
         if patch is None or not (found := _PATCH_PATH.findall(patch)):
             return None
         paths = [p.strip() for p in found]
     command = None
-    if spec.command is not None and (command := _command(args.get(spec.command))) is None:
+    if spec.command is not None and (command := _str(args.get(spec.command))) is None:
         return None
     agent = prompt = None
-    if spec.kind == "spawn":
-        agent, prompt = _str(args.get(spec.agent)), _str(args.get(spec.prompt))
-        if agent is None or prompt is None:
+    if spec.kind == "spawn":  # no agent named spawns the host's default agent
+        agent, prompt = args.get(spec.agent), _str(args.get(spec.prompt))
+        if prompt is None or (agent is not None and not isinstance(agent, str)):
             return None
-    return ToolUse(kind=spec.kind, name=name, paths=tuple(paths), command=command, agent=agent, prompt=prompt)
+    background = spec.background is not None and args.get(spec.background) is True
+    return ToolUse(kind=spec.kind, name=name, paths=tuple(paths), command=command, agent=agent, prompt=prompt,
+                   background=background)
+
+
+def _result(value: Any) -> tuple[str, str | None]:
+    """A spawn's result as (its text, the model that ran it); Claude's is `{content: [{type, text}],
+    resolvedModel}`."""
+    if not isinstance(value, dict) or not isinstance(content := value.get("content"), list):
+        return "", None
+    text = "".join(b["text"] for b in content if isinstance(b, dict) and isinstance(b.get("text"), str))
+    return text, _str(value.get("resolvedModel"))
 
 
 def parse(host: str, data: bytes) -> HookEvent | None:
@@ -218,12 +222,15 @@ def parse(host: str, data: bytes) -> HookEvent | None:
     agent_type = _str(payload.get(f.agent_type)) if f.agent_type else None
     agent_id = _str(payload.get(f.agent_id)) if f.agent_id else None
     tool = None
-    if event == "pre_tool":
+    if event in ("pre_tool", "post_tool"):
         name = _str(payload.get(f.tool_name))
         if not name or (tool := _tool(host, name, payload.get(f.tool_input, {}))) is None:
             return None
+    message, model = _str(payload.get(f.message)) or "", _str(payload.get(f.model))
+    if event == "post_tool" and f.result is not None:
+        message, model = _result(payload.get(f.result))
     return HookEvent(host=host, event=event, chat=chat, cwd=cwd, agent_type=agent_type, agent_id=agent_id,
-                     tool=tool, message=_str(payload.get(f.message)) or "", model=_str(payload.get(f.model)))
+                     tool=tool, message=message, model=model)
 
 
 def reply(allow: bool | None, reason: str) -> str:

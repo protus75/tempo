@@ -66,11 +66,12 @@ def files(config: Config | ConfigSnapshot) -> dict[str, str]:
         rules = _rule("orchestrator.md")
         out[layout.orchestrator] = _front({"name": ORCHESTRATOR, "description": "Runs tempo tickets.",
                                            "model": model}) + rules
-        if layout.start is not None:
-            start = {"description": "Run tempo in this chat.", "model": model}
-            if host == "copilot":
-                start["agent"] = ORCHESTRATOR
-            out[layout.start] = _front(start) + _rule("tempo-run.md", rules=layout.orchestrator)
+        start = {"description": "Run tempo in this chat.", "model": model}
+        if host == "copilot":
+            start["agent"] = ORCHESTRATOR
+        if host == "codex":
+            start = {"name": "tempo-run", "description": start["description"]}  # a skill names no model
+        out[layout.start] = _front(start) + _rule("tempo-run.md", rules=layout.orchestrator)
         for surface in SURFACES:
             for tier in LEVELS:
                 for effort in (LEVELS if host == "codex" else ("medium",)):
@@ -101,7 +102,7 @@ def _stale(repo: Path, expected: dict[str, bytes]) -> list[str]:
         agents = repo / layout.agents
         if agents.is_dir():
             found |= {p.relative_to(repo).as_posix() for p in agents.glob(f"tempo-*{layout.agent_suffix}")}
-        found |= {rel for rel in (layout.orchestrator, layout.start) if rel and (repo / rel).is_file()}
+        found |= {rel for rel in (layout.orchestrator, layout.start) if (repo / rel).is_file()}
     return sorted(found - set(expected))
 
 

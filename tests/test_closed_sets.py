@@ -51,13 +51,14 @@ def test_box_closed_sets_and_constants():
     assert set(get_args_deep(box.MessageClass)) == {'bug_report', 'failure_report', 'override_report', 'retro_finding', 'suggestion'}
 
 def test_call_closed_sets_and_constants():
-    assert call.READ_PART_CHARS == 50_000
+    assert call.READ_PART_CHARS == 20_000
     assert call.RETRO_STUCK_S == 5400.0
-    assert call.SIDE_STATE == ('session.json', 'hooks', 'jobs')
+    assert call.SIDE_STATE == ('session.json', 'hooks', 'jobs', 'engine.log', 'engine.log.1', 'engine.log.2',
+                               'engine.log.3')
     assert call.CALL_CLOSED == 'subagent_call_closed'
     assert call.OWN_FILES == ('output.txt', 'stop.txt', 'call.json')
     assert call.SURFACES == ('implement', 'review', 'requisition_review', 'triage', 'author', 'retro')
-    assert call.CODEX_EFFORT == {'low': 'low', 'medium': 'medium', 'high': 'high', 'max': 'xhigh'}
+    assert call.CODEX_EFFORT == {'low': 'low', 'medium': 'medium', 'high': 'high', 'max': 'max'}
     assert call.AUTH_MARKERS == ('invalid api key', 'please run /login', 'not logged in', 'oauth token has expired', '401 unauthorized', 'token has expired')
     assert call.DROUGHT == frozenset({'quota_exhausted', 'rate_limited', 'outage'})
     assert set(get_args_deep(config.Surface)) == set(call.SURFACES)
@@ -66,13 +67,13 @@ def test_call_closed_sets_and_constants():
 def test_session_and_tool_constants():
     assert lockfile.LOCK_STALE_S == 900.0
     assert lockfile.SESSION_FILE == 'session.json'
-    assert tools.TOOL_CALL_S == 60.0
+    assert tools.TOOL_CALL_S == 90.0
     assert tools.FLOW_SURFACES == ('requisition_review', 'implement', 'review')
     assert tuple(tools.TOOLS) == ('begin_session', 'status', 'list_eligible', 'read_ticket', 'read_attempts', 'read_box', 'start', 'prepare', 'submit', 'check', 'merge', 'job', 'write_handoff')
     assert jobs.KINDS == ('check', 'merge', 'submit')
     assert jobs.FINISHED == frozenset({'done', 'lost'})
     assert hosts.HOSTS == ('claude', 'copilot', 'codex')
-    assert set(hosts.EVENTS) == {'PreToolUse', 'SubagentStart', 'SubagentStop'}
+    assert set(hosts.EVENTS) == {'PreToolUse', 'PostToolUse', 'SubagentStart', 'SubagentStop'}
     assert hooks.READ_COMMANDS == frozenset({'cat', 'sed', 'head', 'tail', 'rg', 'grep'})
     assert hooks.DENIED_BINARIES == frozenset({'git', 'gh', 'tempo', 'claude', 'codex', 'copilot', 'gemini', 'aider', 'cursor-agent', 'opencode', 'amp'})
 

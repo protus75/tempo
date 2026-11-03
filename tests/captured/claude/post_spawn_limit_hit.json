@@ -1,0 +1,83 @@
+{
+  "cwd": "@REPO@",
+  "duration_ms": 1778,
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PostToolUse",
+  "permission_mode": "default",
+  "prompt_id": "11dd9d3f-61b3-4f20-9ee3-b2fcde9187ae",
+  "scratchpad_dir": "/tmp/claude-1000/-home-user-livegate-claude5/@CHAT@/scratchpad",
+  "session_id": "@CHAT@",
+  "tool_input": {
+    "description": "Run probe-limit agent",
+    "prompt": "go",
+    "run_in_background": false,
+    "subagent_type": "probe-limit"
+  },
+  "tool_name": "Agent",
+  "tool_response": {
+    "agentId": "ac03a88381ffcfd72",
+    "agentType": "probe-limit",
+    "content": [
+      {
+        "text": "NOTE: this agent stopped at its 1-turn limit before finishing. It was still calling tools and had produced no report. Send the agent a message (SendMessage) to let it continue from where it stopped.\n",
+        "type": "text"
+      }
+    ],
+    "harnessNoteCount": 1,
+    "harnessSectionHash": "8707d9d2f7c6cbbb",
+    "harnessTailCount": 0,
+    "prompt": "go",
+    "resolvedModel": "claude-opus-5-5",
+    "status": "completed",
+    "toolStats": {
+      "bashCount": 0,
+      "editFileCount": 0,
+      "linesAdded": 0,
+      "linesRemoved": 0,
+      "otherToolCount": 0,
+      "readCount": 1,
+      "searchCount": 0
+    },
+    "totalDurationMs": 1776,
+    "totalTokens": 28899,
+    "totalToolUseCount": 1,
+    "usage": {
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 0,
+        "ephemeral_5m_input_tokens": 28768
+      },
+      "cache_creation_input_tokens": 28768,
+      "cache_read_input_tokens": 0,
+      "fallback_credit": null,
+      "inference_geo": "global",
+      "input_tokens": 2,
+      "iterations": [
+        {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 28768
+          },
+          "cache_creation_input_tokens": 28768,
+          "cache_read_input_tokens": 0,
+          "input_tokens": 2,
+          "output_tokens": 129,
+          "type": "message"
+        }
+      ],
+      "output_tokens": 129,
+      "output_tokens_details": {
+        "thinking_tokens": 63
+      },
+      "server_tool_use": {
+        "web_fetch_requests": 0,
+        "web_search_requests": 0
+      },
+      "service_tier": "standard",
+      "speed": "standard"
+    }
+  },
+  "tool_use_id": "toolu_01MvLLetvLVpWKL9nmnZcjDG",
+  "transcript_path": "@HOME@/.claude/projects/-home-user-livegate-claude5/@CHAT@.jsonl"
+}

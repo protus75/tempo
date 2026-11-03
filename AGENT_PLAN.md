@@ -262,6 +262,11 @@ comes in P5 with the decide rules that trigger them.
 Its final chat message is never acted on. The `SubagentStop` hook saves it to `call-NN/stop.txt`, for
 failure classification only.
 
+On Claude (P4c live gate), a subagent that hits a limit sends no `SubagentStop`, and one that ends with
+`SubagentHandback` sends no message. So the orchestrator's `PostToolUse` hook on the spawn tool also
+writes `stop.txt`, from the spawn's result text. The orchestrator spawns in the foreground only, so that
+result is the subagent's end, not a launch notice.
+
 **`submit(call)`** is a tool. It refuses a call that `prepare` did not issue. Otherwise it decides the
 outcome from the first matching row:
 
@@ -739,7 +744,7 @@ does, and `prepare` renders it per call.
 |---|---|---|---|
 | Instructions | `CLAUDE.md` | `.github/copilot-instructions.md` | `AGENTS.md` |
 | Orchestrator rules | `.claude/agents/tempo-orchestrator.md` | `.github/agents/tempo-orchestrator.agent.md` | `.codex/tempo-orchestrator.md` |
-| Start command in the VS Code chat (§4.6) | `.claude/commands/tempo-run.md` | `.github/prompts/tempo-run.prompt.md` | location confirmed in the P4 live gate |
+| Start command in the VS Code chat (§4.6) | `.claude/commands/tempo-run.md` | `.github/prompts/tempo-run.prompt.md` | `.agents/skills/tempo-run/SKILL.md` (a skill; Codex has no project prompts) |
 | Surface agents (generated, §4.4.2) | `.claude/agents/tempo-<surface>-<model>.md` | `.github/agents/tempo-<surface>-<model>.agent.md` | `.codex/agents/tempo-<surface>-<model>-<effort>.toml` |
 | Hooks | `.claude/settings.json` | `.github/hooks/tempo.json` | `.codex/hooks.json` |
 | Caller identity | `agent_id`/`agent_type` | `parentAgentId`/`agentType` | markers, 1 thread |
@@ -804,6 +809,9 @@ tempo-orchestrator rules instead, and every tempo-* subagent skips this block.
 - **Git safety.** Commit only files you authored, by explicit path. Never use a tree-wide
   destructive verb (`clean`, `reset --hard`, `checkout -- .`). Never push unless told to.
 - **Terse.** Answer first. No hedging, filler, or restating the question.
+- **No guessing on code or tools.** Never state a setting, menu, command, flag, field, file path, API, or
+  model name you have not read or captured. If you do not know it, say so and ask the user what their
+  screen shows, or look it up first. Why: a wrong name costs the user a round trip and their trust.
 <!-- tempo:session end -->
 ```
 
@@ -1045,6 +1053,9 @@ gate:
     run `tempo` (`uv tool install --editable <tempo checkout>`). P6 adds the shared-data files.
 - **(e)** Host fakes and a minimal fixture repo.
 - **(f) Live gate**, in the VS Code extension of each of Claude Code, Copilot, and Codex:
+  - before the gate, the hook file layouts are corrected from each host's docs, so the hooks load at all.
+    `tempo hook` writes every raw payload and its reply, redacted, to the engine log; the captures come
+    from there.
   - `/tempo-run` starts the orchestrator in the chat panel and `begin_session` records the chat's
     `session_id`; hooks fence that chat and leave a second, plain chat alone
   - capture hook payloads for a subagent spawn, a read, a write, a shell command, a nested spawn, an
@@ -1056,8 +1067,8 @@ gate:
   - confirm the limit markers in `stop.txt`, the host's subagent stop tool,
     and that subagents spawned from the chat panel get the generated agent files and model
   - also capture: `SubagentStart` and `SubagentStop` payloads, a forced subagent limit hit, one round
-    trip with a prompt at `RENDER_BOUND_CHARS`, the extension's permission settings for
-    a run with no prompts to the user, and what each host does when a hook crashes or times out
+    trip with a prompt at `RENDER_BOUND_CHARS`, that a run on the extension's default approval
+    settings asks the user nothing (tempo's hook `allow` replies stand in for the prompts), and what each host does when a hook crashes or times out
 
 **Exit:**
 - Per-host hook tests on the captured payloads cover:
@@ -1076,7 +1087,8 @@ gate:
 - Constant pins.
 - A live-gate report per host, in `docs/livegate/<host>.md`.
   - A host passes only if all of these are confirmed: the six hook cases, the implement confinement
-    cases, the round trip, the limit markers, and the subagent stop tool.
+    cases, the round trip, the limit markers, the subagent stop tool, and a run with no prompts on default
+    approvals.
   - **A host that fails the gate is dropped from the defaults until it is fixed.**
   - R5 is met for the hosts that pass. A failed host is reported as
     an open gap; it does not block the others.
@@ -1153,6 +1165,9 @@ the live gate.
 - **Implement's shell is not sandboxed.** Hooks confine its working directory and deny git and agent
   CLIs, and the `submit` snapshot catches writes in the repo and `.tempo/`. Writes elsewhere on the
   machine are not caught, as with chupa's implement child.
+- **A hook that times out or cannot start lets the tool call through.** The P4c live gate showed this on
+  Claude, even with `onFailure: block` set. `tempo hook` itself denies on any fault it catches. The
+  backstop for the rest is `submit`'s snapshot, which refuses a stray write in the repo or `.tempo/`.
 - **P1's failure count is unknown until run.** 37 of the 80 carried test files read chupa's plan text, and 2 import helpers from uncarried evidence tests.
 - **The orchestrator's decisions meet a real model only in P7**, through the retry and escalate runs.
   Nothing measures them before then.

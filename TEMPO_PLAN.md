@@ -724,8 +724,8 @@ Open experiments and undecided seams, each with the evidence that would close it
 
 Entries are added by P4 (AGENT_PLAN.md). A changed value needs an entry here in the same commit and its pin in `tests/test_closed_sets.py`.
 
-- `READ_PART_CHARS` (tempo/call.py) = 50,000: the largest prompt part a subagent reads in one file. A placeholder until the P4c live gate sets it to the smallest whole-file Read size among the hosts that pass.
-- `CODEX_EFFORT` (tempo/call.py) = low, medium, high map to themselves; max maps to `xhigh`. A placeholder until the P4c live gate confirms Codex's highest level.
+- `READ_PART_CHARS` (tempo/call.py) = 20,000: the largest prompt part a subagent reads in one file. Claude, the one host that passed the P4c live gate, returned at most 21,249 characters of a one-line file in a whole-file Read (its 25,000-token cap), so a part fits even at one token per character.
+- `CODEX_EFFORT` (tempo/call.py) = low, medium, high, and max map to themselves. P4c read Codex's model list: `max` is the highest level every model offers (`gpt-6-luna` has no `ultra`).
 - `RETRO_STUCK_S` (tempo/call.py) = 5400.0: the retro call deadline, chupa's `call_timeout` default.
-- `TOOL_CALL_S` (tempo/tools.py) = 60.0: no tool call blocks longer than this. A placeholder until the P4c live gate sets it below the shortest host shell-command timeout.
-- `LOCK_STALE_S` (tempo/lockfile.py) = 900.0: `begin_session` takes over a session whose heartbeat is older than this. A placeholder until P4c sets it to several times `TOOL_CALL_S`.
+- `TOOL_CALL_S` (tempo/tools.py) = 90.0: no tool call blocks longer than this. The P4c live gate measured Claude's shell-command timeout at 120 s (a longer command moves to the background); 30 s is the margin.
+- `LOCK_STALE_S` (tempo/lockfile.py) = 900.0: `begin_session` takes over a session whose heartbeat is older than this; ten times `TOOL_CALL_S`.

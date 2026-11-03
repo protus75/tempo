@@ -10,8 +10,12 @@ hosts:
     models_by_tier: {low: gpt-6-luna, medium: gpt-6.1-sol, high: gpt-6.1-sol, max: gpt-6.1-sol}
     pins: {review: gpt-6-astra}
     quota_window_minutes: 60
+  copilot:
+    models_by_tier: {low: claude-sonnet-5-5, medium: claude-sonnet-5-5, high: claude-sonnet-5-5, max: claude-sonnet-5-5}
+    pins: {review: claude-opus-5-5}
+    quota_window_minutes: 60
 orchestrator:
-  models: {claude: claude-opus-5-5, codex: gpt-6-astra}
+  models: {claude: claude-opus-5-5, codex: gpt-6-astra, copilot: gpt-6-astra}
   session:
     max_tickets: 5
     max_minutes: 240

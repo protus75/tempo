@@ -27,7 +27,7 @@ def test_caller_identity_per_host():
         assert event.agent_type == agent  # Codex names no caller: tempo uses markers there
 
 
-def test_codex_shell_and_patch_unwrap():
+def test_codex_shell_and_patch():
     shell = hosts.parse("codex", payload("codex", "PreToolUse", chat="c", cwd="/r", kind="shell", command="cat a"))
     assert shell.tool.command == "cat a"
     patch = hosts.parse("codex", payload("codex", "PreToolUse", chat="c", cwd="/r", kind="write", path="/r/out.txt"))
@@ -44,6 +44,14 @@ def test_malformed_payloads_do_not_parse(name):
     assert hosts.parse(name, b"\xff") is None
 
 
+def test_a_spawn_naming_no_agent_parses_as_the_default_agent():
+    # Captured on Claude: a nested spawn from a plain chat's subagent omits subagent_type.
+    data = {"hook_event_name": "PreToolUse", "session_id": "c", "cwd": "/r", "agent_type": "general-purpose",
+            "agent_id": "a1", "tool_name": "Agent", "tool_input": {"description": "d", "prompt": "hi"}}
+    event = hosts.parse("claude", json.dumps(data).encode())
+    assert event.tool.kind == "spawn" and event.tool.agent is None and event.tool.prompt == "hi"
+
+
 def test_an_unknown_tool_is_kind_other():
     event = hosts.parse("claude", json.dumps({"hook_event_name": "PreToolUse", "session_id": "c", "cwd": "/r",
                                               "tool_name": "WebFetch", "tool_input": {}}).encode())
@@ -57,3 +65,5 @@ def test_reply_and_hook_files():
     assert set(claude) == set(hosts.EVENTS)
     assert claude["PreToolUse"][0] == {"matcher": "*", "hooks": [{"type": "command", "command": "tempo hook claude"}]}
     assert hosts.hook_config("copilot")["version"] == 1
+    assert hosts.hook_config("codex")["hooks"]["PreToolUse"][0]["hooks"] == [{"type": "command",
+                                                                             "command": "tempo hook codex"}]

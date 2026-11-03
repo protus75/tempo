@@ -48,3 +48,6 @@ touches both files.
 - **Git safety.** Commit only files you authored, by explicit path. Never use a tree-wide destructive
   verb (`clean`, `reset --hard`, `checkout -- .`). Never push unless told to.
 - **Terse.** Answer first. No hedging, filler, or restating the question.
+- **No guessing on code or tools.** Never state a setting, menu, command, flag, field, file path, API, or
+  model name you have not read or captured. If you do not know it, say so and ask the user what their
+  screen shows, or look it up first. Why: a wrong name costs the user a round trip and their trust.

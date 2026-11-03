@@ -1,0 +1,83 @@
+{
+  "cwd": "@REPO@",
+  "duration_ms": 7229,
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PostToolUse",
+  "permission_mode": "default",
+  "prompt_id": "486a0f65-adbd-400b-bfbb-5c9a9b39a1fc",
+  "scratchpad_dir": "/tmp/claude-1000/-home-user-livegate-claude5/@CHAT@/scratchpad",
+  "session_id": "@CHAT@",
+  "tool_input": {
+    "description": "tempo review",
+    "prompt": "call: acc7156588b2991bea29217be8e15fd3\npart: @REPO@/.tempo/state/spools/add-subtract/0/review/call-01/prompt-01.md\nreply: @REPO@/.tempo/state/spools/add-subtract/0/review/call-01/output.txt",
+    "run_in_background": false,
+    "subagent_type": "tempo-review-claude-opus-5-5"
+  },
+  "tool_name": "Agent",
+  "tool_response": {
+    "agentId": "ad2d7a861ddc5f62d",
+    "agentType": "tempo-review-claude-opus-5-5",
+    "content": [
+      {
+        "text": "I approved the diff and wrote the verdict, with no findings, to @REPO@/.tempo/state/spools/add-subtract/0/review/call-01/output.txt. I didn't run the verification command, since this review is read-only and those checks run elsewhere.\n\n- **Correctness:** `subtract(a, b)` in `calc.py` returns `a - b`, which is right.\n- **Acceptance:** `test_calc.py` asserts `subtract(5, 3) == 2`, which is what the one acceptance criterion asks for.\n- **Scope:** Only `calc.py` and `test_calc.py` changed. Both are in the scope fence, and nothing outside the standard library is used.\n\nThe new `from calc import subtract` line sits in the middle of `test_calc.py` rather than at the top with the other import. That's style only, so I didn't count it against the diff.",
+        "type": "text"
+      }
+    ],
+    "harnessNoteCount": 0,
+    "harnessSectionHash": "f289baf2f054f405",
+    "harnessTailCount": 0,
+    "prompt": "call: acc7156588b2991bea29217be8e15fd3\npart: @REPO@/.tempo/state/spools/add-subtract/0/review/call-01/prompt-01.md\nreply: @REPO@/.tempo/state/spools/add-subtract/0/review/call-01/output.txt",
+    "resolvedModel": "claude-opus-5-5",
+    "status": "completed",
+    "toolStats": {
+      "bashCount": 0,
+      "editFileCount": 1,
+      "linesAdded": 2,
+      "linesRemoved": 0,
+      "otherToolCount": 0,
+      "readCount": 1,
+      "searchCount": 0
+    },
+    "totalDurationMs": 7229,
+    "totalTokens": 10270,
+    "totalToolUseCount": 2,
+    "usage": {
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 0,
+        "ephemeral_5m_input_tokens": 296
+      },
+      "cache_creation_input_tokens": 296,
+      "cache_read_input_tokens": 9681,
+      "fallback_credit": null,
+      "inference_geo": "global",
+      "input_tokens": 2,
+      "iterations": [
+        {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 296
+          },
+          "cache_creation_input_tokens": 296,
+          "cache_read_input_tokens": 9681,
+          "input_tokens": 2,
+          "output_tokens": 291,
+          "type": "message"
+        }
+      ],
+      "output_tokens": 291,
+      "output_tokens_details": {
+        "thinking_tokens": 0
+      },
+      "server_tool_use": {
+        "web_fetch_requests": 0,
+        "web_search_requests": 0
+      },
+      "service_tier": "standard",
+      "speed": "standard"
+    }
+  },
+  "tool_use_id": "toolu_013fhEtKKRuSzdsxSMTJzsYM",
+  "transcript_path": "@HOME@/.claude/projects/-home-user-livegate-claude5/@CHAT@.jsonl"
+}

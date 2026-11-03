@@ -1,0 +1,19 @@
+{
+  "agent_id": "ab3ad247085ac9614",
+  "agent_type": "tempo-requisition_review-claude-sonnet-5-5",
+  "cwd": "@REPO@",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PreToolUse",
+  "permission_mode": "auto",
+  "prompt_id": "596bd8e0-0c62-47bf-b4c9-978905748ea6",
+  "scratchpad_dir": "/tmp/claude-1000/-home-user-livegate-claude/@CHAT@/scratchpad",
+  "session_id": "@CHAT@",
+  "tool_input": {
+    "message": "Approved. Reply written to @REPO@/.tempo/state/spools/add-subtract/0/requisition_review/call-01/output.txt"
+  },
+  "tool_name": "SubagentHandback",
+  "tool_use_id": "toolu_016ciQwU3TazbkEfPKhYCR8x",
+  "transcript_path": "@HOME@/.claude/projects/-home-user-livegate-claude/@CHAT@.jsonl"
+}

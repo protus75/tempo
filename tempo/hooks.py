@@ -266,6 +266,8 @@ def _orchestrator(event: HookEvent, state: HookState) -> Decision:
             return _deny(f"spawn {call['agent']}, the agent prepare named, not {tool.agent}")
         if (tool.prompt or "").strip() != call["spawn_prompt"]:
             return _deny("the spawn prompt must be exactly the spawn_prompt that prepare returned")
+        if tool.background:
+            return _deny("spawn in the foreground and wait for the subagent to finish")
         return ALLOW
     return _deny(f"the orchestrator may not use {tool.name}; every action is a tempo tool")
 
@@ -318,20 +320,26 @@ def handle(host: str, data: bytes, *, cwd: Path, clock: Clock, fs: FileSystem,
         return reply(None, ""), 0
     state, hooks = load(repo, clock, fs)
     tool = event.tool
-    if (event.event == "pre_tool" and tool is not None and tool.kind == "shell" and event.agent_type is None
-            and (argv := tempo_tool(tool.command or "")) is not None and argv[2] == "begin_session"
-            and _role(event, state) in (None, "orchestrator")):
+    # begin_session is allowed here, not left to the host's prompt: the tool refuses a held session itself.
+    claim = (event.event == "pre_tool" and tool is not None and tool.kind == "shell" and event.agent_type is None
+             and (argv := tempo_tool(tool.command or "")) is not None and argv[2] == "begin_session"
+             and _role(event, state) in (None, "orchestrator"))
+    if claim:
         _write(fs, hooks / CLAIM, {"host": host, "chat": event.chat, "at": render_ts(clock())})
     call = state.call
     subagent = event.agent_type is not None and event.agent_type.startswith("tempo-")
     if event.event == "subagent_start" and call is not None and (subagent or host == "codex"):
         _write(fs, hooks / ACTIVE, {"host": host, "agent_id": event.agent_id, "call_id": call["call_id"]})
-    if event.event == "subagent_stop" and call is not None and (subagent or state.active is not None):
+    stopped = event.event == "subagent_stop" and (subagent or state.active is not None)
+    # The spawn returning is the subagent's end; on Claude no SubagentStop follows a limit hit.
+    returned = (event.event == "post_tool" and tool is not None and tool.kind == "spawn"
+                and _role(event, state) == "orchestrator")
+    if call is not None and (stopped or returned):
         call_dir = Path(call["reply"]).parent
         _write(fs, call_dir / "stop.txt", {"stopped_at": render_ts(clock()), "message": event.message})
         if event.model is not None:
             record = json.loads((call_dir / "call.json").read_text())
             _write(fs, call_dir / "call.json", {**record, "host_reported_model": event.model})
         (hooks / ACTIVE).unlink(missing_ok=True)
-    allow, reason = decide(event, state)
+    allow, reason = ALLOW if claim else decide(event, state)
     return reply(allow, reason), 0

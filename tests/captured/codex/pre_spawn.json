@@ -1,0 +1,16 @@
+{
+  "cwd": "@REPO@",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-5.6-sol",
+  "permission_mode": "default",
+  "session_id": "@CHAT@",
+  "tool_input": {
+    "fork_turns": "none",
+    "message": "gAAAAABq6VUomDyiZxvvZtwbFNg4L-mt96-WRBoGd0HikAS5p3UIhgAozmiFtkz1ZXwvj0L8BsMY9b_uNtTILl-4J5uEJHUf_fcCc6BYUZI1ONtkSrbwZZk=",
+    "task_name": "probe"
+  },
+  "tool_name": "collaborationspawn_agent",
+  "tool_use_id": "call_2f840a3c507a49b49d40747d8b7566d9",
+  "transcript_path": "@HOME@/.codex/sessions/2026/11/02/rollout-2026-11-02T22-29-31-@CHAT@.jsonl",
+  "turn_id": "01a19f74-7819-7ef2-9d42-1dbe2c50f2b7"
+}

@@ -55,7 +55,7 @@ def test_host_contract_example_loads(tmp_path):
     assert cfg.schema_version == 1
     assert cfg.state_dir == tmp_path / ".tempo"
     assert cfg.worktree_root == cfg.state_dir / "worktrees"
-    assert cfg.hosts["codex"].pins == {"review": "host-review-model"}
+    assert cfg.hosts["claude"].pins == {"review": "host-review-model"}
     assert cfg.review.mechanical[0].argv == ["uv", "run", "pytest", "-q"]
     assert cfg.review.mechanical[1].trigger == ["src/"]
     assert cfg.review.surfaces[0].rules_doc == Path("docs/review.md")
@@ -98,8 +98,8 @@ def test_host_contract_schema_coverage(tmp_path):
     for key, value in (("unknown", 1),):
         with pytest.raises(config.ConfigError):
             load(tmp_path, {**raw, key: value})
-    for change in (lambda r: r["hosts"]["codex"]["pins"].pop("review"),
-                   lambda r: r["orchestrator"]["models"].update(claude="x"),
+    for change in (lambda r: r["hosts"]["claude"]["pins"].pop("review"),
+                   lambda r: r["orchestrator"]["models"].update(codex="x"),
                    lambda r: r["merge"]["strategies"][1].update(argv=["x"]),
                    lambda r: r["review"]["mechanical"][0].update(severity="warn")):
         candidate = copy.deepcopy(raw)
@@ -111,7 +111,7 @@ def test_host_contract_schema_coverage(tmp_path):
     assert cfg.worktree_root == tmp_path / "work" and cfg.report_inbox == tmp_path / "inbox"
     assert cfg.context_files == [Path("docs/a.md")]
     assert cfg.box_policy == {**config.BOX_POLICY_DEFAULTS, "failure_report": "draft"}
-    assert cfg.hosts["codex"].quota_window_minutes == 60
+    assert cfg.hosts["claude"].quota_window_minutes == 60
     assert cfg.notify is None
     assert load(tmp_path, {**raw, "state_dir": str(tmp_path / "absolute")}).state_dir == tmp_path / "absolute"
     mentions("Every explicit null", "never reviews its own work",
@@ -155,10 +155,10 @@ def test_host_contract_migration_and_managed_ownership(tmp_path):
         with pytest.raises(hostfiles.MarkerCorruption):
             hostfiles.render(corrupt)
     cfg = load(tmp_path)
-    assert hostfiles.conduct_paths(cfg, tmp_path) == (tmp_path / "AGENTS.md",)
-    cfg.hosts = {"claude": cfg.hosts["codex"], "copilot": cfg.hosts["codex"]}
+    assert hostfiles.conduct_paths(cfg, tmp_path) == (tmp_path / "CLAUDE.md",)
+    cfg.hosts = {"codex": cfg.hosts["claude"], "copilot": cfg.hosts["claude"]}
     assert hostfiles.conduct_paths(cfg, tmp_path) == (
-        tmp_path / "CLAUDE.md", tmp_path / ".github/copilot-instructions.md")
+        tmp_path / "AGENTS.md", tmp_path / ".github/copilot-instructions.md")
     assert "tempo core" in hostfiles.classify_core(None).paved_road
     inventory(tickets.Frontmatter, yaml.safe_load(block("ticket-fields")))
     mentions("additive-only", "no frontmatter schema migration mechanism", "validates the full candidate", "original bytes",

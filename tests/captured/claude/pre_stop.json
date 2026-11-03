@@ -1,0 +1,17 @@
+{
+  "cwd": "@REPO@",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PreToolUse",
+  "permission_mode": "auto",
+  "prompt_id": "73c66799-7380-4a5f-b26c-dac40302479a",
+  "scratchpad_dir": "/tmp/claude-1000/-home-user-livegate-claude/@CHAT@/scratchpad",
+  "session_id": "@CHAT@",
+  "tool_input": {
+    "task_id": "a50faac6c2e4c3b2d"
+  },
+  "tool_name": "TaskStop",
+  "tool_use_id": "toolu_01FtEJePZGyu6qzZcTANhQEp",
+  "transcript_path": "@HOME@/.claude/projects/-home-user-livegate-claude/@CHAT@.jsonl"
+}

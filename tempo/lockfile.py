@@ -21,7 +21,7 @@ from tempo.checkout import Refusal
 from tempo.journal import render_ts
 from tempo.seams import Clock, FileSystem
 
-# Contract constant (TEMPO_PLAN.md section 22). A placeholder until P4c sets it to several times TOOL_CALL_S.
+# Contract constant (TEMPO_PLAN.md section 22): ten times TOOL_CALL_S.
 LOCK_STALE_S = 900.0
 SESSION_FILE = "session.json"
 

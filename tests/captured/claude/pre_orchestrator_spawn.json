@@ -1,0 +1,20 @@
+{
+  "cwd": "@REPO@",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PreToolUse",
+  "permission_mode": "default",
+  "prompt_id": "486a0f65-adbd-400b-bfbb-5c9a9b39a1fc",
+  "scratchpad_dir": "/tmp/claude-1000/-home-user-livegate-claude5/@CHAT@/scratchpad",
+  "session_id": "@CHAT@",
+  "tool_input": {
+    "description": "tempo review",
+    "prompt": "call: acc7156588b2991bea29217be8e15fd3\npart: @REPO@/.tempo/state/spools/add-subtract/0/review/call-01/prompt-01.md\nreply: @REPO@/.tempo/state/spools/add-subtract/0/review/call-01/output.txt",
+    "run_in_background": false,
+    "subagent_type": "tempo-review-claude-opus-5-5"
+  },
+  "tool_name": "Agent",
+  "tool_use_id": "toolu_013fhEtKKRuSzdsxSMTJzsYM",
+  "transcript_path": "@HOME@/.claude/projects/-home-user-livegate-claude5/@CHAT@.jsonl"
+}

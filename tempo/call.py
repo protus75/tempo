@@ -27,6 +27,7 @@ from tempo.checkout import Refusal
 from tempo.config import Config, ConfigSnapshot, Severity
 from tempo.driver import LlmStage, Spool, check_reply
 from tempo.effects import Effects
+from tempo.enginelog import BACKUPS as LOG_BACKUPS
 from tempo.git import Git
 from tempo.hosts import agent_path
 from tempo.journal import Event, EventType, Journal, render_ts
@@ -41,17 +42,17 @@ from tempo.thresh import record_outcome
 from tempo.tickets import TICKET_FILE, TICKETS_DIR
 from tempo.timers import Timers
 
-# Contract constants (TEMPO_PLAN.md section 22). P4c sets READ_PART_CHARS from the live gate.
-READ_PART_CHARS = 50_000
+# Contract constants (TEMPO_PLAN.md section 22), set from the P4c live gate.
+READ_PART_CHARS = 20_000
 RETRO_STUCK_S = 5400.0  # chupa's call_timeout default: the retro call deadline
 CALL_CLOSED = "subagent_call_closed"
 OWN_FILES = ("output.txt", "stop.txt", "call.json")
-# State the tools and hooks keep while a call runs: never a confinement finding.
-SIDE_STATE = ("session.json", "hooks", "jobs")
+# State the session, hooks, jobs, and engine log write while a subagent runs: outside the confinement snapshot.
+SIDE_STATE = ("session.json", "hooks", "jobs", "engine.log", *(f"engine.log.{i}" for i in range(1, LOG_BACKUPS + 1)))
 # Every surface that runs as a subagent; `pins` keys come from this set.
 SURFACES = ("implement", "review", "requisition_review", "triage", "author", "retro")
-# Codex carries effort; P4c confirms the level `max` maps to.
-CODEX_EFFORT = {"low": "low", "medium": "medium", "high": "high", "max": "xhigh"}
+# Codex carries effort; `max` is the highest level every Codex model offers (gpt-6-luna has no `ultra`).
+CODEX_EFFORT = {"low": "low", "medium": "medium", "high": "high", "max": "max"}
 AUTH_MARKERS = ("invalid api key", "please run /login", "not logged in", "oauth token has expired",
                 "401 unauthorized", "token has expired")
 DROUGHT = frozenset({"quota_exhausted", "rate_limited", "outage"})

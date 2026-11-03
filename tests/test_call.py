@@ -359,4 +359,4 @@ def test_implement_editing_its_ticket_is_a_confinement_failure(repo):
 def test_agent_names_clean_model_ids_and_carry_codex_effort():
     assert agent_name("claude", "review", "claude-opus-5-5", "high") == "tempo-review-claude-opus-5-5"
     assert agent_name("copilot", "implement", "gpt/6:luna", "low") == "tempo-implement-gpt-6-luna"
-    assert agent_name("codex", "review", "gpt-6-astra", "max") == "tempo-review-gpt-6-astra-xhigh"
+    assert agent_name("codex", "review", "gpt-6-astra", "max") == "tempo-review-gpt-6-astra-max"

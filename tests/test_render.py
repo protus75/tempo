@@ -33,12 +33,15 @@ def test_render_writes_agents_for_reachable_hosts_and_hooks_for_all(repo):
                       "tempo-triage-claude-sonnet-5-5.md"]
     # Codex carries effort; max maps to its highest level, and review runs only on the pinned model.
     codex = {p.name for p in (repo / ".codex/agents").iterdir()}
-    assert "tempo-review-gpt-6-astra-xhigh.toml" in codex
+    assert "tempo-review-gpt-6-astra-max.toml" in codex
     assert not any(n.startswith("tempo-review-gpt-6.1-sol") for n in codex)
     toml = (repo / ".codex/agents/tempo-implement-gpt-6.1-sol-high.toml").read_text()
     assert 'model = "gpt-6.1-sol"' in toml and 'model_reasoning_effort = "high"' in toml
-    # Copilot is not reachable: no model-bearing files, but its hooks and protocol block are written.
-    assert not (repo / ".github/agents").exists()
+    # Codex's start command is a skill, which names no model.
+    skill = (repo / ".agents/skills/tempo-run/SKILL.md").read_text()
+    assert skill.startswith("---\nname: tempo-run\n") and "model" not in skill.split("---")[1]
+    assert ".codex/tempo-orchestrator.md" in skill
+    assert (repo / ".github/agents/tempo-review-claude-opus-5-5.agent.md").is_file()
     assert json.loads((repo / ".github/hooks/tempo.json").read_text())["hooks"]["PreToolUse"][0]["command"] == "tempo hook copilot"
     for rel in ("CLAUDE.md", "AGENTS.md", ".github/copilot-instructions.md"):
         assert hostfiles.parse((repo / rel).read_bytes(), name="protocol") is not None, rel
@@ -76,12 +79,12 @@ def test_a_host_dropped_from_orchestrator_models_loses_its_model_bearing_files(r
     render.write(repo, config(repo), FS)
     lines = (repo / "config.yaml").read_text().splitlines(keepends=True)
     start = lines.index("  codex:\n")
-    text = "".join(lines[:start] + lines[start + 4:]).replace("{claude: claude-opus-5-5, codex: gpt-6-astra}",
-                                                             "{claude: claude-opus-5-5}")
+    text = "".join(lines[:start] + lines[start + 4:]).replace("codex: gpt-6-astra, ", "")
     (repo / "config.yaml").write_text(text)
     render.write(repo, config(repo), FS)
     assert not list((repo / ".codex/agents").glob("tempo-*"))
     assert not (repo / ".codex/tempo-orchestrator.md").exists()
+    assert not (repo / ".agents/skills/tempo-run/SKILL.md").exists()
     assert (repo / ".codex/hooks.json").is_file()
 
 

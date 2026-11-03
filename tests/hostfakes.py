@@ -1,14 +1,16 @@
 """Host fakes (AGENT_PLAN.md P4 step e): each host's hook payloads, a fake host that runs them through
-`hooks.handle`, and a fake subagent. The P4c live gate replaces the payload shapes with captured ones."""
+`tempo hook`, and a fake subagent. Field and tool names match the P4c live-gate captures (tests/captured)."""
 
 import asyncio
+import io
 import json
 import os
 import shlex
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
 from pathlib import Path
 
-from tempo import hooks
+from tempo.__main__ import main
 from tempo.checkout import Checkout
 from tempo.config import load_config
 from tempo.git import Git
@@ -35,8 +37,8 @@ TOOLS = {
                "message": "SendMessage", "stop": "TaskStop"},
     "copilot": {"read": "read_file", "search": "list_dir", "write": "create_file", "shell": "run_in_terminal",
                 "spawn": "runSubagent", "message": "send_to_agent", "stop": "stop_agent"},
-    "codex": {"read": "read_file", "search": "grep_files", "write": "apply_patch", "shell": "shell",
-              "spawn": "spawn_agent", "message": "send_input", "stop": "close_agent"},
+    "codex": {"read": "read_file", "search": "grep_files", "write": "apply_patch", "shell": "Bash",
+              "spawn": "collaborationspawn_agent", "message": "collaborationsend_message", "stop": "close_agent"},
 }
 
 
@@ -48,10 +50,10 @@ def tool_input(host: str, kind: str, *, path: str | None = None, command: str | 
         return {field: path} if path is not None else {"pattern": "x"}
     if kind == "write":
         if host == "codex":
-            return {"input": f"*** Begin Patch\n*** Add File: {path}\n+x\n*** End Patch"}
+            return {"command": f"*** Begin Patch\n*** Add File: {path}\n+x\n*** End Patch"}
         return {{"claude": "file_path", "copilot": "filePath"}[host]: path, "content": "x"}
     if kind == "shell":
-        return {"command": ["bash", "-lc", command]} if host == "codex" else {"command": command}
+        return {"command": command}
     if kind == "spawn":
         return {"claude": {"subagent_type": target, "prompt": prompt, "description": "tempo call"},
                 "copilot": {"agentName": target, "prompt": prompt},
@@ -78,6 +80,14 @@ def payload(host: str, event: str, *, chat: str, cwd: Path | str, agent: str | N
     return json.dumps(body).encode()
 
 
+def run_hook(host: str, data: bytes, repo: Path, clock) -> tuple[str, int]:
+    """`tempo hook <host>` as the host runs it: the CLI entry, so its engine log write is exercised too."""
+    out = io.StringIO()
+    with redirect_stdout(out), redirect_stderr(io.StringIO()):
+        code = main(["hook", host], cwd=repo, clock=clock, stdin=data)
+    return out.getvalue().strip(), code
+
+
 class Clock:
     def __init__(self) -> None:
         self.now = datetime(2026, 11, 2, 12, tzinfo=UTC)
@@ -87,7 +97,7 @@ class Clock:
 
 
 class FakeHost:
-    """One host's VS Code chat: its hooks run through `hooks.handle`, its shell runs `tempo tool` in-process."""
+    """One host's VS Code chat: its hooks run through `tempo hook`, its shell runs `tempo tool` in-process."""
 
     def __init__(self, host: str, repo: Path, *, clock: Clock | None = None, chat: str = "chat-1") -> None:
         self.host, self.repo, self.chat = host, repo, chat
@@ -97,9 +107,8 @@ class FakeHost:
         self.token: str | None = None
 
     def hook(self, event: str, **kw) -> tuple[bool | None, str]:
-        out, code = hooks.handle(self.host, payload(self.host, event, chat=kw.pop("chat", self.chat),
-                                                    cwd=kw.pop("cwd", self.repo), **kw),
-                                 cwd=self.repo, clock=self.clock, fs=LocalFileSystem())
+        out, _ = run_hook(self.host, payload(self.host, event, chat=kw.pop("chat", self.chat),
+                                             cwd=kw.pop("cwd", self.repo), **kw), self.repo, self.clock)
         if not out:
             return None, ""
         decision = json.loads(out)["hookSpecificOutput"]

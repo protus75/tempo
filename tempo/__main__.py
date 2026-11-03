@@ -21,6 +21,7 @@ from tempo.config import ConfigError, ConfigSnapshot, load_config, migrate_confi
 from tempo.control import PauseConsumer
 from tempo.daemon import DaemonCore, daemon_core
 from tempo.daemon import StartupBoundary
+from tempo.enginelog import EngineLog
 from tempo.git import Git
 from tempo.journal import Journal, JournalCorruption
 from tempo.lockfile import LockHeld, Lockfile
@@ -292,9 +293,13 @@ def _tool(tools: Tools, name: str, raw: str) -> int:
 
 
 def _hook(host: str, data: bytes, repo: Path, clock: Clock) -> int:
-    """Hooks fail closed: any fault denies, on every host."""
+    """Hooks fail closed: any fault denies, on every host. Every payload and its reply go to the engine log,
+    so a denied unparseable payload can be read back."""
     try:
         out, code = hooks.handle(host, data, cwd=repo, clock=clock, fs=LocalFileSystem())
+        if (root := hooks.find_repo(repo)) is not None:
+            EngineLog(load_config(None, cwd=root).state_dir / "engine.log", Redactor({}), clock).event(
+                "hook", host=host, payload=data.decode(errors="replace"), reply=out, exit=code)
     except Exception as exc:
         out, code = hosts.reply(False, f"tempo hook failed: {type(exc).__name__}: {exc}"), 2
     if out:

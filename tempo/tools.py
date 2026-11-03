@@ -48,9 +48,8 @@ from tempo.tickets import (TICKET_FILE, TICKETS_DIR, Ticket, TicketInvalid, _por
                            ticket_path, validate_ticket)
 from tempo.timers import Timers
 
-# Contract constant (TEMPO_PLAN.md section 22). A placeholder until P4c sets it below the shortest host
-# shell-command timeout.
-TOOL_CALL_S = 60.0
+# Contract constant (TEMPO_PLAN.md section 22): below Claude's 120 s shell-command timeout, with margin.
+TOOL_CALL_S = 90.0
 # The surfaces of the P4 orchestrator flow; triage, author, and retro get their tools in P5.
 FLOW_SURFACES = ("requisition_review", "implement", "review")
 HANDOFF = f"{TICKETS_DIR}/orchestrator/handoff.md"
