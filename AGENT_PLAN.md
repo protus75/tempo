@@ -30,7 +30,7 @@ you approve it. Each phase ends at a stop point, and nothing moves past a stop p
 | R6 | New repository `tempo` | P0 |
 | R7 | Rename every chupa reference in carried-over code, specs, tests, and docs | P1 |
 | R8 | Port the working system: carry its code, not its build evidence (§2.3), and remove its self-build machinery (§2.5) | §2.3, §2.5, P1, P2 |
-| R9 | `uv build` produces a wheel for PyPI. The wheel ships the AI rules as data files, and `tempo init` places them in the host repo's top-level folders (§6 explains why an installer cannot) | §6, P6 |
+| R9 | `uv build` produces a wheel for PyPI. The wheel ships the AI rules as package data, and `tempo init` renders them into the host repo's top-level folders (§6 explains why an installer cannot) | §6, P6 |
 | R10 | `TEMPO_PLAN.md` holds the product features from SEED_PLAN.md (latest seed), filled with "tempo". The seed's build-process sections and passages are left out. It is amended as §10 lists. | P1, §10 |
 | R11 | Every operator tunable lives in `config.yaml` and is validated at load. Contract constants stay in code, pinned by tests (§4.4.1). | §4.4, P4 |
 | R12 | When a host reports it hit its limit, tempo journals a cooldown and the session ends with a handoff. `/tempo-run` resumes with no lost state. There is no host failover and no cost accounting. | §4.4.5, §4.6, P2, P4 |
@@ -46,7 +46,7 @@ These come from read-only research on chupa at commit `63b89e4`.
 
 - **Invariant 1.** Stages communicate only through artifacts on disk plus the journal.
 - **Prompt rendering.**
-  - Prompts are rendered from `specs/<surface>.md` by `specs.render`.
+  - Prompts are rendered from `tempo/specs/<surface>.md` by `specs.render`.
   - The frontmatter is strict.
   - All untrusted input goes inside `<<…-data:begin name>>` blocks, and payload delimiters are quoted.
   - Prompts are capped at 400,000 characters.
@@ -392,7 +392,7 @@ stdout as the only channel. Tempo enforces the same in two places.
 - The implement subagent's shell commands must run in its worktree. The hook denies git, every agent CLI
   binary, `gh`, and publish commands. Allowed commands still run unsandboxed, as chupa's implement child
   did (chupa core: "fenced by gates, not jailed").
-- A subagent reads only under its call's recorded read root, plus the engine `specs/` and its call's parts.
+- A subagent reads only under its call's recorded read root, plus the engine `tempo/specs/` and its call's parts.
 - A subagent never spawns, messages, or resumes an agent (R2).
 - The spawn prompt is exactly the call id and its paths, and the agent spawned is the one `prepare`
   named.
@@ -794,7 +794,7 @@ covers every model on it.
 ## 5. Governing system for three hosts (R5)
 
 **Agent files are thin.** A surface agent says only: read the prompt parts at the given paths, write the
-reply JSON to the given path, nothing else. `specs/*.md` stays the only description of what each surface
+reply JSON to the given path, nothing else. `tempo/specs/*.md` stays the only description of what each surface
 does, and `prepare` renders it per call.
 
 | | Claude Code | GitHub Copilot | Codex |
@@ -894,16 +894,21 @@ same-turn override, so it would need its own escape path.
   top-level files into a wheel.
 - **Names.** The distribution is `tempo-agents`, because `tempo` is taken on PyPI. The import name and
   CLI are `tempo`.
-- **Data files.** `[tool.hatch.build.targets.wheel.shared-data]` maps each rendered host file to
-  `share/tempo/rules/<path>`.
+- **Package data, no shared-data.** Every host file depends on the repo's `config.yaml`, so the wheel
+  ships the sources, not rendered copies: `tempo/rules/` (the rule templates, `session.md`,
+  `tickets.md`, and the default `config.yaml`) and `tempo/specs/` (the prompt specs, moved from the
+  top-level `specs/` so an installed engine can load them). Both ship inside the `tempo` package.
 - **Why `tempo init` is needed.** An installer places data files under the environment prefix, never in
   a project folder, and a wheel runs no install-time code. So `tempo init`:
-  - copies the files into the host repo's top level
-  - merges the managed blocks in the three instruction files
   - writes a default `config.yaml` if there is none
-  - re-renders the model-bearing agent files from the repo's `config.yaml`
-  - skips and reports any other file that differs, including existing JSON configs, which the user
-    merges by hand
+  - merges `tempo:core` into each configured host's instruction file (as `tempo core` does)
+  - runs `render`: the `tempo:protocol` and `tempo:session` blocks in all three instruction files, the
+    hook files, and the model-bearing agent files from the repo's `config.yaml`
+  - writes `docs/tempo/tickets.md`, or skips and reports it when an existing copy differs
+- **Hook files merge.** `render` owns only the top-level `hooks` key (plus `version` on Copilot) of an
+  existing hook JSON file such as `.claude/settings.json`, and keeps every other key. A file that is not
+  a JSON object is refused with a paved road. Drift compares the merged result, so a repo with its own
+  settings can still start a session.
 - **Publishing.** A publish workflow is deferred until after P7. Until then a release is a manual
   `uv publish`.
 
@@ -1208,13 +1213,18 @@ and rework run requisition review on each proposal). Each becomes separate prepa
 ### P6 — Governing files and packaging
 
 **Work:**
-- Host files from `render`, `tempo init`, and pyproject shared-data.
+- Host files from `render` and `tempo init` (§6). Hook JSON files merge.
+- Move `specs/` to `tempo/specs/`; every path naming it is renamed in place.
 - The `tempo:session` block (§5.1): `tempo/rules/session.md`, rendered into all three instruction
   files with the same marker and idempotence contract as `tempo:core`.
-- `tempo lint <stem>`, and `docs/tempo/tickets.md` extracted from TEMPO_PLAN §13 (§5.1).
+- `tempo lint <stem>`, and `docs/tempo/tickets.md` extracted from TEMPO_PLAN §13 (§5.1). Its source is
+  `tempo/rules/tickets.md`.
+- `tests/fixturerepo.py` sets up its repo through `init`.
 
 **Exit:**
-- The wheel holds `share/tempo/rules/**`.
+- The wheel holds `tempo/rules/**` and `tempo/specs/**`.
+- `render` into a repo with its own `.claude/settings.json` keeps its other keys, and `begin_session`
+  starts there.
 - `tempo init` writes `tempo:session` into all three instruction files, and a second run is
   byte-identical.
 - `tempo lint` exits 0 on a valid filled ticket, and on an invalid one exits nonzero with each finding
@@ -1281,3 +1291,4 @@ changes are made in the phase shown, so the plan and the code stay in step.
   `tempo:session`. Rule set B is replaced by the `tempo:session` block.
 - **P6 (§13):** Add the `lint <stem>` verb to touchpoint 1, idea intake.
 - **P6 (§18):** The "virtual project" rule ends at the release path, the PyPI wheel.
+- **P6 (§8, §12, §13):** The prompt specs live at `tempo/specs/<surface>.md`.
