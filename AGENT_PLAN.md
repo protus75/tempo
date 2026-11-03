@@ -912,7 +912,9 @@ same-turn override, so it would need its own escape path.
   a JSON object is refused with a paved road. Drift compares the merged result, so a repo with its own
   settings can still start a session.
 - **Publishing.** A publish workflow is deferred until after P7. Until then a release is a manual
-  `uv publish`. The sdist is an allowlist (`tempo/`, `README.md`, `pyproject.toml`): before 0.1.0, it
+  `uv run python -m dev.release`: it builds, checks the sdist allowlist, smoke-tests the wheel in a fresh
+  venv, and runs `uv publish` with `UV_PUBLISH_TOKEN` (`--check` stops before the upload). The sdist is
+  an allowlist (`tempo/`, `README.md`, `pyproject.toml`): before 0.1.0, it
   took every untracked file, including `.claude/` notes.
 
 ## 7. Decisions (decided 2026-11-01)
