@@ -905,6 +905,8 @@ same-turn override, so it would need its own escape path.
   - runs `render`: the `tempo:protocol` and `tempo:session` blocks in all three instruction files, the
     hook files, and the model-bearing agent files from the repo's `config.yaml`
   - writes `docs/tempo/tickets.md`, or skips and reports it when an existing copy differs
+  - appends `state_dir`, and `worktree_root` when set, to `.gitignore` as `/<path>/` lines when they
+    sit inside the repo and no line already names them, so the journal and worktrees are never committed
 - **Hook files merge.** `render` owns only the top-level `hooks` key (plus `version` on Copilot) of an
   existing hook JSON file such as `.claude/settings.json`, and keeps every other key. A file that is not
   a JSON object is refused with a paved road. Drift compares the merged result, so a repo with its own
