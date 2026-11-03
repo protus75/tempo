@@ -1246,9 +1246,11 @@ Only Claude passed the live gate, so P7 runs Claude.
   because every retry is a new `start`.
 - **One `/tempo-run`, three tickets**, on the extension's default approvals (Manual):
   - `add-subtract`: the fixture ticket, end to end.
-  - `big-context`: a small change whose Context lists a data file sized with tempo's renderer, so the
-    requisition_review prompt (ticket plus the base Implement render) is just under `RENDER_BOUND_CHARS`.
-    The Implement render alone stays under authoring headroom.
+  - `big-context`: a small change whose ticket body carries a bulk code list, sized with tempo's
+    renderer. The ticket text appears twice in the requisition_review prompt (alone and inside the base
+    Implement render), so that prompt is just under `RENDER_BOUND_CHARS` (399,493 characters, 20 parts)
+    while the Implement render (200,491) stays under authoring headroom. A Context file cannot do this:
+    it appears once, and headroom caps the Implement render at 300,000.
   - `retry-escalate` at `agent_tier: low`: its Verification also runs `gate.py`, outside the scope
     fence. It fails its first 3 runs in the ticket worktree (a counter outside the repo), passes in the
     merge-base worktree (so the failure is not attributed to main), and passes from run 4. The expected
